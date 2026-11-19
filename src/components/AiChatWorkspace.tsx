@@ -1,0 +1,1058 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AlertCircle,
+  Check,
+  Copy,
+  FileText,
+  GraduationCap,
+  History,
+  Loader2,
+  MessageSquarePlus,
+  MessageSquareText,
+  Paperclip,
+  Send,
+  Sparkles,
+  Trash2,
+  X,
+} from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
+import { postSseStream } from '../lib/sseClient';
+import {
+  createAiMessage,
+  createAiSession,
+  deleteAiSession,
+  getMaterialSignedUrl,
+  isSupabaseConfigured,
+  listAiMessages,
+  listAiSessions,
+  recordStudyActivity,
+  updateAiSession,
+  uploadSessionImageToStorage,
+} from '../lib/supabase';
+import type {
+  AiMessageRecord,
+  AiSessionRecord,
+  ImageActionType,
+  SnapImageAttachment,
+  StudyMaterialRecord,
+  StudySummaryRecord,
+} from '../types/brainstine';
+import { AcademicContentRenderer } from './AcademicContentRenderer';
+import {
+  SnapAttachmentPreview,
+  SnapTriggerButtons,
+} from './SnapPhotoControl';
+
+interface AiChatWorkspaceProps {
+  materials: StudyMaterialRecord[];
+  summaries: StudySummaryRecord[];
+  geminiConfigured: boolean;
+  onActivityRecorded: () => void;
+  onSendImageToTutor: (attachment: SnapImageAttachment) => void;
+}
+
+const STARTER_PROMPTS = [
+  {
+    subject: 'Biology & Medicine',
+    prompt: 'Explain the mechanism of action potentials across a neuronal membrane step by step.',
+  },
+  {
+    subject: 'Chemistry',
+    prompt: 'Compare SN1 and SN2 nucleophilic substitution reactions with energy diagrams and examples.',
+  },
+  {
+    subject: 'Mathematics',
+    prompt: 'Solve the integral of x * e^(2x) dx using integration by parts and show every step.',
+  },
+  {
+    subject: 'Computer Science',
+    prompt: 'Explain time and space complexity differences between Merge Sort and Quick Sort with code.',
+  },
+];
+
+export function AiChatWorkspace({
+  materials,
+  summaries,
+  geminiConfigured,
+  onActivityRecorded,
+  onSendImageToTutor,
+}: AiChatWorkspaceProps) {
+  const { user } = useAuth();
+
+  const [sessions, setSessions] = useState<AiSessionRecord[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<AiMessageRecord[]>([]);
+  const [loadingSessions, setLoadingSessions] = useState(true);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const [historySidebarOpen, setHistorySidebarOpen] = useState(false);
+
+  const [inputText, setInputText] = useState('');
+  const [sending, setSending] = useState(false);
+  const [streamingContent, setStreamingContent] = useState('');
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Document Context attachment
+  const [contextPickerOpen, setContextPickerOpen] = useState(false);
+  const [selectedMaterialId, setSelectedMaterialId] = useState<string | null>(null);
+  const [selectedSummaryId, setSelectedSummaryId] = useState<string | null>(null);
+
+  // Image Snap/Upload Context
+  const [pendingImage, setPendingImage] = useState<SnapImageAttachment | null>(null);
+  const [activeSessionImage, setActiveSessionImage] = useState<SnapImageAttachment | null>(null);
+  const [signedImageUrls, setSignedImageUrls] = useState<Record<string, string>>({});
+
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const inFlightRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!sending) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const timer = setInterval(() => {
+      setElapsedSeconds((prev) => prev + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [sending]);
+
+  const activeSession = useMemo(
+    () => sessions.find((s) => s.id === activeSessionId) || null,
+    [sessions, activeSessionId]
+  );
+
+  const activeDocumentContext = useMemo(() => {
+    if (selectedMaterialId) {
+      const mat = materials.find((m) => m.id === selectedMaterialId);
+      if (mat) {
+        return {
+          title: mat.title,
+          type: `Uploaded ${mat.material_type.toUpperCase()} Material`,
+          content: mat.extracted_text,
+        };
+      }
+    }
+    if (selectedSummaryId) {
+      const sum = summaries.find((s) => s.id === selectedSummaryId);
+      if (sum) {
+        return {
+          title: sum.title,
+          type: 'Saved Study Summary',
+          content: sum.markdown_content,
+        };
+      }
+    }
+    return null;
+  }, [materials, summaries, selectedMaterialId, selectedSummaryId]);
+
+  const loadSessions = useCallback(async () => {
+    if (!user || !isSupabaseConfigured) {
+      setLoadingSessions(false);
+      return;
+    }
+    try {
+      const list = await listAiSessions(user.id, 'chat');
+      setSessions(list);
+    } catch (err) {
+      console.warn('Could not load chat sessions:', err);
+    } finally {
+      setLoadingSessions(false);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    loadSessions();
+  }, [loadSessions]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, sending, streamingContent]);
+
+  // Resolve signed URLs for stored message images
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+    const pathsToResolve = messages
+      .map((m) => m.image_path)
+      .filter((p): p is string => Boolean(p && !signedImageUrls[p]));
+
+    if (pathsToResolve.length === 0) return;
+
+    let cancelled = false;
+    Promise.all(
+      pathsToResolve.map(async (path) => {
+        try {
+          const url = await getMaterialSignedUrl(path);
+          return [path, url] as const;
+        } catch {
+          return null;
+        }
+      })
+    ).then((entries) => {
+      if (cancelled) return;
+      const updates: Record<string, string> = {};
+      for (const entry of entries) {
+        if (entry) updates[entry[0]] = entry[1];
+      }
+      if (Object.keys(updates).length > 0) {
+        setSignedImageUrls((prev) => ({ ...prev, ...updates }));
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [messages, signedImageUrls]);
+
+  const handleSelectSession = async (session: AiSessionRecord) => {
+    abortControllerRef.current?.abort();
+    inFlightRef.current = false;
+    setSending(false);
+    setStreamingContent('');
+    setActiveSessionId(session.id);
+    setSelectedMaterialId(session.attached_material_id);
+    setSelectedSummaryId(session.attached_summary_id);
+    setPendingImage(null);
+    setActiveSessionImage(null);
+    setError(null);
+    setHistorySidebarOpen(false);
+
+    if (!user || !isSupabaseConfigured) return;
+    setLoadingMessages(true);
+    try {
+      const loaded = await listAiMessages(user.id, session.id);
+      setMessages(loaded);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Unable to load conversation.');
+    } finally {
+      setLoadingMessages(false);
+    }
+  };
+
+  const handleNewChat = () => {
+    abortControllerRef.current?.abort();
+    inFlightRef.current = false;
+    setSending(false);
+    setStreamingContent('');
+    setActiveSessionId(null);
+    setMessages([]);
+    setInputText('');
+    setPendingImage(null);
+    setActiveSessionImage(null);
+    setError(null);
+    setHistorySidebarOpen(false);
+  };
+
+  const handleDeleteSession = async (
+    e: React.MouseEvent,
+    sessionId: string
+  ) => {
+    e.stopPropagation();
+    if (!user || !isSupabaseConfigured) return;
+    try {
+      await deleteAiSession(user.id, sessionId);
+      setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      if (activeSessionId === sessionId) {
+        handleNewChat();
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to delete chat session.');
+    }
+  };
+
+  const handleAttachContext = async (
+    materialId: string | null,
+    summaryId: string | null
+  ) => {
+    setSelectedMaterialId(materialId);
+    setSelectedSummaryId(summaryId);
+    setContextPickerOpen(false);
+
+    if (user && isSupabaseConfigured && activeSessionId) {
+      await updateAiSession(user.id, activeSessionId, {
+        attached_material_id: materialId,
+        attached_summary_id: summaryId,
+      }).catch(() => {});
+    }
+  };
+
+  const handleCopyMessage = async (id: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId((curr) => (curr === id ? null : curr)), 1800);
+    } catch {
+      // ignore clipboard errors
+    }
+  };
+
+  const sendMessage = async (options?: {
+    overrideText?: string;
+    imageAction?: ImageActionType;
+    explanationStyle?: 'default' | 'shorter' | 'simpler' | 'detailed';
+  }) => {
+    if (inFlightRef.current) return;
+
+    const cleanText = (options?.overrideText ?? inputText).trim();
+    const imageToSend = pendingImage || activeSessionImage;
+
+    if (!cleanText && !pendingImage && !options?.imageAction) {
+      setError('Enter a question or attach an image to ask Brainstine AI Chat.');
+      return;
+    }
+
+    inFlightRef.current = true;
+    setError(null);
+    setSending(true);
+    setStreamingContent('');
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    const isFirstTurn = messages.length === 0;
+    const isNewPendingImage = Boolean(pendingImage);
+    const outgoingImage = pendingImage;
+    const previousActiveImage = activeSessionImage;
+    const typedInputSnapshot = !options?.overrideText ? inputText : null;
+
+    if (!options?.overrideText) {
+      setInputText('');
+    }
+    if (pendingImage) {
+      setActiveSessionImage(pendingImage);
+      setPendingImage(null);
+    }
+
+    const displayUserContent =
+      cleanText ||
+      (options?.imageAction
+        ? `Analyze attached image (${options.imageAction.replace('_', ' ')})`
+        : 'Analyze attached study image');
+
+    const tempUserMsg: AiMessageRecord = {
+      id: `local-user-${Date.now()}`,
+      session_id: activeSessionId || 'local',
+      user_id: user?.id || 'local',
+      role: 'user',
+      content: displayUserContent,
+      image_path: null,
+      image_mime: outgoingImage?.mimeType || null,
+      action_tag: options?.imageAction || null,
+      created_at: new Date().toISOString(),
+      localPreviewUrl: outgoingImage?.previewUrl,
+    };
+
+    const historyForApi = messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
+    setMessages((prev) => [...prev, tempUserMsg]);
+
+    try {
+      const data = await postSseStream<{
+        reply: string;
+        suggestedTitle?: string;
+        subjectArea?: string;
+      }>({
+        url: '/api/ai/chat/stream',
+        body: {
+          message: displayUserContent,
+          history: historyForApi,
+          documentContext: activeDocumentContext,
+          image: imageToSend
+            ? { data: imageToSend.base64, mimeType: imageToSend.mimeType }
+            : null,
+          imageAction: options?.imageAction,
+          explanationStyle: options?.explanationStyle || 'default',
+          needsTitle: isFirstTurn,
+        },
+        signal: controller.signal,
+        idleTimeoutMs: 150000,
+        fallbackErrorMessage: 'Failed to get AI Chat response.',
+        onChunk: (_delta, accumulated) => {
+          setStreamingContent(accumulated);
+        },
+      });
+
+      const assistantReply: string = data.reply || '';
+      const suggestedTitle: string | undefined = data.suggestedTitle;
+      const subjectArea: string | undefined = data.subjectArea;
+      setStreamingContent('');
+
+      let resolvedSessionId = activeSessionId;
+      let uploadedImagePath: string | null = null;
+
+      if (user && isSupabaseConfigured) {
+        try {
+          if (isNewPendingImage && outgoingImage?.file) {
+            try {
+              uploadedImagePath = await uploadSessionImageToStorage(
+                user.id,
+                outgoingImage.file
+              );
+            } catch (uploadErr) {
+              console.warn('Optional session image upload failed:', uploadErr);
+            }
+          }
+
+          if (!resolvedSessionId) {
+            const created = await createAiSession({
+              userId: user.id,
+              sessionType: 'chat',
+              title:
+                suggestedTitle ||
+                displayUserContent.slice(0, 48) ||
+                'Academic Study Chat',
+              subjectArea: subjectArea || 'General Studies',
+              attachedMaterialId: selectedMaterialId,
+              attachedSummaryId: selectedSummaryId,
+              activeImagePath: uploadedImagePath,
+              activeImageMime: outgoingImage?.mimeType || null,
+            });
+            resolvedSessionId = created.id;
+            setActiveSessionId(created.id);
+            setSessions((prev) => [created, ...prev]);
+          } else {
+            const updates: Partial<AiSessionRecord> = {};
+            if (suggestedTitle) updates.title = suggestedTitle;
+            if (subjectArea) updates.subject_area = subjectArea;
+            if (uploadedImagePath) {
+              updates.active_image_path = uploadedImagePath;
+              updates.active_image_mime = outgoingImage?.mimeType || null;
+            }
+            await updateAiSession(user.id, resolvedSessionId, updates);
+            setSessions((prev) =>
+              prev.map((s) =>
+                s.id === resolvedSessionId
+                  ? {
+                      ...s,
+                      ...(suggestedTitle ? { title: suggestedTitle } : {}),
+                      ...(subjectArea ? { subject_area: subjectArea } : {}),
+                      updated_at: new Date().toISOString(),
+                    }
+                  : s
+              )
+            );
+          }
+
+          const savedUserMsg = await createAiMessage({
+            sessionId: resolvedSessionId,
+            userId: user.id,
+            role: 'user',
+            content: displayUserContent,
+            imagePath: uploadedImagePath,
+            imageMime: outgoingImage?.mimeType || null,
+            actionTag: options?.imageAction || null,
+          });
+
+          const savedAssistantMsg = await createAiMessage({
+            sessionId: resolvedSessionId,
+            userId: user.id,
+            role: 'assistant',
+            content: assistantReply,
+            actionTag: options?.explanationStyle || options?.imageAction || null,
+          });
+
+          if (isFirstTurn) {
+            await recordStudyActivity({
+              userId: user.id,
+              activityType: 'chat',
+              title: suggestedTitle || 'AI Academic Chat',
+              detail: `${subjectArea || 'Academic'} · ${displayUserContent.slice(0, 72)}`,
+              materialType: outgoingImage ? 'image' : 'text',
+            });
+            onActivityRecorded();
+          }
+
+          setMessages((prev) => [
+            ...prev.filter((m) => m.id !== tempUserMsg.id),
+            { ...savedUserMsg, localPreviewUrl: outgoingImage?.previewUrl },
+            savedAssistantMsg,
+          ]);
+        } catch (persistErr: unknown) {
+          const localAssistantMsg: AiMessageRecord = {
+            id: `local-ai-${Date.now()}`,
+            session_id: resolvedSessionId || 'local',
+            user_id: user.id,
+            role: 'assistant',
+            content: assistantReply,
+            image_path: null,
+            image_mime: null,
+            action_tag: options?.explanationStyle || options?.imageAction || null,
+            created_at: new Date().toISOString(),
+          };
+          setMessages((prev) => [...prev, localAssistantMsg]);
+          setError(
+            persistErr instanceof Error
+              ? `Response generated, but could not save to cloud history: ${persistErr.message}`
+              : 'Response generated, but could not save to cloud history.'
+          );
+        }
+      } else {
+        const localAssistantMsg: AiMessageRecord = {
+          id: `local-ai-${Date.now()}`,
+          session_id: 'local',
+          user_id: 'local',
+          role: 'assistant',
+          content: assistantReply,
+          image_path: null,
+          image_mime: null,
+          action_tag: options?.explanationStyle || null,
+          created_at: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, localAssistantMsg]);
+      }
+    } catch (err: unknown) {
+      if ((err as { name?: string })?.name === 'AbortError' && controller.signal.aborted) {
+        setMessages((prev) => prev.filter((m) => m.id !== tempUserMsg.id));
+        return;
+      }
+      setError(err instanceof Error ? err.message : 'Unable to send chat message.');
+      setMessages((prev) => prev.filter((m) => m.id !== tempUserMsg.id));
+      if (typedInputSnapshot !== null) {
+        setInputText(typedInputSnapshot);
+      }
+      if (isNewPendingImage && outgoingImage) {
+        setPendingImage(outgoingImage);
+        setActiveSessionImage(previousActiveImage);
+      }
+    } finally {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+        setStreamingContent('');
+        setSending(false);
+        inFlightRef.current = false;
+      }
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (!inFlightRef.current && !sending) {
+        sendMessage();
+      }
+    }
+  };
+
+  const previewAttachment = pendingImage || activeSessionImage;
+
+  return (
+    <div className="flex flex-col gap-4 lg:h-[calc(100vh-8.5rem)] lg:flex-row">
+      {/* Left Conversation History Sidebar */}
+      <aside
+        className={`${
+          historySidebarOpen ? 'block' : 'hidden'
+        } w-full shrink-0 flex-col rounded-2xl border border-slate-200 bg-white lg:flex lg:w-72 dark:border-slate-800 dark:bg-[#0D162B]`}
+      >
+        <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-4 py-3.5 select-none dark:border-slate-800">
+          <div className="flex items-center gap-2">
+            <History className="h-4 w-4 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+            <h2 className="font-display text-sm font-bold text-slate-900 dark:text-white">
+              Chat History
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={handleNewChat}
+            className="inline-flex items-center gap-1 rounded-lg bg-[#0F1E3D] px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-[#192F5D] dark:bg-blue-600 dark:hover:bg-blue-500"
+          >
+            <MessageSquarePlus className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>New Chat</span>
+          </button>
+        </div>
+
+        <div className="max-h-64 flex-1 overflow-y-auto p-2.5 lg:max-h-none">
+          {!isSupabaseConfigured ? (
+            <p className="p-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+              Current session active locally. Configure Supabase to persist and reopen chat history across sessions.
+            </p>
+          ) : loadingSessions ? (
+            <div className="space-y-2 p-2">
+              <div className="h-12 animate-pulse rounded-xl bg-slate-100 dark:bg-slate-800" />
+              <div className="h-12 animate-pulse rounded-xl bg-slate-100 dark:bg-slate-800" />
+            </div>
+          ) : sessions.length === 0 ? (
+            <div className="px-3 py-8 text-center">
+              <MessageSquareText className="mx-auto h-6 w-6 text-slate-400" aria-hidden="true" />
+              <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                Your saved academic conversations will appear here.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-1">
+              {sessions.map((session) => {
+                const isActive = session.id === activeSessionId;
+                return (
+                  <div
+                    key={session.id}
+                    onClick={() => handleSelectSession(session)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        handleSelectSession(session);
+                      }
+                    }}
+                    className={`group flex cursor-pointer items-start justify-between gap-2 rounded-xl px-3 py-2.5 transition-colors select-none ${
+                      isActive
+                        ? 'bg-blue-50 text-blue-950 dark:bg-blue-950/50 dark:text-white'
+                        : 'text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800/70'
+                    }`}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-xs font-semibold">
+                        {session.title}
+                      </p>
+                      <p className="mt-0.5 truncate text-[11px] text-slate-500 dark:text-slate-400">
+                        {session.subject_area} · {new Date(session.updated_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(e) => handleDeleteSession(e, session.id)}
+                      aria-label={`Delete ${session.title}`}
+                      className="rounded-md p-1 text-slate-400 opacity-70 transition-opacity hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100 dark:hover:bg-rose-950/40 dark:hover:text-rose-400"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </aside>
+
+      {/* Main Conversational Panel */}
+      <section className="flex min-h-[540px] min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0D162B]">
+        {/* Top Chat Workspace Bar */}
+        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3.5 select-none dark:border-slate-800">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setHistorySidebarOpen((prev) => !prev)}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-semibold text-slate-700 lg:hidden dark:border-slate-700 dark:text-slate-200"
+              >
+                <History className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>History</span>
+              </button>
+              <h1 className="truncate font-display text-base font-bold text-slate-900 dark:text-white">
+                {activeSession?.title || 'AI Academic Chatbot'}
+              </h1>
+            </div>
+            <p className="mt-0.5 truncate text-xs text-slate-500 dark:text-slate-400">
+              {activeSession?.subject_area || 'All academic subjects'}
+              {activeDocumentContext
+                ? ` · Grounded in "${activeDocumentContext.title}"`
+                : ' · Context-aware Q&A, problem solving & photo analysis'}
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* Document Context Picker */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setContextPickerOpen((prev) => !prev)}
+                className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  activeDocumentContext
+                    ? 'border-blue-300 bg-blue-50 text-blue-800 dark:border-cyan-700 dark:bg-cyan-950/40 dark:text-cyan-300'
+                    : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800'
+                }`}
+              >
+                <Paperclip className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>
+                  {activeDocumentContext ? 'Study Doc Attached' : 'Attach Study Doc'}
+                </span>
+              </button>
+
+              {contextPickerOpen && (
+                <div className="absolute right-0 z-30 mt-2 w-80 rounded-xl border border-slate-200 bg-white p-3 shadow-xl dark:border-slate-700 dark:bg-[#0B1325]">
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-2 dark:border-slate-800">
+                    <p className="text-xs font-bold text-slate-900 dark:text-white">
+                      Ground Chat in Study Material
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setContextPickerOpen(false)}
+                      className="rounded p-0.5 text-slate-400 hover:text-slate-600"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  <div className="mt-2 max-h-60 space-y-2 overflow-y-auto">
+                    {activeDocumentContext && (
+                      <button
+                        type="button"
+                        onClick={() => handleAttachContext(null, null)}
+                        className="w-full rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-left text-xs font-semibold text-rose-700 hover:bg-rose-100 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-300"
+                      >
+                        Detach Current Document
+                      </button>
+                    )}
+
+                    {materials.length === 0 && summaries.length === 0 ? (
+                      <p className="py-3 text-center text-xs text-slate-500 dark:text-slate-400">
+                        No uploaded materials or saved summaries found yet.
+                      </p>
+                    ) : (
+                      <>
+                        {materials.length > 0 && (
+                          <div>
+                            <p className="px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                              Uploaded Materials
+                            </p>
+                            <div className="mt-1 space-y-1">
+                              {materials.map((m) => (
+                                <button
+                                  key={m.id}
+                                  type="button"
+                                  onClick={() => handleAttachContext(m.id, null)}
+                                  className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors ${
+                                    selectedMaterialId === m.id
+                                      ? 'bg-blue-50 font-semibold text-blue-800 dark:bg-blue-950/60 dark:text-cyan-300'
+                                      : 'text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
+                                  }`}
+                                >
+                                  <FileText className="h-3.5 w-3.5 shrink-0" />
+                                  <span className="truncate">{m.title}</span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {summaries.length > 0 && (
+                          <div>
+                            <p className="px-1 pt-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                              Saved Summaries
+                            </p>
+                            <div className="mt-1 space-y-1">
+                              {summaries.map((s) => (
+                                <button
+                                  key={s.id}
+                                  type="button"
+                                  onClick={() => handleAttachContext(null, s.id)}
+                                  className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors ${
+                                    selectedSummaryId === s.id
+                                      ? 'bg-blue-50 font-semibold text-blue-800 dark:bg-blue-950/60 dark:text-cyan-300'
+                                      : 'text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
+                                  }`}
+                                >
+                                  <Sparkles className="h-3.5 w-3.5 shrink-0" />
+                                  <span className="truncate">{s.title}</span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={handleNewChat}
+              className="hidden items-center gap-1 rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 sm:inline-flex dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              <MessageSquarePlus className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>New</span>
+            </button>
+          </div>
+        </header>
+
+        {/* Missing API key notice */}
+        {!geminiConfigured && (
+          <div className="mx-5 mt-4 flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <div>
+              <p className="font-semibold">GEMINI_API_KEY is not configured</p>
+              <p className="mt-0.5">
+                Add <code className="font-mono">GEMINI_API_KEY</code> in Secrets to enable live AI Academic Chat and image understanding. Saved conversation history remains browsable.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Messages Thread */}
+        <div className="flex-1 overflow-y-auto px-5 py-5">
+          {loadingMessages ? (
+            <div className="flex h-full items-center justify-center py-12">
+              <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
+            </div>
+          ) : messages.length === 0 ? (
+            <div className="mx-auto flex max-w-2xl flex-col items-center justify-center py-8 text-center">
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-cyan-400">
+                <Sparkles className="h-6 w-6" aria-hidden="true" />
+              </div>
+              <h2 className="mt-4 font-display text-xl font-bold text-slate-900 select-none dark:text-white">
+                Ask Anything Across Any Academic Discipline
+              </h2>
+              <p className="mt-2 max-w-lg text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+                Work through equations step by step, compare complex concepts, attach your uploaded course notes, or snap a photo of a problem or textbook diagram.
+              </p>
+
+              <div className="mt-6 grid w-full grid-cols-1 gap-3 text-left sm:grid-cols-2">
+                {STARTER_PROMPTS.map((item) => (
+                  <button
+                    key={item.subject}
+                    type="button"
+                    disabled={sending}
+                    onClick={() => sendMessage({ overrideText: item.prompt })}
+                    className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 text-left transition-colors hover:border-blue-300 hover:bg-blue-50/60 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900/50 dark:hover:border-cyan-700 dark:hover:bg-slate-800/80"
+                  >
+                    <p className="text-[11px] font-semibold text-blue-700 select-none dark:text-cyan-400">
+                      {item.subject}
+                    </p>
+                    <p className="mt-1 text-xs leading-relaxed text-slate-700 dark:text-slate-200">
+                      {item.prompt}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="mx-auto max-w-3xl space-y-5">
+              {messages.map((msg, idx) => {
+                const isUser = msg.role === 'user';
+                const imgSrc =
+                  msg.localPreviewUrl ||
+                  (msg.image_path ? signedImageUrls[msg.image_path] : undefined);
+                const isLatestAssistant = !isUser && idx === messages.length - 1;
+
+                return (
+                  <div
+                    key={msg.id}
+                    className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}
+                  >
+                    <div
+                      className={`max-w-[90%] rounded-2xl px-4 py-3.5 sm:max-w-[85%] ${
+                        isUser
+                          ? 'bg-[#0F1E3D] text-white dark:bg-blue-600'
+                          : 'w-full border border-slate-200 bg-slate-50/70 text-slate-900 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-100'
+                      }`}
+                    >
+                      {imgSrc && (
+                        <div className="mb-2.5 overflow-hidden rounded-xl border border-white/15 bg-slate-950/20">
+                          <img
+                            src={imgSrc}
+                            alt="Uploaded study snapshot"
+                            className="max-h-64 w-auto object-contain"
+                          />
+                        </div>
+                      )}
+
+                      {isUser ? (
+                        <p className="whitespace-pre-wrap text-sm leading-relaxed select-text">
+                          {msg.content}
+                        </p>
+                      ) : (
+                        <AcademicContentRenderer content={msg.content} />
+                      )}
+                    </div>
+
+                    {!isUser && (
+                      <div className="mt-1.5 flex flex-wrap items-center gap-2 pl-1 select-none">
+                        <button
+                          type="button"
+                          onClick={() => handleCopyMessage(msg.id, msg.content)}
+                          className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                        >
+                          {copiedId === msg.id ? (
+                            <>
+                              <Check className="h-3 w-3 text-emerald-500" />
+                              <span>Copied</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="h-3 w-3" />
+                              <span>Copy</span>
+                            </>
+                          )}
+                        </button>
+
+                        {isLatestAssistant && (
+                          <>
+                            <span className="text-slate-300 dark:text-slate-700">·</span>
+                            <button
+                              type="button"
+                              disabled={sending}
+                              onClick={() =>
+                                sendMessage({
+                                  overrideText:
+                                    'Summarize your previous explanation into a much shorter version with just the key points.',
+                                  explanationStyle: 'shorter',
+                                })
+                              }
+                              className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                            >
+                              Make Shorter
+                            </button>
+                            <button
+                              type="button"
+                              disabled={sending}
+                              onClick={() =>
+                                sendMessage({
+                                  overrideText:
+                                    'Re-explain your previous answer in much simpler, beginner-friendly terms with a clear analogy.',
+                                  explanationStyle: 'simpler',
+                                })
+                              }
+                              className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                            >
+                              Explain Simpler
+                            </button>
+                            <button
+                              type="button"
+                              disabled={sending}
+                              onClick={() =>
+                                sendMessage({
+                                  overrideText:
+                                    'Expand your previous explanation with deeper academic detail, mechanisms, and concrete examples.',
+                                  explanationStyle: 'detailed',
+                                })
+                              }
+                              className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                            >
+                              More Detailed
+                            </button>
+                            {activeSessionImage && (
+                              <button
+                                type="button"
+                                disabled={sending}
+                                onClick={() => onSendImageToTutor(activeSessionImage)}
+                                className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-100 dark:border-cyan-800 dark:bg-cyan-950/40 dark:text-cyan-300"
+                              >
+                                <GraduationCap className="h-3 w-3" />
+                                <span>Open in AI Tutor</span>
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {sending && streamingContent ? (
+                <div className="flex flex-col items-start">
+                  <div className="w-full max-w-[90%] rounded-2xl border border-blue-200/80 bg-slate-50/90 px-4 py-3.5 text-slate-900 sm:max-w-[85%] dark:border-cyan-900/50 dark:bg-slate-900/60 dark:text-slate-100">
+                    <div className="mb-2 flex items-center justify-between gap-2 text-[11px] font-semibold text-blue-700 select-none dark:text-cyan-400">
+                      <span className="inline-flex items-center gap-1.5">
+                        <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>Brainstine AI</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1 font-mono text-[10px] text-slate-500 tabular-nums dark:text-slate-400">
+                        <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+                        <span>Streaming...</span>
+                      </span>
+                    </div>
+                    <AcademicContentRenderer content={streamingContent} />
+                  </div>
+                </div>
+              ) : sending ? (
+                <div className="flex items-start">
+                  <div className="inline-flex items-center gap-2.5 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs font-medium text-slate-600 select-none dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-300">
+                    <Loader2 className="h-4 w-4 animate-spin text-blue-600 dark:text-cyan-400" />
+                    <span>
+                      {elapsedSeconds >= 8
+                        ? `Drafting detailed academic response (${elapsedSeconds}s) — still working...`
+                        : 'Analyzing & drafting academic response...'}
+                    </span>
+                  </div>
+                </div>
+              ) : null}
+
+              <div ref={messagesEndRef} />
+            </div>
+          )}
+        </div>
+
+        {/* Bottom Composer */}
+        <div className="border-t border-slate-200 bg-white px-5 py-3.5 dark:border-slate-800 dark:bg-[#0D162B]">
+          {error && (
+            <div className="mb-3 flex items-center justify-between gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs text-rose-800 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-200">
+              <span>{error}</span>
+              <button type="button" onClick={() => setError(null)} className="p-0.5">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+
+          {previewAttachment && (
+            <SnapAttachmentPreview
+              attachment={previewAttachment}
+              isPersistedContext={!pendingImage && Boolean(activeSessionImage)}
+              disabled={sending}
+              onReplace={(next) => setPendingImage(next)}
+              onRemove={() => {
+                setPendingImage(null);
+                setActiveSessionImage(null);
+              }}
+              onQuickAction={(action, defaultPrompt) =>
+                sendMessage({ overrideText: defaultPrompt, imageAction: action })
+              }
+              onError={(msg) => setError(msg)}
+              showTutorHandoff
+              onHandoffToTutor={() => onSendImageToTutor(previewAttachment)}
+            />
+          )}
+
+          <div className="flex flex-wrap items-end gap-2">
+            <SnapTriggerButtons
+              disabled={sending}
+              onImageSelected={(att) => {
+                setPendingImage(att);
+                setError(null);
+              }}
+              onError={(msg) => setError(msg)}
+            />
+
+            <textarea
+              rows={2}
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              onKeyDown={handleKeyDown}
+              disabled={sending}
+              placeholder={
+                previewAttachment
+                  ? 'Ask a specific question about this photo or click an Image Action above...'
+                  : 'Ask an academic question, paste a problem, or request a step-by-step explanation...'
+              }
+              className="min-h-11 max-h-36 flex-1 resize-y rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-hidden select-text dark:border-slate-700 dark:bg-slate-900/80 dark:text-white dark:focus:border-cyan-500 dark:focus:bg-slate-900"
+            />
+
+            <button
+              type="button"
+              disabled={sending || (!inputText.trim() && !pendingImage)}
+              onClick={() => sendMessage()}
+              className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:cursor-not-allowed disabled:opacity-50 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
+            >
+              {sending ? (
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <Send className="h-4 w-4" aria-hidden="true" />
+              )}
+              <span>Send</span>
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}

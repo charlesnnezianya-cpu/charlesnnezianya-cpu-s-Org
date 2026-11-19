@@ -1,0 +1,8 @@
+{
+  "name": "Brainstine",
+  "description": "Your Personal AI-Powered Academic Companion. Upload study materials, extract content from PDFs, images, and audio, and generate structured academic summaries.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
