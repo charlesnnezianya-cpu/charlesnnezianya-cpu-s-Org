@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -13,17 +13,20 @@ import {
   Play,
   RotateCcw,
   Trash2,
+  TrendingUp,
   XCircle,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import {
   deleteQuiz,
+  deleteQuizAttempt,
   recordStudyActivity,
   saveQuizAttemptRecord,
   saveQuizRecord,
 } from '../lib/supabase';
 import type {
   GeneratedQuizPayload,
+  QuizAssessmentMode,
   QuizAttemptRecord,
   QuizDifficulty,
   QuizFormat,
@@ -37,6 +40,13 @@ import type {
   StudyMaterialRecord,
   StudySummaryRecord,
 } from '../types/brainstine';
+import {
+  hasSubjectVisualMatch,
+  resolveSubjectVisual,
+} from '../lib/educationalVisuals';
+import { ConfirmDeleteModal } from './ConfirmDeleteModal';
+import { EducationalDiagramRenderer } from './EducationalDiagramRenderer';
+import { SubjectVisualBanner } from './SubjectVisualBanner';
 
 interface QuizExamSystemProps {
   materials: StudyMaterialRecord[];
@@ -44,6 +54,8 @@ interface QuizExamSystemProps {
   quizzes: QuizRecord[];
   attempts: QuizAttemptRecord[];
   geminiConfigured: boolean;
+  initialAttemptToOpen?: QuizAttemptRecord | null;
+  onConsumeAttemptToOpen?: () => void;
   preselectedSource?: {
     mode: QuizSourceMode;
     materialId?: string;
@@ -51,9 +63,10 @@ interface QuizExamSystemProps {
     inlineSummary?: StructuredSummary;
   } | null;
   onDataChanged: () => void;
+  onActiveAttemptChange?: (active: boolean) => void;
 }
 
-type ExamStage = 'setup' | 'exam' | 'results';
+type ExamStage = 'setup' | 'instructions' | 'exam' | 'results';
 
 function formatSeconds(totalSec: number): string {
   const mins = Math.floor(totalSec / 60);
@@ -67,8 +80,11 @@ export function QuizExamSystem({
   quizzes,
   attempts,
   geminiConfigured,
+  initialAttemptToOpen,
+  onConsumeAttemptToOpen,
   preselectedSource,
   onDataChanged,
+  onActiveAttemptChange,
 }: QuizExamSystemProps) {
   const { user, isConfigured } = useAuth();
 
@@ -83,13 +99,24 @@ export function QuizExamSystem({
   const [topicTitle, setTopicTitle] = useState<string>('');
   const [inlineSummaryText, setInlineSummaryText] = useState<string>('');
 
+  const [assessmentMode, setAssessmentMode] = useState<QuizAssessmentMode>('practice');
   const [questionCount, setQuestionCount] = useState<QuizQuestionCount>(10);
   const [format, setFormat] = useState<QuizFormat>('objective');
   const [difficulty, setDifficulty] = useState<QuizDifficulty>('intermediate');
-  const [timeLimitMinutes, setTimeLimitMinutes] = useState<number>(0); // 0 = untimed
+  const [timeLimitMinutes, setTimeLimitMinutes] = useState<number>(20);
 
   const [generating, setGenerating] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [cloudNotice, setCloudNotice] = useState<string | null>(null);
+  const generatingRef = useRef(false);
+  const gradingRef = useRef(false);
+
+  const [deleteTarget, setDeleteTarget] = useState<
+    | { kind: 'quiz'; item: QuizRecord }
+    | { kind: 'attempt'; item: QuizAttemptRecord }
+    | null
+  >(null);
+  const [deletingRecord, setDeletingRecord] = useState(false);
 
   // Active exam state
   const [activeQuiz, setActiveQuiz] = useState<{
@@ -110,11 +137,77 @@ export function QuizExamSystem({
   // Results state
   const [gradingResult, setGradingResult] = useState<QuizGradingResponse | null>(null);
   const [resultMeta, setResultMeta] = useState<{
+    attemptId?: string | null;
+    quizId?: string | null;
     title: string;
+    subjectArea: string;
+    assessmentMode: QuizAssessmentMode;
     format: QuizFormat;
     difficulty: QuizDifficulty;
     createdAt?: string;
   } | null>(null);
+
+  const quizLookup = useMemo(() => {
+    const map = new Map<string, QuizRecord>();
+    for (const q of quizzes) {
+      map.set(q.id, q);
+    }
+    return map;
+  }, [quizzes]);
+
+  const reopenPastAttempt = useCallback(
+    (attempt: QuizAttemptRecord) => {
+      const linkedQuiz = attempt.quiz_id ? quizLookup.get(attempt.quiz_id) : undefined;
+      const mode: QuizAssessmentMode =
+        linkedQuiz && linkedQuiz.time_limit_minutes && linkedQuiz.time_limit_minutes > 0
+          ? 'exam'
+          : 'practice';
+      setGradingResult({
+        totalQuestions: attempt.total_questions,
+        correctCount: attempt.correct_count,
+        incorrectCount: attempt.incorrect_count,
+        unansweredCount: attempt.unanswered_count,
+        earnedMarks: Number(attempt.earned_marks),
+        maxMarks: Number(attempt.max_marks),
+        percentage: Number(attempt.percentage),
+        timeTakenSeconds: attempt.time_taken_seconds,
+        performanceAssessment: attempt.performance_summary,
+        gradedResults: attempt.graded_results,
+      });
+      setResultMeta({
+        attemptId: attempt.id,
+        quizId: attempt.quiz_id,
+        title: attempt.title,
+        subjectArea: linkedQuiz?.subject_area || 'General Studies',
+        assessmentMode: mode,
+        format: attempt.format,
+        difficulty: attempt.difficulty,
+        createdAt: attempt.created_at,
+      });
+      setActiveQuiz(
+        linkedQuiz
+          ? {
+              quizId: linkedQuiz.id,
+              title: linkedQuiz.title,
+              subjectArea: linkedQuiz.subject_area,
+              format: linkedQuiz.format,
+              difficulty: linkedQuiz.difficulty,
+              timeLimitMinutes: linkedQuiz.time_limit_minutes,
+              questions: linkedQuiz.questions,
+            }
+          : null
+      );
+      setStage('results');
+    },
+    [quizLookup]
+  );
+
+  useEffect(() => {
+    if (initialAttemptToOpen) {
+      reopenPastAttempt(initialAttemptToOpen);
+      onConsumeAttemptToOpen?.();
+    }
+  }, [initialAttemptToOpen, reopenPastAttempt, onConsumeAttemptToOpen]);
 
   useEffect(() => {
     if (preselectedSource) {
@@ -147,6 +240,29 @@ export function QuizExamSystem({
       setSelectedSummaryId(summaries[0].id);
     }
   }, [summaries, selectedSummaryId]);
+
+  // Notify parent layout & protect against accidental browser refresh/close mid-attempt
+  useEffect(() => {
+    const isActive = stage === 'exam' && Boolean(activeQuiz) && !grading;
+    onActiveAttemptChange?.(isActive);
+
+    if (!isActive) return;
+
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [stage, activeQuiz, grading, onActiveAttemptChange]);
+
+  useEffect(() => {
+    return () => {
+      onActiveAttemptChange?.(false);
+    };
+  }, [onActiveAttemptChange]);
 
   // Countdown & elapsed timer during active examination
   useEffect(() => {
@@ -221,11 +337,12 @@ export function QuizExamSystem({
 
   const handleGenerateAndStart = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (generatingRef.current) return;
     setErrorMsg(null);
 
     if (!geminiConfigured) {
       setErrorMsg(
-        'GEMINI_API_KEY is missing. Configure GEMINI_API_KEY in Replit Secrets (or Settings > Secrets) to generate quizzes.'
+        'GEMINI_API_KEY is missing. Configure GEMINI_API_KEY in Secrets to generate quizzes.'
       );
       return;
     }
@@ -245,11 +362,19 @@ export function QuizExamSystem({
       return;
     }
 
+    const effectiveTimeLimit =
+      assessmentMode === 'exam' ? Math.max(10, timeLimitMinutes || 20) : null;
+
+    generatingRef.current = true;
     setGenerating(true);
+    setCloudNotice(null);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 110000);
     try {
       const res = await fetch('/api/quizzes/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           sourceMode,
           sourceText: resolvedSource.text,
@@ -266,6 +391,7 @@ export function QuizExamSystem({
 
       const generated = data as GeneratedQuizPayload;
       let savedQuizId: string | null = null;
+      let syncWarning: string | null = null;
 
       if (user && isConfigured) {
         try {
@@ -279,30 +405,66 @@ export function QuizExamSystem({
             format: generated.format,
             difficulty: generated.difficulty,
             questionCount: generated.questionCount,
-            timeLimitMinutes: timeLimitMinutes > 0 ? timeLimitMinutes : null,
+            timeLimitMinutes: effectiveTimeLimit,
             questions: generated.questions,
           });
           savedQuizId = saved.id;
           onDataChanged();
         } catch (saveErr) {
           console.warn('Quiz save warning:', saveErr);
+          syncWarning =
+            saveErr instanceof Error
+              ? `Quiz generated, but template could not be saved to Supabase: ${saveErr.message}`
+              : 'Quiz generated, but template could not be saved to cloud history.';
         }
       }
 
-      startExamSession({
+      prepareExamInstructions({
         quizId: savedQuizId,
         title: generated.title,
         subjectArea: generated.subjectArea,
         format: generated.format,
         difficulty: generated.difficulty,
-        timeLimitMinutes: timeLimitMinutes > 0 ? timeLimitMinutes : null,
+        timeLimitMinutes: effectiveTimeLimit,
         questions: generated.questions,
       });
+      if (syncWarning) {
+        setCloudNotice(syncWarning);
+      }
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Unable to generate quiz.');
+      if ((err as { name?: string })?.name === 'AbortError') {
+        setErrorMsg(
+          'Quiz generation timed out while waiting for the AI service. Please try fewer questions or try again shortly.'
+        );
+      } else {
+        setErrorMsg(err instanceof Error ? err.message : 'Unable to generate quiz.');
+      }
     } finally {
+      clearTimeout(timer);
+      generatingRef.current = false;
       setGenerating(false);
     }
+  };
+
+  const prepareExamInstructions = (quiz: {
+    quizId: string | null;
+    title: string;
+    subjectArea: string;
+    format: QuizFormat;
+    difficulty: QuizDifficulty;
+    timeLimitMinutes: number | null;
+    questions: QuizQuestion[];
+  }) => {
+    setActiveQuiz(quiz);
+    setCurrentIdx(0);
+    setAnswersMap({});
+    setElapsedSeconds(0);
+    setShowSubmitConfirm(false);
+    setGradingResult(null);
+    setResultMeta(null);
+    setErrorMsg(null);
+    setCloudNotice(null);
+    setStage('instructions');
   };
 
   const startExamSession = (quiz: {
@@ -322,6 +484,7 @@ export function QuizExamSystem({
     setGradingResult(null);
     setResultMeta(null);
     setErrorMsg(null);
+    setCloudNotice(null);
     setStage('exam');
   };
 
@@ -339,10 +502,14 @@ export function QuizExamSystem({
     : 0;
 
   const submitExamination = async (autoTriggered = false) => {
-    if (!activeQuiz || grading) return;
+    if (!activeQuiz || gradingRef.current) return;
+    gradingRef.current = true;
     setShowSubmitConfirm(false);
     setGrading(true);
     setErrorMsg(null);
+    setCloudNotice(null);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 80000);
 
     try {
       const answersArray = activeQuiz.questions.map((q) => {
@@ -358,6 +525,7 @@ export function QuizExamSystem({
       const res = await fetch('/api/quizzes/grade', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           quizTitle: activeQuiz.title,
           questions: activeQuiz.questions,
@@ -371,18 +539,13 @@ export function QuizExamSystem({
       }
 
       const graded = data as QuizGradingResponse;
-      setGradingResult(graded);
-      setResultMeta({
-        title: activeQuiz.title,
-        format: activeQuiz.format,
-        difficulty: activeQuiz.difficulty,
-        createdAt: new Date().toISOString(),
-      });
-      setStage('results');
+      const mode: QuizAssessmentMode =
+        activeQuiz.timeLimitMinutes && activeQuiz.timeLimitMinutes > 0 ? 'exam' : 'practice';
+      let savedAttemptId: string | null = null;
 
       if (user && isConfigured) {
         try {
-          await saveQuizAttemptRecord({
+          const savedAttempt = await saveQuizAttemptRecord({
             userId: user.id,
             quizId: activeQuiz.quizId,
             title: activeQuiz.title,
@@ -391,57 +554,180 @@ export function QuizExamSystem({
             answers: answersArray,
             grading: graded,
           });
+          savedAttemptId = savedAttempt.id;
           await recordStudyActivity({
             userId: user.id,
             activityType: 'quiz',
             title: activeQuiz.title,
-            detail: `${autoTriggered ? 'Timed auto-submit' : 'Completed'} · ${graded.percentage}% (${graded.earnedMarks}/${graded.maxMarks} marks)`,
+            detail: `${mode === 'exam' ? 'Exam Mode' : 'Practice Mode'}${
+              autoTriggered ? ' (auto-submitted)' : ''
+            } · ${graded.percentage}% (${graded.earnedMarks}/${graded.maxMarks} marks)`,
             materialType: 'text',
           });
           onDataChanged();
         } catch (saveErr) {
           console.warn('Attempt persistence warning:', saveErr);
+          setCloudNotice(
+            saveErr instanceof Error
+              ? `Your score was graded, but could not be saved to Supabase Academic History: ${saveErr.message}`
+              : 'Your score was graded, but could not be saved to Supabase Academic History.'
+          );
         }
       }
+
+      setGradingResult(graded);
+      setResultMeta({
+        attemptId: savedAttemptId,
+        quizId: activeQuiz.quizId,
+        title: activeQuiz.title,
+        subjectArea: activeQuiz.subjectArea || 'General Studies',
+        assessmentMode: mode,
+        format: activeQuiz.format,
+        difficulty: activeQuiz.difficulty,
+        createdAt: new Date().toISOString(),
+      });
+      setStage('results');
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Unable to grade examination.');
+      if ((err as { name?: string })?.name === 'AbortError') {
+        setErrorMsg('Examination grading timed out. Your answers are preserved—please try submitting again.');
+      } else {
+        setErrorMsg(err instanceof Error ? err.message : 'Unable to grade examination.');
+      }
     } finally {
+      clearTimeout(timer);
+      gradingRef.current = false;
       setGrading(false);
     }
   };
 
-  const reopenPastAttempt = (attempt: QuizAttemptRecord) => {
-    setGradingResult({
-      totalQuestions: attempt.total_questions,
-      correctCount: attempt.correct_count,
-      incorrectCount: attempt.incorrect_count,
-      unansweredCount: attempt.unanswered_count,
-      earnedMarks: Number(attempt.earned_marks),
-      maxMarks: Number(attempt.max_marks),
-      percentage: Number(attempt.percentage),
-      timeTakenSeconds: attempt.time_taken_seconds,
-      performanceAssessment: attempt.performance_summary,
-      gradedResults: attempt.graded_results,
-    });
-    setResultMeta({
-      title: attempt.title,
-      format: attempt.format,
-      difficulty: attempt.difficulty,
-      createdAt: attempt.created_at,
-    });
-    setActiveQuiz(null);
-    setStage('results');
-  };
-
-  const handleDeleteSavedQuiz = async (quizId: string) => {
-    if (!user) return;
+  const handleConfirmDelete = async () => {
+    if (!user || !deleteTarget) return;
+    setDeletingRecord(true);
+    setErrorMsg(null);
     try {
-      await deleteQuiz(user.id, quizId);
+      if (deleteTarget.kind === 'quiz') {
+        await deleteQuiz(user.id, deleteTarget.item.id);
+      } else {
+        await deleteQuizAttempt(user.id, deleteTarget.item.id);
+      }
+      setDeleteTarget(null);
       onDataChanged();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Could not delete quiz.');
+      setErrorMsg(err instanceof Error ? err.message : 'Could not delete record.');
+    } finally {
+      setDeletingRecord(false);
     }
   };
+
+  // ============================================================================
+  // STAGE 1B: PRE-EXAM INSTRUCTIONS SCREEN
+  // ============================================================================
+  if (stage === 'instructions' && activeQuiz) {
+    const isTimedExam = Boolean(activeQuiz.timeLimitMinutes && activeQuiz.timeLimitMinutes > 0);
+    const totalMarks = activeQuiz.questions.reduce((acc, q) => acc + (q.maxMarks || 1), 0);
+
+    return (
+      <div className="mx-auto max-w-3xl space-y-6">
+        {cloudNotice && (
+          <div
+            role="alert"
+            className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 p-3.5 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200"
+          >
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>{cloudNotice}</span>
+          </div>
+        )}
+
+        <section className="rounded-2xl border border-slate-200 bg-white p-6 sm:p-8 dark:border-slate-800 dark:bg-[#0D162B]">
+          <p className="text-xs font-semibold tracking-wide text-[#1D4ED8] dark:text-[#38BDF8]">
+            {isTimedExam ? 'Timed Exam Instructions' : 'Practice Session Instructions'} ·{' '}
+            {activeQuiz.subjectArea}
+          </p>
+          <h2 className="mt-1.5 font-display text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
+            {activeQuiz.title}
+          </h2>
+
+          <div className="mt-6 grid grid-cols-2 gap-3.5 sm:grid-cols-4">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+              <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Questions</p>
+              <p className="mt-1 font-mono text-lg font-bold text-slate-900 tabular-nums dark:text-white">
+                {activeQuiz.questions.length}
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+              <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Total Marks</p>
+              <p className="mt-1 font-mono text-lg font-bold text-slate-900 tabular-nums dark:text-white">
+                {totalMarks}
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+              <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Format</p>
+              <p className="mt-1 text-sm font-semibold capitalize text-slate-900 dark:text-white">
+                {activeQuiz.format} · {activeQuiz.difficulty}
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+              <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Duration</p>
+              <p className="mt-1 font-mono text-sm font-bold text-[#1D4ED8] tabular-nums dark:text-[#38BDF8]">
+                {isTimedExam ? `${activeQuiz.timeLimitMinutes} mins` : 'Untimed'}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-6 space-y-2.5 rounded-xl border border-slate-200 bg-slate-50/70 p-4 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
+            <h3 className="font-display text-sm font-semibold text-slate-900 dark:text-white">
+              Before You Begin
+            </h3>
+            <ul className="list-disc space-y-1.5 pl-5 text-xs leading-relaxed">
+              <li>
+                Use the Question Navigator panel to jump directly to any question; your selected
+                options and written answers are preserved automatically during the session.
+              </li>
+              <li>
+                Correct answers and detailed explanations remain strictly hidden until you confirm
+                submission (or when the exam timer expires).
+              </li>
+              {isTimedExam ? (
+                <li>
+                  Your {activeQuiz.timeLimitMinutes}-minute countdown starts immediately when you
+                  click Begin Assessment and will auto-submit on completion.
+                </li>
+              ) : (
+                <li>
+                  Practice mode is untimed so you can reason carefully before submitting for scoring
+                  and explanations.
+                </li>
+              )}
+              <li>
+                Brainstine guards against accidental page refresh or leaving this screen mid-attempt.
+              </li>
+            </ul>
+          </div>
+
+          <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 pt-5 dark:border-slate-800">
+            <button
+              type="button"
+              onClick={() => {
+                setActiveQuiz(null);
+                setStage('setup');
+              }}
+              className="min-h-11 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              Back to Setup
+            </button>
+            <button
+              type="button"
+              onClick={() => startExamSession(activeQuiz)}
+              className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-[#0F1E3D] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] dark:bg-[#1D4ED8] dark:hover:bg-blue-500"
+            >
+              <Play className="h-4 w-4" aria-hidden="true" />
+              <span>Begin Assessment</span>
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  }
 
   // ============================================================================
   // STAGE 2: ACTIVE EXAMINATION INTERFACE
@@ -511,6 +797,16 @@ export function QuizExamSystem({
           </div>
         </section>
 
+        {cloudNotice && (
+          <div
+            role="alert"
+            className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 p-3.5 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200"
+          >
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>{cloudNotice}</span>
+          </div>
+        )}
+
         {errorMsg && (
           <div
             role="alert"
@@ -537,9 +833,45 @@ export function QuizExamSystem({
                 )}
               </div>
 
-              <h3 className="mt-5 font-display text-lg font-semibold leading-snug text-slate-900 select-text dark:text-white">
+              <h3 className="mt-5 font-display text-lg font-semibold leading-snug text-slate-900 academic-selectable dark:text-white">
                 {currentQuestion.question}
               </h3>
+
+              {currentQuestion.visualAid ? (
+                <div className="mt-4">
+                  <EducationalDiagramRenderer spec={currentQuestion.visualAid} compact />
+                </div>
+              ) : (
+                hasSubjectVisualMatch(
+                  `${activeQuiz.subjectArea} ${currentQuestion.topicTag || ''} ${currentQuestion.question}`
+                ) && (() => {
+                  const plate = resolveSubjectVisual(
+                    `${activeQuiz.subjectArea} ${currentQuestion.topicTag || ''} ${currentQuestion.question}`,
+                    'quiz'
+                  );
+                  return (
+                    <figure className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-slate-950 select-none dark:border-slate-800">
+                      <div className="relative h-36 w-full sm:h-44">
+                        <img
+                          src={plate.src}
+                          alt={plate.alt}
+                          loading="lazy"
+                          decoding="async"
+                          referrerPolicy="no-referrer"
+                          className="h-full w-full object-cover"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-slate-950/75 via-slate-950/15 to-transparent" />
+                        <figcaption className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-2 px-3.5 py-2 text-[11px] font-medium text-slate-100">
+                          <span>Subject Reference · {plate.subjectLabel}</span>
+                          {currentQuestion.topicTag && (
+                            <span className="truncate text-cyan-200">{currentQuestion.topicTag}</span>
+                          )}
+                        </figcaption>
+                      </div>
+                    </figure>
+                  );
+                })()
+              )}
 
               {currentQuestion.type === 'objective' && currentQuestion.options ? (
                 <div className="mt-6 space-y-3" role="radiogroup" aria-label={`Options for question ${currentIdx + 1}`}>
@@ -561,7 +893,7 @@ export function QuizExamSystem({
                             },
                           }))
                         }
-                        className={`flex w-full items-start gap-3.5 rounded-xl border p-4 text-left transition-colors ${
+                        className={`flex min-h-12 w-full items-start gap-3.5 rounded-xl border p-3.5 text-left transition-colors select-none sm:p-4 ${
                           isSelected
                             ? 'border-blue-600 bg-blue-50/80 text-slate-900 dark:border-cyan-400 dark:bg-blue-950/50 dark:text-white'
                             : 'border-slate-200 bg-slate-50/50 text-slate-800 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-200 dark:hover:bg-slate-900'
@@ -576,7 +908,7 @@ export function QuizExamSystem({
                         >
                           {letter}
                         </span>
-                        <span className="text-sm leading-relaxed select-text">{optText}</span>
+                        <span className="text-sm leading-relaxed academic-selectable select-text">{optText}</span>
                       </button>
                     );
                   })}
@@ -698,7 +1030,7 @@ export function QuizExamSystem({
             role="dialog"
             aria-modal="true"
           >
-            <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-[#0D162B]">
+            <div className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-2xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-[#0D162B]">
               <h3 className="font-display text-lg font-bold text-slate-900 select-none dark:text-white">
                 Submit Examination?
               </h3>
@@ -760,14 +1092,36 @@ export function QuizExamSystem({
   // ============================================================================
   if (stage === 'results' && gradingResult && resultMeta) {
     const hasAiTheory = gradingResult.gradedResults.some((r) => r.aiEvaluated);
+    const matchingAttempts = attempts
+      .filter((a) =>
+        resultMeta.quizId && a.quiz_id
+          ? a.quiz_id === resultMeta.quizId
+          : a.title.toLowerCase() === resultMeta.title.toLowerCase()
+      )
+      .slice()
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
 
     return (
       <div className="space-y-6">
+        {cloudNotice && (
+          <div
+            role="alert"
+            className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 p-3.5 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200"
+          >
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>{cloudNotice}</span>
+          </div>
+        )}
         <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
           <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-5 sm:flex-row sm:items-center dark:border-slate-800">
             <div>
               <p className="text-xs font-semibold tracking-wide text-blue-700 select-none dark:text-cyan-400">
-                Examination Results · {resultMeta.format.toUpperCase()} · {resultMeta.difficulty.toUpperCase()}
+                {resultMeta.assessmentMode === 'exam' ? 'Exam Mode' : 'Practice Mode'} ·{' '}
+                {resultMeta.subjectArea} · {resultMeta.format.toUpperCase()} ·{' '}
+                {resultMeta.difficulty.toUpperCase()}
+                {resultMeta.createdAt
+                  ? ` · ${new Date(resultMeta.createdAt).toLocaleString()}`
+                  : ''}
               </p>
               <h2 className="mt-1 font-display text-2xl font-bold text-slate-900 select-text dark:text-white">
                 {resultMeta.title}
@@ -782,18 +1136,27 @@ export function QuizExamSystem({
                   className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
                 >
                   <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Retake Exam</span>
+                  <span>Retake Assessment</span>
                 </button>
               )}
               <button
                 type="button"
                 onClick={() => setStage('setup')}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white hover:bg-[#192F5D] dark:bg-blue-600 dark:hover:bg-blue-500"
+                className="inline-flex min-h-10 items-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white hover:bg-[#192F5D] dark:bg-blue-600 dark:hover:bg-blue-500"
               >
                 <span>New Quiz or History</span>
               </button>
             </div>
           </div>
+
+          <SubjectVisualBanner
+            subjectHint={resultMeta.subjectArea}
+            fallbackKey="quiz"
+            variant="compact"
+            title={`${resultMeta.subjectArea} Assessment Review`}
+            subtitle={`Scored ${gradingResult.percentage}% across ${gradingResult.totalQuestions} questions with complete explanations below.`}
+            className="mt-5"
+          />
 
           {/* Metrics Grid */}
           <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-7">
@@ -870,6 +1233,59 @@ export function QuizExamSystem({
               </p>
             )}
           </div>
+
+          {matchingAttempts.length > 1 && (
+            <div className="mt-5 rounded-xl border border-blue-200 bg-blue-50/60 p-4 dark:border-blue-900/50 dark:bg-blue-950/20">
+              <div className="flex items-center gap-2 text-xs font-semibold text-blue-900 select-none dark:text-cyan-300">
+                <TrendingUp className="h-4 w-4" aria-hidden="true" />
+                <span>Attempt Comparison ({matchingAttempts.length} saved attempts)</span>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {matchingAttempts.map((att, idx) => {
+                  const isCurrent = resultMeta.attemptId === att.id;
+                  const prevPct =
+                    idx > 0 ? Number(matchingAttempts[idx - 1].percentage) : null;
+                  const diff =
+                    prevPct !== null
+                      ? Number((Number(att.percentage) - prevPct).toFixed(1))
+                      : null;
+                  return (
+                    <button
+                      key={att.id}
+                      type="button"
+                      onClick={() => reopenPastAttempt(att)}
+                      className={`rounded-lg border px-3 py-2 text-left text-xs transition-colors ${
+                        isCurrent
+                          ? 'border-blue-600 bg-white text-slate-900 shadow-xs dark:border-cyan-400 dark:bg-slate-900 dark:text-white'
+                          : 'border-slate-200 bg-white/80 text-slate-700 hover:bg-white dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-300'
+                      }`}
+                    >
+                      <div className="font-semibold">
+                        Attempt #{idx + 1} · {att.percentage}%
+                        {diff !== null && (
+                          <span
+                            className={`ml-1.5 font-mono ${
+                              diff > 0
+                                ? 'text-emerald-700 dark:text-emerald-400'
+                                : diff < 0
+                                  ? 'text-red-700 dark:text-red-400'
+                                  : 'text-slate-500'
+                            }`}
+                          >
+                            ({diff > 0 ? `+${diff}%` : `${diff}%`})
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-0.5 font-mono text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
+                        {new Date(att.created_at).toLocaleDateString()} ·{' '}
+                        {att.correct_count}/{att.total_questions} correct
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Question-by-Question Review */}
@@ -998,7 +1414,7 @@ export function QuizExamSystem({
                 AI Provider Configuration Required
               </h3>
               <p className="mt-1 text-xs leading-relaxed">
-                Configure <code className="font-mono font-semibold">GEMINI_API_KEY</code> in Replit Secrets
+                Configure <code className="font-mono font-semibold">GEMINI_API_KEY</code> in Secrets
                 to generate new quizzes and grade theory responses. You can still review past
                 examination results in your history below.
               </p>
@@ -1007,7 +1423,7 @@ export function QuizExamSystem({
         </div>
       )}
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
         <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-5 sm:flex-row sm:items-center dark:border-slate-800">
           <div>
             <h2 className="font-display text-xl font-bold text-slate-900 select-none dark:text-white">
@@ -1028,7 +1444,7 @@ export function QuizExamSystem({
               role="tab"
               aria-selected={setupTab === 'create'}
               onClick={() => setSetupTab('create')}
-              className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              className={`min-h-9 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
                 setupTab === 'create'
                   ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
                   : 'text-slate-600 hover:text-slate-900 dark:text-slate-400'
@@ -1041,7 +1457,7 @@ export function QuizExamSystem({
               role="tab"
               aria-selected={setupTab === 'saved'}
               onClick={() => setSetupTab('saved')}
-              className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              className={`min-h-9 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
                 setupTab === 'saved'
                   ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
                   : 'text-slate-600 hover:text-slate-900 dark:text-slate-400'
@@ -1054,7 +1470,7 @@ export function QuizExamSystem({
               role="tab"
               aria-selected={setupTab === 'history'}
               onClick={() => setSetupTab('history')}
-              className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              className={`min-h-9 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
                 setupTab === 'history'
                   ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
                   : 'text-slate-600 hover:text-slate-900 dark:text-slate-400'
@@ -1064,6 +1480,14 @@ export function QuizExamSystem({
             </button>
           </div>
         </div>
+
+        <SubjectVisualBanner
+          visualKey="quiz"
+          variant="compact"
+          title="AI Assessment & Timed Exam Studio"
+          subtitle="Build objective MCQs, written theory exams, or mixed tests grounded directly in your study materials."
+          className="mt-5"
+        />
 
         {errorMsg && (
           <div
@@ -1187,19 +1611,76 @@ export function QuizExamSystem({
               </div>
             </div>
 
+            {/* Practice vs Exam Mode */}
+            <div>
+              <p className="mb-2.5 text-xs font-semibold text-slate-700 select-none dark:text-slate-300">
+                2. Assessment Mode
+              </p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 select-none">
+                <button
+                  type="button"
+                  onClick={() => setAssessmentMode('practice')}
+                  className={`rounded-xl border p-3.5 text-left transition-colors ${
+                    assessmentMode === 'practice'
+                      ? 'border-blue-600 bg-blue-50/70 dark:border-cyan-400 dark:bg-blue-950/40'
+                      : 'border-slate-200 bg-slate-50 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-900/50 dark:hover:bg-slate-900'
+                  }`}
+                >
+                  <p
+                    className={`font-display text-sm font-semibold ${
+                      assessmentMode === 'practice'
+                        ? 'text-blue-800 dark:text-cyan-300'
+                        : 'text-slate-900 dark:text-white'
+                    }`}
+                  >
+                    Practice Mode (Untimed)
+                  </p>
+                  <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
+                    Study at your own pace without a countdown clock, then review answers and explanations.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAssessmentMode('exam');
+                    if (timeLimitMinutes <= 0) setTimeLimitMinutes(20);
+                  }}
+                  className={`rounded-xl border p-3.5 text-left transition-colors ${
+                    assessmentMode === 'exam'
+                      ? 'border-blue-600 bg-blue-50/70 dark:border-cyan-400 dark:bg-blue-950/40'
+                      : 'border-slate-200 bg-slate-50 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-900/50 dark:hover:bg-slate-900'
+                  }`}
+                >
+                  <p
+                    className={`font-display text-sm font-semibold ${
+                      assessmentMode === 'exam'
+                        ? 'text-blue-800 dark:text-cyan-300'
+                        : 'text-slate-900 dark:text-white'
+                    }`}
+                  >
+                    Exam Mode (Timed)
+                  </p>
+                  <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
+                    Simulate real exam conditions with a countdown timer and automatic submission on expiry.
+                  </p>
+                </button>
+              </div>
+            </div>
+
             {/* Parameters Row */}
             <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4 select-none">
               {/* Format */}
               <div>
                 <label className="mb-2 block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  2. Question Format
+                  3. Question Format
                 </label>
                 <select
                   value={format}
                   onChange={(e) => setFormat(e.target.value as QuizFormat)}
                   className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                 >
-                  <option value="objective">Objective (OBJ — A/B/C/D)</option>
+                  <option value="objective">Objective (MCQ — A/B/C/D)</option>
                   <option value="theory">Theory (Short & Long Answer)</option>
                   <option value="mixed">Mixed (Objective + Theory)</option>
                 </select>
@@ -1208,7 +1689,7 @@ export function QuizExamSystem({
               {/* Quantity */}
               <div>
                 <label className="mb-2 block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  3. Question Count
+                  4. Question Count
                 </label>
                 <select
                   value={questionCount}
@@ -1225,7 +1706,7 @@ export function QuizExamSystem({
               {/* Difficulty */}
               <div>
                 <label className="mb-2 block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  4. Difficulty Level
+                  5. Difficulty Level
                 </label>
                 <select
                   value={difficulty}
@@ -1239,23 +1720,28 @@ export function QuizExamSystem({
                 </select>
               </div>
 
-              {/* Optional Countdown Timer */}
+              {/* Exam Duration (active in Exam Mode) */}
               <div>
                 <label className="mb-2 block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  5. Countdown Timer
+                  6. Exam Duration
                 </label>
-                <select
-                  value={timeLimitMinutes}
-                  onChange={(e) => setTimeLimitMinutes(Number(e.target.value))}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-                >
-                  <option value={0}>No Time Limit</option>
-                  <option value={10}>10 Minutes</option>
-                  <option value={20}>20 Minutes</option>
-                  <option value={30}>30 Minutes</option>
-                  <option value={45}>45 Minutes</option>
-                  <option value={60}>60 Minutes</option>
-                </select>
+                {assessmentMode === 'exam' ? (
+                  <select
+                    value={timeLimitMinutes}
+                    onChange={(e) => setTimeLimitMinutes(Number(e.target.value))}
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                  >
+                    <option value={10}>10 Minutes</option>
+                    <option value={20}>20 Minutes</option>
+                    <option value={30}>30 Minutes</option>
+                    <option value={45}>45 Minutes</option>
+                    <option value={60}>60 Minutes</option>
+                  </select>
+                ) : (
+                  <div className="rounded-xl border border-slate-200 bg-slate-100 px-3.5 py-2.5 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-400">
+                    Untimed (Practice)
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1312,7 +1798,7 @@ export function QuizExamSystem({
                       <button
                         type="button"
                         onClick={() =>
-                          startExamSession({
+                          prepareExamInstructions({
                             quizId: q.id,
                             title: q.title,
                             subjectArea: q.subject_area,
@@ -1329,7 +1815,7 @@ export function QuizExamSystem({
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleDeleteSavedQuiz(q.id)}
+                        onClick={() => setDeleteTarget({ kind: 'quiz', item: q })}
                         aria-label={`Delete ${q.title}`}
                         className="inline-flex items-center justify-center rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-red-950/30 dark:hover:text-red-400"
                       >
@@ -1357,35 +1843,72 @@ export function QuizExamSystem({
               </div>
             ) : (
               <div className="divide-y divide-slate-200 dark:divide-slate-800">
-                {attempts.map((att) => (
-                  <div
-                    key={att.id}
-                    className="flex flex-col justify-between gap-3 py-4 sm:flex-row sm:items-center"
-                  >
-                    <div className="min-w-0">
-                      <p className="truncate font-display text-sm font-semibold text-slate-900 dark:text-white">
-                        {att.title}
-                      </p>
-                      <p className="mt-0.5 font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
-                        Score: {att.percentage}% ({att.earned_marks}/{att.max_marks}) · {att.format} ·{' '}
-                        {new Date(att.created_at).toLocaleDateString()}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => reopenPastAttempt(att)}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0 select-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                {attempts.map((att) => {
+                  const linkedQuiz = att.quiz_id ? quizLookup.get(att.quiz_id) : undefined;
+                  const modeLabel =
+                    linkedQuiz && linkedQuiz.time_limit_minutes && linkedQuiz.time_limit_minutes > 0
+                      ? 'Exam Mode'
+                      : 'Practice Mode';
+                  return (
+                    <div
+                      key={att.id}
+                      className="flex flex-col justify-between gap-3 py-4 sm:flex-row sm:items-center"
                     >
-                      <FileCheck2 className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>View Results</span>
-                    </button>
-                  </div>
-                ))}
+                      <div className="min-w-0">
+                        <p className="truncate font-display text-sm font-semibold text-slate-900 dark:text-white">
+                          {att.title}
+                        </p>
+                        <p className="mt-0.5 font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
+                          {modeLabel} · {linkedQuiz?.subject_area || 'General Studies'} · Score:{' '}
+                          {att.percentage}% ({att.earned_marks}/{att.max_marks}) ·{' '}
+                          {att.correct_count}/{att.total_questions} correct ·{' '}
+                          {new Date(att.created_at).toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0 select-none">
+                        <button
+                          type="button"
+                          onClick={() => reopenPastAttempt(att)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                        >
+                          <FileCheck2 className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>View Results</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDeleteTarget({ kind: 'attempt', item: att })}
+                          aria-label={`Delete attempt ${att.title}`}
+                          className="inline-flex items-center justify-center rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-red-950/30 dark:hover:text-red-400"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
         )}
       </section>
+
+      <ConfirmDeleteModal
+        isOpen={Boolean(deleteTarget)}
+        title={
+          deleteTarget?.kind === 'quiz'
+            ? 'Delete saved quiz template?'
+            : 'Delete completed attempt?'
+        }
+        itemName={deleteTarget?.item.title}
+        description={
+          deleteTarget?.kind === 'quiz'
+            ? 'This removes the saved quiz template. Previously completed score attempts remain preserved unless deleted separately.'
+            : 'This permanently deletes this quiz attempt and score record from your Academic History. This action cannot be undone.'
+        }
+        busy={deletingRecord}
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

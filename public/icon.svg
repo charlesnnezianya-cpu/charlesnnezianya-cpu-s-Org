@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="bs_bg" x1="32" y1="24" x2="480" y2="488" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0B162E" />
+      <stop offset="55%" stop-color="#132A5C" />
+      <stop offset="100%" stop-color="#1D4ED8" />
+    </linearGradient>
+    <linearGradient id="bs_orbit" x1="90" y1="360" x2="425" y2="140" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.2" />
+      <stop offset="48%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#93C5FD" />
+    </linearGradient>
+    <radialGradient id="bs_glow" cx="50%" cy="44%" r="48%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.28" />
+      <stop offset="100%" stop-color="#38BDF8" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#bs_bg)" />
+  <circle cx="256" cy="240" r="185" fill="url(#bs_glow)" />
+
+  <!-- Einstein Relativity / Spacetime Orbital Arc -->
+  <ellipse
+    cx="256"
+    cy="256"
+    rx="182"
+    ry="68"
+    transform="rotate(-24 256 256)"
+    stroke="url(#bs_orbit)"
+    stroke-width="14"
+    stroke-linecap="round"
+  />
+
+  <!-- Left Brain Hemisphere (Analytical / Organic Neural Folds) -->
+  <path
+    d="M244 134 C196 134 158 166 150 206 C128 216 118 242 126 268 C118 294 130 326 156 340 C168 364 196 378 228 378 L244 378 Z"
+    fill="#FFFFFF"
+    fill-opacity="0.96"
+  />
+  <!-- Right Brain Hemisphere (Synthetic AI Lattice) -->
+  <path
+    d="M268 134 C316 134 354 166 362 206 C384 216 394 242 386 268 C394 294 382 326 356 340 C344 364 316 378 284 378 L268 378 Z"
+    fill="#E0F2FE"
+    fill-opacity="0.94"
+  />
+
+  <!-- Central Corpus Callosum Divider -->
+  <rect x="249" y="132" width="14" height="248" rx="7" fill="#0F2147" />
+
+  <!-- Left Hemisphere Sulci Folds -->
+  <path
+    d="M174 198 C194 194 210 206 210 222 M154 258 C176 254 196 266 196 286 M184 326 C204 322 218 332 222 346"
+    stroke="#1E3A8A"
+    stroke-width="12"
+    stroke-linecap="round"
+  />
+
+  <!-- Right Hemisphere AI Synaptic Circuitry -->
+  <path
+    d="M294 198 H326 L340 218 M294 256 H338 L354 278 M294 318 H324"
+    stroke="#0284C7"
+    stroke-width="11"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <circle cx="342" cy="220" r="13" fill="#0284C7" />
+  <circle cx="356" cy="280" r="13" fill="#0284C7" />
+  <circle cx="326" cy="318" r="11" fill="#0284C7" />
+
+  <!-- Crown Einstein Spark / Quantum Insight Star -->
+  <path
+    d="M402 126 L411 148 L433 157 L411 166 L402 188 L393 166 L371 157 L393 148 Z"
+    fill="#38BDF8"
+  />
+  <circle cx="114" cy="330" r="14" fill="#38BDF8" />
+</svg>

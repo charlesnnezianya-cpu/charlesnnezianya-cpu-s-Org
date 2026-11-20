@@ -13,6 +13,7 @@ import {
 import { useAuth } from '../contexts/AuthContext';
 import { deleteStudyMaterial, getMaterialSignedUrl } from '../lib/supabase';
 import type { StudyMaterialRecord } from '../types/brainstine';
+import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 
 interface MaterialsLibraryViewProps {
   materials: StudyMaterialRecord[];
@@ -39,6 +40,7 @@ export function MaterialsLibraryView({
   const { user } = useAuth();
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [confirmTarget, setConfirmTarget] = useState<StudyMaterialRecord | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const handleDownloadOriginal = async (mat: StudyMaterialRecord) => {
@@ -61,12 +63,14 @@ export function MaterialsLibraryView({
     }
   };
 
-  const handleDelete = async (mat: StudyMaterialRecord) => {
-    if (!user) return;
+  const handleConfirmDelete = async () => {
+    if (!user || !confirmTarget) return;
+    const mat = confirmTarget;
     setErrorMsg(null);
     setBusyId(mat.id);
     try {
       await deleteStudyMaterial(user.id, mat.id, mat.storage_path);
+      setConfirmTarget(null);
       onRefresh();
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Could not delete material.');
@@ -76,7 +80,7 @@ export function MaterialsLibraryView({
   };
 
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+    <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
       <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-5 sm:flex-row sm:items-center dark:border-slate-800">
         <div>
           <h2 className="font-display text-xl font-bold text-slate-900 select-none dark:text-white">
@@ -90,7 +94,7 @@ export function MaterialsLibraryView({
         <button
           type="button"
           onClick={onOpenSummarizer}
-          className="rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white hover:bg-[#192F5D] whitespace-nowrap shrink-0 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
+          className="min-h-10 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white hover:bg-[#192F5D] whitespace-nowrap shrink-0 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
         >
           Upload Material
         </button>
@@ -148,7 +152,7 @@ export function MaterialsLibraryView({
                     <button
                       type="button"
                       onClick={() => onSummarizeMaterial(mat)}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-[#0F1E3D] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#192F5D] dark:bg-blue-600 dark:hover:bg-blue-500"
+                      className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-[#0F1E3D] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#192F5D] dark:bg-blue-600 dark:hover:bg-blue-500"
                     >
                       <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
                       <span>Summarize</span>
@@ -157,7 +161,7 @@ export function MaterialsLibraryView({
                     <button
                       type="button"
                       onClick={() => onQuizMaterial(mat)}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                      className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
                     >
                       <ListChecks className="h-3.5 w-3.5" aria-hidden="true" />
                       <span>Quiz</span>
@@ -168,7 +172,7 @@ export function MaterialsLibraryView({
                         type="button"
                         onClick={() => handleDownloadOriginal(mat)}
                         disabled={busyId === mat.id}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                        className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
                       >
                         <Download className="h-3.5 w-3.5" aria-hidden="true" />
                         <span>File</span>
@@ -177,10 +181,10 @@ export function MaterialsLibraryView({
 
                     <button
                       type="button"
-                      onClick={() => handleDelete(mat)}
+                      onClick={() => setConfirmTarget(mat)}
                       disabled={busyId === mat.id}
                       aria-label={`Delete ${mat.title}`}
-                      className="rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-red-950/30 dark:hover:text-red-400"
+                      className="min-h-9 min-w-9 inline-flex items-center justify-center rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-red-950/30 dark:hover:text-red-400"
                     >
                       <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                     </button>
@@ -202,6 +206,16 @@ export function MaterialsLibraryView({
           })}
         </div>
       )}
+
+      <ConfirmDeleteModal
+        isOpen={Boolean(confirmTarget)}
+        title="Delete uploaded material?"
+        itemName={confirmTarget?.title}
+        description="This permanently deletes the uploaded file and extracted text from your library. Existing summaries generated from it remain saved."
+        busy={Boolean(busyId)}
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setConfirmTarget(null)}
+      />
     </section>
   );
 }

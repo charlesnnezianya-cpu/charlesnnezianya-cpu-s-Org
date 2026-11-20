@@ -11,6 +11,7 @@ import type {
   QuizQuestion,
   QuizRecord,
   QuizSourceMode,
+  SnapImageAttachment,
   StructuredSummary,
   StudentAnswer,
   StudyActivityRecord,
@@ -238,6 +239,52 @@ export async function listStudySummaries(userId: string): Promise<StudySummaryRe
   return (data ?? []) as StudySummaryRecord[];
 }
 
+export async function renameStudySummary(
+  userId: string,
+  summaryId: string,
+  newTitle: string
+): Promise<StudySummaryRecord> {
+  const client = requireSupabase();
+  const cleanTitle = newTitle.trim();
+  if (!cleanTitle) {
+    throw new Error('Summary title cannot be empty.');
+  }
+
+  const { data: existing, error: fetchError } = await client
+    .from('study_summaries')
+    .select('*')
+    .eq('id', summaryId)
+    .eq('user_id', userId)
+    .single();
+
+  if (fetchError || !existing) {
+    throw new Error(fetchError?.message || 'Summary not found.');
+  }
+
+  const prevStructured = (existing.structured_content || {}) as StructuredSummary;
+  const updatedStructured: StructuredSummary = {
+    ...prevStructured,
+    title: cleanTitle,
+  };
+
+  const { data, error } = await client
+    .from('study_summaries')
+    .update({
+      title: cleanTitle,
+      structured_content: updatedStructured,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', summaryId)
+    .eq('user_id', userId)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to rename summary: ${error.message}`);
+  }
+  return data as StudySummaryRecord;
+}
+
 export async function deleteStudySummary(userId: string, summaryId: string): Promise<void> {
   const client = requireSupabase();
   const { error } = await client
@@ -410,6 +457,19 @@ export async function listQuizAttempts(userId: string): Promise<QuizAttemptRecor
   return (data ?? []) as QuizAttemptRecord[];
 }
 
+export async function deleteQuizAttempt(userId: string, attemptId: string): Promise<void> {
+  const client = requireSupabase();
+  const { error } = await client
+    .from('quiz_attempts')
+    .delete()
+    .eq('id', attemptId)
+    .eq('user_id', userId);
+
+  if (error) {
+    throw new Error(`Failed to delete quiz attempt: ${error.message}`);
+  }
+}
+
 export async function uploadSessionImageToStorage(
   userId: string,
   file: File
@@ -431,6 +491,52 @@ export async function uploadSessionImageToStorage(
   return storagePath;
 }
 
+export async function restoreSessionImageAttachment(
+  storagePath: string,
+  mimeType?: string | null
+): Promise<SnapImageAttachment | null> {
+  try {
+    const signedUrl = await getMaterialSignedUrl(storagePath);
+    const res = await fetch(signedUrl);
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    const rawMime = (mimeType || blob.type || 'image/jpeg').toLowerCase();
+    const normalizedMime = rawMime === 'image/jpg' ? 'image/jpeg' : rawMime;
+    if (
+      normalizedMime !== 'image/jpeg' &&
+      normalizedMime !== 'image/png' &&
+      normalizedMime !== 'image/webp'
+    ) {
+      return null;
+    }
+
+    const base64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const str = typeof reader.result === 'string' ? reader.result : '';
+        const commaIdx = str.indexOf(',');
+        resolve(commaIdx >= 0 ? str.slice(commaIdx + 1) : str);
+      };
+      reader.onerror = () => reject(new Error('Failed to decode session image.'));
+      reader.readAsDataURL(blob);
+    });
+
+    if (!base64) return null;
+    const rawName = storagePath.split('/').pop() || 'study-image.jpg';
+    const cleanName = rawName.replace(/^\d+-/, '') || 'study-image.jpg';
+
+    return {
+      base64,
+      mimeType: normalizedMime,
+      previewUrl: `data:${normalizedMime};base64,${base64}`,
+      fileName: cleanName,
+      fileSizeBytes: blob.size,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function listAiSessions(
   userId: string,
   sessionType: AiSessionType
@@ -445,6 +551,20 @@ export async function listAiSessions(
 
   if (error) {
     throw new Error(`Failed to load ${sessionType} sessions: ${error.message}`);
+  }
+  return (data ?? []) as AiSessionRecord[];
+}
+
+export async function listAllAiSessions(userId: string): Promise<AiSessionRecord[]> {
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('ai_sessions')
+    .select('*')
+    .eq('user_id', userId)
+    .order('updated_at', { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to load AI sessions: ${error.message}`);
   }
   return (data ?? []) as AiSessionRecord[];
 }

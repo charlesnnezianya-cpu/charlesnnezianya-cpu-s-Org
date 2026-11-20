@@ -25,12 +25,16 @@ interface AuthModalProps {
 export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
   const {
     isConfigured,
+    oauthError,
+    pendingOauthUrl,
     signInWithEmail,
     signUpWithEmail,
     signInWithGoogle,
     requestPasswordReset,
     updatePassword,
     clearPasswordRecovery,
+    clearOauthError,
+    clearPendingOauthUrl,
   } = useAuth();
 
   const [mode, setMode] = useState<AuthModalMode>(initialMode);
@@ -58,6 +62,8 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
   const switchMode = (next: AuthModalMode) => {
     setMode(next);
     setErrorMsg(null);
+    clearOauthError();
+    clearPendingOauthUrl();
     setVerificationSentTo(null);
     setResetSentTo(null);
   };
@@ -131,6 +137,7 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
 
   const handleGoogleSignIn = async () => {
     setErrorMsg(null);
+    clearOauthError();
     if (!isConfigured) {
       setErrorMsg(
         'Google sign-in requires Supabase configuration (VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY) with Google OAuth enabled in your Supabase dashboard.'
@@ -146,6 +153,7 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
           ? err.message
           : 'Google sign-in is not available. Verify your Supabase Google OAuth provider configuration.'
       );
+    } finally {
       setSubmitting(false);
     }
   };
@@ -154,6 +162,8 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
     if (mode === 'recovery') {
       clearPasswordRecovery();
     }
+    clearOauthError();
+    clearPendingOauthUrl();
     onClose();
   };
 
@@ -164,7 +174,7 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
       aria-modal="true"
       aria-labelledby="auth-modal-title"
     >
-      <div className="relative w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-[#0D162B] sm:p-8">
+      <div className="relative max-h-[92vh] w-full max-w-md overflow-y-auto rounded-2xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-[#0D162B] sm:p-8">
         <button
           type="button"
           onClick={handleClose}
@@ -209,13 +219,31 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
           </div>
         )}
 
-        {errorMsg && (
+        {(errorMsg || oauthError) && (
           <div
             role="alert"
             className="mb-5 flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 p-3.5 text-sm text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200"
           >
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
-            <span>{errorMsg}</span>
+            <span>{errorMsg || oauthError}</span>
+          </div>
+        )}
+
+        {pendingOauthUrl && (
+          <div className="mb-5 space-y-3 rounded-xl border border-blue-200 bg-blue-50 p-4 text-xs text-slate-700 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-slate-200">
+            <p className="leading-relaxed">
+              Google Sign-In cannot open inside an embedded preview frame. Open Google Sign-In in a full browser tab to continue:
+            </p>
+            <a
+              href={pendingOauthUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => clearPendingOauthUrl()}
+              className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-[#0F1E3D] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] dark:bg-blue-600 dark:hover:bg-blue-500"
+            >
+              <span>Continue to Google Sign-In</span>
+              <ArrowRight className="h-4 w-4" aria-hidden="true" />
+            </a>
           </div>
         )}
 
@@ -292,7 +320,7 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
                   type="button"
                   onClick={handleGoogleSignIn}
                   disabled={submitting}
-                  className="flex w-full items-center justify-center gap-2.5 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-800 transition-colors hover:bg-slate-50 disabled:opacity-60 select-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+                  className="flex min-h-11 w-full items-center justify-center gap-2.5 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 active:scale-[0.99] disabled:opacity-60 select-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                 >
                   <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
                     <path
@@ -314,6 +342,9 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
                   </svg>
                   <span>Continue with Google</span>
                 </button>
+                <p className="mt-2 text-center text-[11px] text-slate-500 select-none dark:text-slate-400">
+                  Secured by Brainstine authentication via Google &amp; Supabase
+                </p>
 
                 <div className="my-5 flex items-center gap-3 select-none">
                   <div className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />

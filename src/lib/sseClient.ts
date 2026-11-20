@@ -12,7 +12,7 @@ export async function postSseStream<TDone>({
   url,
   body,
   signal,
-  idleTimeoutMs = 150000,
+  idleTimeoutMs = 60000,
   onChunk,
   onStart,
   fallbackErrorMessage,
@@ -42,6 +42,51 @@ export async function postSseStream<TDone>({
   };
 
   resetWatchdog();
+
+  let rafId: number | null = null;
+  let fallbackFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingDelta = '';
+  let latestAccumulated = '';
+  let lastNotifiedAccumulated = '';
+
+  const cancelScheduledFlush = () => {
+    if (rafId !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    if (fallbackFlushTimer !== null) {
+      clearTimeout(fallbackFlushTimer);
+      fallbackFlushTimer = null;
+    }
+  };
+
+  const flushPendingChunks = () => {
+    cancelScheduledFlush();
+    if (pendingDelta || latestAccumulated !== lastNotifiedAccumulated) {
+      const deltaToEmit = pendingDelta;
+      pendingDelta = '';
+      lastNotifiedAccumulated = latestAccumulated;
+      onChunk(deltaToEmit, latestAccumulated);
+    }
+  };
+
+  const scheduleChunkNotification = () => {
+    if (rafId !== null || fallbackFlushTimer !== null) return;
+    if (typeof requestAnimationFrame === 'function') {
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        flushPendingChunks();
+      });
+      // Safety fallback in case tab is backgrounded and rAF is paused
+      fallbackFlushTimer = setTimeout(() => {
+        flushPendingChunks();
+      }, 60);
+    } else {
+      fallbackFlushTimer = setTimeout(() => {
+        flushPendingChunks();
+      }, 32);
+    }
+  };
 
   try {
     const response = await fetch(url, {
@@ -78,7 +123,6 @@ export async function postSseStream<TDone>({
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let accumulated = '';
     let donePayload: TDone | null = null;
 
     const processEventBlock = (block: string) => {
@@ -113,12 +157,15 @@ export async function postSseStream<TDone>({
       if (eventName === 'chunk') {
         const delta = typeof parsed.delta === 'string' ? parsed.delta : '';
         if (delta) {
-          accumulated += delta;
-          onChunk(delta, accumulated);
+          latestAccumulated += delta;
+          pendingDelta += delta;
+          scheduleChunkNotification();
         }
       } else if (eventName === 'done') {
+        flushPendingChunks();
         donePayload = parsed as unknown as TDone;
       } else if (eventName === 'error') {
+        cancelScheduledFlush();
         const msg =
           typeof parsed.error === 'string' && parsed.error
             ? parsed.error
@@ -136,6 +183,7 @@ export async function postSseStream<TDone>({
         if (buffer.trim()) {
           processEventBlock(buffer);
         }
+        flushPendingChunks();
         break;
       }
 
@@ -151,8 +199,8 @@ export async function postSseStream<TDone>({
     }
 
     if (!donePayload) {
-      if (accumulated.trim()) {
-        return { reply: accumulated.trim() } as unknown as TDone;
+      if (latestAccumulated.trim()) {
+        return { reply: latestAccumulated.trim() } as unknown as TDone;
       }
       throw new Error(fallbackErrorMessage);
     }
@@ -166,6 +214,7 @@ export async function postSseStream<TDone>({
     }
     throw err;
   } finally {
+    cancelScheduledFlush();
     if (timeoutHandle) clearTimeout(timeoutHandle);
     if (signal) {
       signal.removeEventListener('abort', onExternalAbort);

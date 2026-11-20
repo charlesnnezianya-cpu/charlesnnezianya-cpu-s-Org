@@ -1,15 +1,35 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
-import { ThemeProvider } from './contexts/ThemeContext';
+import { ThemeProvider, useTheme } from './contexts/ThemeContext';
 import { AuthModal, type AuthModalMode } from './components/AuthModal';
 import { BrandLogo } from './components/BrandLogo';
 import { DashboardLayout } from './components/DashboardLayout';
 import { WelcomePage } from './components/WelcomePage';
 
 function BrainstineRoot() {
-  const { user, loading, isPasswordRecovery } = useAuth();
+  const { user, profile, loading, isPasswordRecovery, oauthError } = useAuth();
+  const { setTheme } = useTheme();
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authMode, setAuthMode] = useState<AuthModalMode>('signin');
+  const syncedThemeUserRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!user) {
+      syncedThemeUserRef.current = null;
+      return;
+    }
+    if (
+      profile &&
+      profile.id === user.id &&
+      syncedThemeUserRef.current !== user.id &&
+      (profile.theme_preference === 'light' ||
+        profile.theme_preference === 'dark' ||
+        profile.theme_preference === 'system')
+    ) {
+      syncedThemeUserRef.current = user.id;
+      setTheme(profile.theme_preference);
+    }
+  }, [user, profile, setTheme]);
 
   useEffect(() => {
     if (isPasswordRecovery) {
@@ -17,6 +37,13 @@ function BrainstineRoot() {
       setAuthModalOpen(true);
     }
   }, [isPasswordRecovery]);
+
+  useEffect(() => {
+    if (oauthError && !user) {
+      setAuthMode('signin');
+      setAuthModalOpen(true);
+    }
+  }, [oauthError, user]);
 
   const handleOpenAuth = (mode: AuthModalMode) => {
     setAuthMode(mode);

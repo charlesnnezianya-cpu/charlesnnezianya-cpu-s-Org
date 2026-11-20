@@ -1,13 +1,89 @@
 import React, { useState } from 'react';
-import { Check, Copy } from 'lucide-react';
+import { Check, Copy, Sparkles } from 'lucide-react';
+import type { EducationalDiagramSpec } from '../types/brainstine';
+import { EducationalDiagramRenderer } from './EducationalDiagramRenderer';
 
 interface AcademicContentRendererProps {
   content: string;
   className?: string;
 }
 
+const SYMBOL_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/\\times/g, '×'],
+  [/\\cdot/g, '·'],
+  [/\\div/g, '÷'],
+  [/\\pm/g, '±'],
+  [/\\mp/g, '∓'],
+  [/\\leq/g, '≤'],
+  [/\\geq/g, '≥'],
+  [/\\neq/g, '≠'],
+  [/\\approx/g, '≈'],
+  [/\\equiv/g, '≡'],
+  [/\\propto/g, '∝'],
+  [/\\infty/g, '∞'],
+  [/\\rightarrow|\\to/g, '→'],
+  [/\\leftarrow/g, '←'],
+  [/\\leftrightarrow/g, '↔'],
+  [/\\rightleftharpoons/g, '⇌'],
+  [/\\Rightarrow/g, '⇒'],
+  [/\\alpha/g, 'α'],
+  [/\\beta/g, 'β'],
+  [/\\gamma/g, 'γ'],
+  [/\\delta/g, 'δ'],
+  [/\\Delta/g, 'Δ'],
+  [/\\epsilon/g, 'ε'],
+  [/\\theta/g, 'θ'],
+  [/\\lambda/g, 'λ'],
+  [/\\mu/g, 'μ'],
+  [/\\pi/g, 'π'],
+  [/\\rho/g, 'ρ'],
+  [/\\sigma/g, 'σ'],
+  [/\\Sigma/g, 'Σ'],
+  [/\\tau/g, 'τ'],
+  [/\\phi/g, 'φ'],
+  [/\\omega/g, 'ω'],
+  [/\\Omega/g, 'Ω'],
+  [/\\int/g, '∫'],
+  [/\\sum/g, '∑'],
+  [/\\partial/g, '∂'],
+  [/\\nabla/g, '∇'],
+  [/\\degree|\^\\circ/g, '°'],
+];
+
+function formatMathExpression(raw: string): string {
+  let out = raw.trim();
+  // Clean \frac{a}{b} -> (a) / (b)
+  out = out.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, '($1)/($2)');
+  out = out.replace(/\\sqrt\{([^{}]+)\}/g, '√($1)');
+  for (const [pattern, symbol] of SYMBOL_REPLACEMENTS) {
+    out = out.replace(pattern, symbol);
+  }
+  out = out.replace(/\\left|\\right/g, '');
+  out = out.replace(/\\text\{([^{}]+)\}/g, '$1');
+  return out;
+}
+
+function renderMathText(expr: string, keyPrefix: string): React.ReactNode {
+  const formatted = formatMathExpression(expr);
+  // Render simple superscripts ^{...} / ^x and subscripts _{...} / _x cleanly
+  const parts = formatted.split(/(\^\{[^}]+\}|_[{}]|\^[0-9a-zA-Z+\-]|_[0-9a-zA-Z+\-]|_\{[^}]+\})/g);
+  return parts.map((part, idx) => {
+    const key = `${keyPrefix}-m-${idx}`;
+    if (!part) return null;
+    if (part.startsWith('^')) {
+      const inner = part.startsWith('^{') ? part.slice(2, -1) : part.slice(1);
+      return <sup key={key} className="text-[0.75em] leading-none">{inner}</sup>;
+    }
+    if (part.startsWith('_')) {
+      const inner = part.startsWith('_{') ? part.slice(2, -1) : part.slice(1);
+      return <sub key={key} className="text-[0.75em] leading-none">{inner}</sub>;
+    }
+    return <React.Fragment key={key}>{part}</React.Fragment>;
+  });
+}
+
 function renderInlineSegments(text: string, keyPrefix: string): React.ReactNode[] {
-  const tokens = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g);
+  const tokens = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\$[^$\n]+\$)/g);
   return tokens.map((token, idx) => {
     const key = `${keyPrefix}-${idx}`;
     if (!token) return null;
@@ -24,7 +100,7 @@ function renderInlineSegments(text: string, keyPrefix: string): React.ReactNode[
     if (token.startsWith('**') && token.endsWith('**') && token.length >= 4) {
       return (
         <strong key={key} className="font-semibold text-slate-950 dark:text-white">
-          {token.slice(2, -2)}
+          {renderInlineSegments(token.slice(2, -2), `${key}-b`)}
         </strong>
       );
     }
@@ -33,6 +109,16 @@ function renderInlineSegments(text: string, keyPrefix: string): React.ReactNode[
         <em key={key} className="italic">
           {token.slice(1, -1)}
         </em>
+      );
+    }
+    if (token.startsWith('$') && token.endsWith('$') && token.length >= 3) {
+      return (
+        <span
+          key={key}
+          className="mx-0.5 inline-block rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[0.9em] font-medium text-[#0F1E3D] dark:bg-slate-800/90 dark:text-sky-300"
+        >
+          {renderMathText(token.slice(1, -1), key)}
+        </span>
       );
     }
     return <React.Fragment key={key}>{token}</React.Fragment>;
@@ -76,21 +162,47 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
           )}
         </button>
       </div>
-      <pre className="overflow-x-auto p-3.5 font-mono text-xs leading-relaxed select-text">
+      <pre className="overflow-x-auto p-3.5 font-mono text-xs leading-relaxed academic-selectable">
         <code>{code}</code>
       </pre>
     </div>
   );
 }
 
-export function AcademicContentRenderer({
+function parseTableRow(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+  return trimmed.split('|').map((cell) => cell.trim());
+}
+
+function isTableSeparator(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.includes('|')) return false;
+  const cells = parseTableRow(trimmed);
+  return cells.length > 0 && cells.every((c) => /^:?-{2,}:?$/.test(c));
+}
+
+export const AcademicContentRenderer = React.memo(function AcademicContentRenderer({
   content,
   className = '',
 }: AcademicContentRendererProps) {
   if (!content) return null;
 
-  // Split by fenced code blocks first
-  const segments = content.split(/(```[\s\S]*?```)/g);
+  // Hide any incomplete mid-stream [[DIAGRAM:... marker cleanly while typing
+  let displayContent = content;
+  const openDiagramIdx = displayContent.indexOf('[[DIAGRAM:');
+  let pendingDiagram = false;
+  if (openDiagramIdx !== -1) {
+    const closeIdx = displayContent.indexOf(']]', openDiagramIdx);
+    if (closeIdx === -1) {
+      pendingDiagram = true;
+      displayContent = displayContent.slice(0, openDiagramIdx).trimEnd();
+    }
+  }
+
+  // Split by fenced code blocks, display math blocks ($$...$$), and [[DIAGRAM:{...}]]
+  const segments = displayContent.split(
+    /(```[\s\S]*?```|\$\$[\s\S]*?\$\$|\[\[DIAGRAM:[\s\S]*?\]\])/g
+  );
 
   const renderMarkdownBlock = (blockText: string, segIdx: number) => {
     const lines = blockText.split('\n');
@@ -146,27 +258,82 @@ export function AcademicContentRenderer({
       listBuffer = null;
     };
 
-    lines.forEach((rawLine, lineIdx) => {
-      const line = rawLine.trimEnd();
+    for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+      const line = lines[lineIdx].trimEnd();
       const trimmed = line.trim();
       const seed = `${segIdx}-${lineIdx}`;
 
       if (!trimmed) {
         flushParagraph(seed);
         flushList(seed);
-        return;
+        continue;
+      }
+
+      // Markdown table detection
+      if (
+        trimmed.includes('|') &&
+        lineIdx + 1 < lines.length &&
+        isTableSeparator(lines[lineIdx + 1])
+      ) {
+        flushParagraph(seed);
+        flushList(seed);
+        const headers = parseTableRow(trimmed);
+        lineIdx += 2; // skip separator
+        const rows: string[][] = [];
+        while (lineIdx < lines.length && lines[lineIdx].trim().includes('|')) {
+          rows.push(parseTableRow(lines[lineIdx]));
+          lineIdx++;
+        }
+        lineIdx--; // adjust for outer loop increment
+
+        elements.push(
+          <div
+            key={`tbl-${seed}`}
+            className="my-3 max-w-full overflow-x-auto rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900/50"
+          >
+            <table className="w-full min-w-[420px] border-collapse text-left text-xs sm:text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 bg-slate-100/80 dark:border-slate-700 dark:bg-slate-800/80">
+                  {headers.map((h, hIdx) => (
+                    <th
+                      key={hIdx}
+                      className="px-3.5 py-2.5 font-display text-xs font-semibold text-slate-900 dark:text-white"
+                    >
+                      {renderInlineSegments(h, `th-${seed}-${hIdx}`)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                {rows.map((row, rIdx) => (
+                  <tr
+                    key={rIdx}
+                    className="odd:bg-white even:bg-slate-50/70 dark:odd:bg-transparent dark:even:bg-slate-800/30"
+                  >
+                    {headers.map((_, cIdx) => (
+                      <td
+                        key={cIdx}
+                        className="px-3.5 py-2.5 text-slate-700 dark:text-slate-300"
+                      >
+                        {renderInlineSegments(row[cIdx] ?? '', `td-${seed}-${rIdx}-${cIdx}`)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+        continue;
       }
 
       if (/^---+$/.test(trimmed)) {
         flushParagraph(seed);
         flushList(seed);
         elements.push(
-          <hr
-            key={`hr-${seed}`}
-            className="my-3 border-slate-200 dark:border-slate-800"
-          />
+          <hr key={`hr-${seed}`} className="my-3 border-slate-200 dark:border-slate-800" />
         );
-        return;
+        continue;
       }
 
       const headingMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
@@ -186,21 +353,29 @@ export function AcademicContentRenderer({
             {renderInlineSegments(text, `h-${seed}`)}
           </h4>
         );
-        return;
+        continue;
       }
 
       if (trimmed.startsWith('> ')) {
         flushParagraph(seed);
         flushList(seed);
+        const rawQuote = trimmed.slice(2).replace(/^\[!(KEY|NOTE|TIP)\]\s*/i, '');
+        const isKeyTakeaway =
+          /key (concept|takeaway|idea|formula)|important|remember/i.test(rawQuote) ||
+          /^\[!(KEY|NOTE|TIP)\]/i.test(trimmed.slice(2));
         elements.push(
           <blockquote
             key={`bq-${seed}`}
-            className="my-2 rounded-lg border border-blue-200/80 bg-blue-50/70 px-3.5 py-2 text-sm leading-relaxed text-slate-800 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-slate-200"
+            className={`my-2 rounded-xl border px-3.5 py-2.5 text-sm leading-relaxed ${
+              isKeyTakeaway
+                ? 'border-sky-200 bg-sky-50/80 text-slate-900 dark:border-sky-800/70 dark:bg-sky-950/35 dark:text-slate-100'
+                : 'border-blue-200/80 bg-blue-50/70 text-slate-800 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-slate-200'
+            }`}
           >
-            {renderInlineSegments(trimmed.slice(2), `bq-${seed}`)}
+            {renderInlineSegments(rawQuote, `bq-${seed}`)}
           </blockquote>
         );
-        return;
+        continue;
       }
 
       const unorderedMatch = trimmed.match(/^[-*•]\s+(.+)$/);
@@ -213,7 +388,7 @@ export function AcademicContentRenderer({
           listBuffer = { ordered: false, items: [] };
         }
         listBuffer.items.push(unorderedMatch[1]);
-        return;
+        continue;
       }
 
       const orderedMatch = trimmed.match(/^\d+[.)]\s+(.+)$/);
@@ -226,12 +401,12 @@ export function AcademicContentRenderer({
           listBuffer = { ordered: true, items: [] };
         }
         listBuffer.items.push(orderedMatch[1]);
-        return;
+        continue;
       }
 
       flushList(seed);
       paragraphLines.push(trimmed);
-    });
+    }
 
     flushParagraph(`${segIdx}-end`);
     flushList(`${segIdx}-end`);
@@ -239,24 +414,56 @@ export function AcademicContentRenderer({
   };
 
   return (
-    <div className={`space-y-2.5 select-text ${className}`}>
+    <div className={`space-y-2.5 academic-selectable ${className}`}>
       {segments.map((seg, idx) => {
         if (!seg) return null;
+
         if (seg.startsWith('```') && seg.endsWith('```')) {
           const inner = seg.slice(3, -3);
           const firstNewline = inner.indexOf('\n');
-          const language =
-            firstNewline >= 0 ? inner.slice(0, firstNewline).trim() : '';
-          const code =
-            firstNewline >= 0 ? inner.slice(firstNewline + 1).trimEnd() : inner.trim();
+          const language = firstNewline >= 0 ? inner.slice(0, firstNewline).trim() : '';
+          const code = firstNewline >= 0 ? inner.slice(firstNewline + 1).trimEnd() : inner.trim();
           return <CodeBlock key={`code-${idx}`} code={code} language={language} />;
         }
+
+        if (seg.startsWith('$$') && seg.endsWith('$$') && seg.length > 4) {
+          const expr = seg.slice(2, -2).trim();
+          return (
+            <div
+              key={`math-${idx}`}
+              className="my-2.5 overflow-x-auto rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-center font-mono text-sm font-medium text-[#0F1E3D] dark:border-slate-700 dark:bg-slate-900/80 dark:text-sky-300"
+            >
+              {renderMathText(expr, `math-${idx}`)}
+            </div>
+          );
+        }
+
+        if (seg.startsWith('[[DIAGRAM:') && seg.endsWith(']]')) {
+          const jsonStr = seg.slice('[[DIAGRAM:'.length, -2).trim();
+          try {
+            const parsed = JSON.parse(jsonStr) as EducationalDiagramSpec;
+            if (parsed && parsed.title && parsed.type) {
+              return <EducationalDiagramRenderer key={`diag-${idx}`} spec={parsed} compact />;
+            }
+          } catch {
+            return null;
+          }
+          return null;
+        }
+
         return (
           <React.Fragment key={`md-${idx}`}>
             {renderMarkdownBlock(seg, idx)}
           </React.Fragment>
         );
       })}
+
+      {pendingDiagram && (
+        <div className="my-2 inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-300 select-none">
+          <Sparkles className="h-3.5 w-3.5 text-[#1D4ED8] dark:text-sky-400" aria-hidden="true" />
+          <span>Rendering educational diagram…</span>
+        </div>
+      )}
     </div>
   );
-}
+});

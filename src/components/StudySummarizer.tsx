@@ -26,6 +26,7 @@ import type {
   StudyMaterialRecord,
   SummaryLevel,
 } from '../types/brainstine';
+import { SubjectVisualBanner } from './SubjectVisualBanner';
 import { SummaryDisplay } from './SummaryDisplay';
 
 interface StudySummarizerProps {
@@ -106,6 +107,8 @@ export function StudySummarizer({
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [noticeMsg, setNoticeMsg] = useState<string | null>(null);
+  const extractingRef = useRef(false);
+  const generatingRef = useRef(false);
 
   useEffect(() => {
     if (initialMaterial) {
@@ -177,6 +180,7 @@ export function StudySummarizer({
   };
 
   const extractContent = async () => {
+    if (extractingRef.current) return;
     setErrorMsg(null);
     setNoticeMsg(null);
     setSummary(null);
@@ -191,6 +195,7 @@ export function StudySummarizer({
       return;
     }
 
+    extractingRef.current = true;
     setExtracting(true);
     setUploadProgress(10);
 
@@ -218,6 +223,7 @@ export function StudySummarizer({
         result = await new Promise<ExtractionResult>((resolve, reject) => {
           const xhr = new XMLHttpRequest();
           xhr.open('POST', '/api/materials/extract');
+          xhr.timeout = 120000;
           xhr.upload.onprogress = (evt) => {
             if (evt.lengthComputable) {
               const pct = Math.min(55, Math.round((evt.loaded / evt.total) * 55));
@@ -238,24 +244,37 @@ export function StudySummarizer({
             }
           };
           xhr.onerror = () => reject(new Error('Network error while uploading file.'));
+          xhr.ontimeout = () =>
+            reject(
+              new Error(
+                'Content extraction timed out while processing the file. Try a smaller file or split long documents.'
+              )
+            );
           xhr.send(formData);
         });
       } else {
         setExtractionStatus('Chunking and indexing pasted study text...');
         setUploadProgress(50);
-        const res = await fetch('/api/materials/extract', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            text: pastedText.trim(),
-            title: pastedTitle.trim() || 'Pasted Study Notes',
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error || 'Text processing failed.');
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 75000);
+        try {
+          const res = await fetch('/api/materials/extract', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+            body: JSON.stringify({
+              text: pastedText.trim(),
+              title: pastedTitle.trim() || 'Pasted Study Notes',
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            throw new Error(data.error || 'Text processing failed.');
+          }
+          result = data as ExtractionResult;
+        } finally {
+          clearTimeout(timer);
         }
-        result = data as ExtractionResult;
       }
 
       setUploadProgress(100);
@@ -304,21 +323,27 @@ export function StudySummarizer({
         }
       }
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Failed to extract content.');
+      if ((err as { name?: string })?.name === 'AbortError') {
+        setErrorMsg('Text processing timed out. Please try again.');
+      } else {
+        setErrorMsg(err instanceof Error ? err.message : 'Failed to extract content.');
+      }
       setUploadProgress(0);
     } finally {
+      extractingRef.current = false;
       setExtracting(false);
       setExtractionStatus('');
     }
   };
 
   const handleGenerateSummary = async () => {
+    if (generatingRef.current) return;
     setErrorMsg(null);
     setNoticeMsg(null);
 
     if (!geminiConfigured) {
       setErrorMsg(
-        'GEMINI_API_KEY is missing. Configure GEMINI_API_KEY in Replit Secrets (or Settings > Secrets) before generating AI summaries.'
+        'GEMINI_API_KEY is missing. Configure GEMINI_API_KEY in Secrets before generating AI summaries.'
       );
       return;
     }
@@ -329,13 +354,17 @@ export function StudySummarizer({
       return;
     }
 
+    generatingRef.current = true;
     setGenerating(true);
     setSummarySaved(false);
 
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 110000);
     try {
       const res = await fetch('/api/summaries/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           extractedText: sourceText,
           title: editableTitle.trim() || extraction?.title || 'Study Material',
@@ -352,6 +381,21 @@ export function StudySummarizer({
       setSummary(generated);
 
       if (user && isConfigured) {
+        try {
+          await saveStudySummaryRecord({
+            userId: user.id,
+            materialId: savedMaterialId,
+            summary: generated,
+          });
+          setSummarySaved(true);
+          setNoticeMsg('Summary generated and automatically saved to your Academic History.');
+        } catch (autoSaveErr) {
+          console.warn('Automatic summary save warning:', autoSaveErr);
+          setNoticeMsg(
+            'Summary generated, but automatic cloud save encountered an issue. Click Save Summary to retry.'
+          );
+        }
+
         await recordStudyActivity({
           userId: user.id,
           activityType: 'summarize',
@@ -369,14 +413,22 @@ export function StudySummarizer({
         onActivityRecorded?.();
       }
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Unable to generate summary.');
+      if ((err as { name?: string })?.name === 'AbortError') {
+        setErrorMsg(
+          'Summary generation timed out while waiting for the AI service. Please try again or choose a shorter depth.'
+        );
+      } else {
+        setErrorMsg(err instanceof Error ? err.message : 'Unable to generate summary.');
+      }
     } finally {
+      clearTimeout(timer);
+      generatingRef.current = false;
       setGenerating(false);
     }
   };
 
   const handleSaveSummary = async () => {
-    if (!summary || !user || !isConfigured) return;
+    if (!summary || !user || !isConfigured || summarySaved || savingSummary) return;
     setSavingSummary(true);
     setErrorMsg(null);
     try {
@@ -418,8 +470,8 @@ export function StudySummarizer({
               <p className="mt-1 text-xs leading-relaxed">
                 The server environment variable <code className="font-mono font-semibold">GEMINI_API_KEY</code> is
                 currently missing. Configure <code className="font-mono">GEMINI_API_KEY</code> in{' '}
-                <strong>Replit Secrets</strong> (or the <strong>Settings &gt; Secrets</strong> panel) and
-                restart the server to enable image OCR, audio transcription, and AI summarization.
+                <strong>Secrets</strong> and restart the server to enable image OCR, audio
+                transcription, and AI summarization.
                 Non-AI features such as saving raw text materials, browsing your library, and theme
                 settings remain fully usable.
               </p>
@@ -429,7 +481,7 @@ export function StudySummarizer({
       )}
 
       {/* Input Workspace Card */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
         <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-5 sm:flex-row sm:items-center dark:border-slate-800">
           <div>
             <h2 className="font-display text-xl font-bold text-slate-900 select-none dark:text-white">
@@ -450,7 +502,7 @@ export function StudySummarizer({
               role="tab"
               aria-selected={inputMode === 'file'}
               onClick={() => setInputMode('file')}
-              className={`rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              className={`min-h-9 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
                 inputMode === 'file'
                   ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
                   : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
@@ -463,7 +515,7 @@ export function StudySummarizer({
               role="tab"
               aria-selected={inputMode === 'text'}
               onClick={() => setInputMode('text')}
-              className={`rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              className={`min-h-9 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
                 inputMode === 'text'
                   ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
                   : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
@@ -473,6 +525,14 @@ export function StudySummarizer({
             </button>
           </div>
         </div>
+
+        <SubjectVisualBanner
+          visualKey="summarizer"
+          variant="compact"
+          title="Digital Textbook Synthesis Engine"
+          subtitle="Structured chapters, definitions, comparison tables, and interactive schematics from your course notes."
+          className="mt-5"
+        />
 
         {errorMsg && (
           <div

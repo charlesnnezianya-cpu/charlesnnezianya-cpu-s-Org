@@ -151,6 +151,33 @@ export function exportSummaryToPdf(summary: StructuredSummary): void {
     }
   }
 
+  if (summary.comparisonTables && summary.comparisonTables.length > 0) {
+    pushHeading('Comparison Tables');
+    for (const table of summary.comparisonTables) {
+      pushSubheading(table.title);
+      pushBody(`Columns: ${table.headers.join(' | ')}`, true);
+      for (const row of table.rows) {
+        pushBody(`* ${row.criterion}: ${row.values.join(' | ')}`, true);
+      }
+    }
+  }
+
+  if (summary.visualDiagrams && summary.visualDiagrams.length > 0) {
+    pushHeading('Visual Diagram Summaries');
+    for (const diag of summary.visualDiagrams) {
+      pushSubheading(diag.title);
+      if (diag.caption) {
+        pushBody(diag.caption, true);
+      }
+      if (diag.nodes && diag.nodes.length > 0) {
+        pushBody(
+          `Components: ${diag.nodes.map((n) => (n.sublabel ? `${n.label} (${n.sublabel})` : n.label)).join(' -> ')}`,
+          true
+        );
+      }
+    }
+  }
+
   if (summary.revisionNotes.length > 0) {
     pushHeading('Revision Notes');
     for (const note of summary.revisionNotes) {

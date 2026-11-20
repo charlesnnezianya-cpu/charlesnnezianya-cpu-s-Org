@@ -1,6 +1,8 @@
 import React from 'react';
 import { Monitor, Moon, Sun } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
+import { upsertUserProfile } from '../lib/supabase';
 import type { ThemeMode } from '../types/brainstine';
 
 interface ThemeSelectorProps {
@@ -9,6 +11,24 @@ interface ThemeSelectorProps {
 
 export function ThemeSelector({ compact = false }: ThemeSelectorProps) {
   const { theme, setTheme } = useTheme();
+  const { user, profile, isConfigured } = useAuth();
+
+  const handleSelectTheme = (mode: ThemeMode) => {
+    setTheme(mode);
+    if (user && isConfigured) {
+      const displayName =
+        profile?.display_name ||
+        (user.user_metadata?.display_name as string | undefined) ||
+        user.email?.split('@')[0] ||
+        'Student';
+      upsertUserProfile({
+        id: user.id,
+        email: user.email || '',
+        display_name: displayName,
+        theme_preference: mode,
+      }).catch(() => {});
+    }
+  };
 
   const options: { id: ThemeMode; label: string; icon: React.ReactNode }[] = [
     { id: 'light', label: 'Light', icon: <Sun className="h-3.5 w-3.5" aria-hidden="true" /> },
@@ -28,7 +48,7 @@ export function ThemeSelector({ compact = false }: ThemeSelectorProps) {
           <button
             key={opt.id}
             type="button"
-            onClick={() => setTheme(opt.id)}
+            onClick={() => handleSelectTheme(opt.id)}
             aria-pressed={active}
             title={`${opt.label} theme`}
             className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 ${

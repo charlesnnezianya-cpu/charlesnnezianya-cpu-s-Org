@@ -4,6 +4,71 @@ export type SummaryLevel = 'short' | 'detailed' | 'comprehensive';
 
 export type MaterialSourceType = 'pdf' | 'image' | 'audio' | 'text';
 
+export type EducationalDiagramType =
+  | 'process_flow'
+  | 'concept_map'
+  | 'comparison_matrix'
+  | 'cartesian_plot'
+  | 'scientific_system';
+
+export interface DiagramNode {
+  id: string;
+  label: string;
+  sublabel?: string;
+  detail?: string;
+  group?: string;
+  x?: number;
+  y?: number;
+  tone?: 'primary' | 'accent' | 'neutral' | 'success' | 'warning';
+}
+
+export interface DiagramEdge {
+  from: string;
+  to: string;
+  label?: string;
+  bidirectional?: boolean;
+}
+
+export interface PlotSeriesPoint {
+  x: number;
+  y: number;
+  label?: string;
+}
+
+export interface PlotSeries {
+  name: string;
+  points: PlotSeriesPoint[];
+  color?: 'blue' | 'cyan' | 'emerald' | 'amber';
+}
+
+export interface ComparisonRow {
+  criterion: string;
+  values: string[];
+}
+
+export interface ComparisonTable {
+  title: string;
+  headers: string[];
+  rows: ComparisonRow[];
+  caption?: string;
+}
+
+export interface EducationalDiagramSpec {
+  id?: string;
+  type: EducationalDiagramType;
+  title: string;
+  subject?: string;
+  caption?: string;
+  nodes?: DiagramNode[];
+  edges?: DiagramEdge[];
+  columns?: string[];
+  rows?: { label: string; cells: string[] }[];
+  xAxisLabel?: string;
+  yAxisLabel?: string;
+  series?: PlotSeries[];
+  annotations?: { x: number; y: number; text: string }[];
+}
+
 export interface UserProfile {
   id: string;
   email: string;
@@ -55,6 +120,8 @@ export interface StructuredSummary {
   importantFacts: string[];
   relevantExamples: RelevantExample[];
   formulasOrFrameworks: FormulaOrFramework[];
+  comparisonTables?: ComparisonTable[];
+  visualDiagrams?: EducationalDiagramSpec[];
   revisionNotes: string[];
   keyTakeaways: string[];
   markdown: string;
@@ -143,6 +210,7 @@ export interface QuizQuestion {
   maxMarks: number;
   explanation: string;
   topicTag?: string;
+  visualAid?: EducationalDiagramSpec;
 }
 
 export interface GeneratedQuizPayload {
@@ -229,7 +297,6 @@ export interface QuizAttemptRecord {
   created_at: string;
 }
 
-// Prompt 4: AI Chat, Personal AI Tutor, and Snap-a-Photo Types
 export type AiSessionType = 'chat' | 'tutor';
 export type TutorMode = 'beginner' | 'standard' | 'advanced';
 
@@ -281,8 +348,11 @@ export interface AiMessageRecord {
   localPreviewUrl?: string;
 }
 
+export type QuizAssessmentMode = 'practice' | 'exam';
+
 export type DashboardSection =
   | 'overview'
+  | 'history'
   | 'summarizer'
   | 'chat'
   | 'tutor'

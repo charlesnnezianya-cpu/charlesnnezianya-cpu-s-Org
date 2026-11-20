@@ -17,6 +17,8 @@ import {
 } from 'lucide-react';
 import { exportSummaryToPdf } from '../lib/pdfExport';
 import type { FollowUpItem, StructuredSummary, SummaryLevel } from '../types/brainstine';
+import { EducationalDiagramRenderer } from './EducationalDiagramRenderer';
+import { SubjectVisualBanner } from './SubjectVisualBanner';
 
 interface SummaryDisplayProps {
   summary: StructuredSummary;
@@ -36,7 +38,9 @@ const LEVEL_LABELS: Record<SummaryLevel, string> = {
 
 type SectionKey =
   | 'overview'
+  | 'diagrams'
   | 'concepts'
+  | 'comparisons'
   | 'definitions'
   | 'terminology'
   | 'difficult'
@@ -48,7 +52,9 @@ type SectionKey =
 
 const ALL_SECTIONS: SectionKey[] = [
   'overview',
+  'diagrams',
   'concepts',
+  'comparisons',
   'definitions',
   'terminology',
   'difficult',
@@ -71,7 +77,9 @@ export function SummaryDisplay({
   const [copied, setCopied] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>({
     overview: true,
+    diagrams: true,
     concepts: true,
+    comparisons: true,
     definitions: true,
     terminology: true,
     difficult: true,
@@ -129,10 +137,13 @@ export function SummaryDisplay({
     }
 
     setFollowUpLoading(true);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 75000);
     try {
       const res = await fetch('/api/summaries/followup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           actionType,
           question: customQuestion?.trim(),
@@ -169,8 +180,13 @@ export function SummaryDisplay({
         setQuestionInput('');
       }
     } catch (err: unknown) {
-      setFollowUpError(err instanceof Error ? err.message : 'Unable to process follow-up.');
+      if ((err as { name?: string })?.name === 'AbortError') {
+        setFollowUpError('Follow-up request timed out. Please try again in a moment.');
+      } else {
+        setFollowUpError(err instanceof Error ? err.message : 'Unable to process follow-up.');
+      }
     } finally {
+      clearTimeout(timer);
       setFollowUpLoading(false);
     }
   };
@@ -209,7 +225,7 @@ export function SummaryDisplay({
     <div className="space-y-6">
       <article className="rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0D162B]">
         {/* Header & Primary Export/Save Controls */}
-        <div className="flex flex-col justify-between gap-4 border-b border-slate-200 px-6 py-5 lg:flex-row lg:items-start dark:border-slate-800">
+        <div className="flex flex-col justify-between gap-4 border-b border-slate-200 px-4 py-5 sm:px-6 lg:flex-row lg:items-start dark:border-slate-800">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-slate-500 select-none dark:text-slate-400">
               <span className="text-blue-700 dark:text-cyan-400">{summary.subjectArea}</span>
@@ -226,7 +242,7 @@ export function SummaryDisplay({
                 </>
               )}
             </div>
-            <h2 className="mt-1.5 font-display text-2xl font-bold tracking-tight text-slate-900 select-text dark:text-white">
+            <h2 className="mt-1.5 font-display text-xl font-bold tracking-tight text-slate-900 academic-selectable sm:text-2xl dark:text-white">
               {summary.title}
             </h2>
           </div>
@@ -235,7 +251,7 @@ export function SummaryDisplay({
             <button
               type="button"
               onClick={toggleAllSections}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               {allExpanded ? 'Collapse All' : 'Expand All'}
             </button>
@@ -296,22 +312,51 @@ export function SummaryDisplay({
         </div>
 
         {/* Attribution Legend */}
-        <div className="border-b border-slate-200 bg-slate-50/70 px-6 py-2.5 text-xs text-slate-600 select-none dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400">
+        <div className="border-b border-slate-200 bg-slate-50/70 px-4 py-2.5 text-xs text-slate-600 select-none sm:px-6 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400">
           <span className="font-semibold text-slate-800 dark:text-slate-200">Source Provenance: </span>
           Direct source extractions are labeled <span className="font-semibold text-blue-700 dark:text-cyan-400">From Source Material</span>; supplemental conceptual explanations are labeled <span className="font-semibold text-indigo-700 dark:text-indigo-400">AI Clarification</span>.
         </div>
 
+        {/* Illustrated Digital Textbook Subject Cover */}
+        <div className="px-4 pt-5 sm:px-6">
+          <SubjectVisualBanner
+            subjectHint={`${summary.subjectArea} ${summary.title}`}
+            fallbackKey="summarizer"
+            title={summary.title}
+            subtitle={summary.topicOverview}
+            variant="textbook"
+          />
+        </div>
+
         {/* Collapsible Summary Sections */}
-        <div className="divide-y divide-slate-200 px-6 dark:divide-slate-800">
+        <div className="divide-y divide-slate-200 px-4 sm:px-6 dark:divide-slate-800">
           {/* 1. Topic Overview */}
           <section>
             {renderSectionHeader('overview', 'Topic Overview', 'From Source Material')}
             {expandedSections.overview && (
-              <p className="pb-5 max-w-3xl text-base leading-relaxed text-slate-800 select-text dark:text-slate-200">
+              <p className="pb-5 max-w-3xl text-base leading-relaxed text-slate-800 academic-selectable dark:text-slate-200">
                 {summary.topicOverview}
               </p>
             )}
           </section>
+
+          {/* 1B. Visual Diagrams & Schematics */}
+          {(summary.visualDiagrams ?? []).length > 0 && (
+            <section>
+              {renderSectionHeader(
+                'diagrams',
+                'Visual Diagrams & Concept Maps',
+                'Interactive Visual Aids'
+              )}
+              {expandedSections.diagrams && (
+                <div className="space-y-4 pb-5">
+                  {(summary.visualDiagrams ?? []).map((diag, idx) => (
+                    <EducationalDiagramRenderer key={idx} spec={diag} />
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
 
           {/* 2. Main Concepts Arranged Under Headings */}
           {summary.mainConcepts.length > 0 && (
@@ -359,6 +404,73 @@ export function SummaryDisplay({
                             {concept.aiClarification}
                           </p>
                         </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* 2B. Comparison Tables */}
+          {(summary.comparisonTables ?? []).length > 0 && (
+            <section>
+              {renderSectionHeader('comparisons', 'Comparison Tables', 'Structured Contrasts')}
+              {expandedSections.comparisons && (
+                <div className="space-y-5 pb-5">
+                  {(summary.comparisonTables ?? []).map((table, tIdx) => (
+                    <div
+                      key={tIdx}
+                      className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/50"
+                    >
+                      <div className="border-b border-slate-200 bg-slate-50/80 px-4 py-2.5 dark:border-slate-800 dark:bg-slate-900">
+                        <h4 className="font-display text-sm font-semibold text-slate-900 dark:text-white">
+                          {table.title}
+                        </h4>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full border-collapse text-left text-xs sm:text-sm academic-selectable">
+                          <thead>
+                            <tr className="border-b border-slate-200 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/50">
+                              <th className="px-4 py-2.5 font-display text-xs font-semibold text-slate-900 dark:text-white">
+                                Criterion
+                              </th>
+                              {table.headers.map((h, hIdx) => (
+                                <th
+                                  key={hIdx}
+                                  className="px-4 py-2.5 font-display text-xs font-semibold text-slate-900 dark:text-white"
+                                >
+                                  {h}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                            {table.rows.map((row, rIdx) => (
+                              <tr
+                                key={rIdx}
+                                className="odd:bg-white even:bg-slate-50/60 dark:odd:bg-transparent dark:even:bg-slate-800/20"
+                              >
+                                <td className="px-4 py-2.5 font-semibold text-slate-900 dark:text-slate-100">
+                                  {row.criterion}
+                                </td>
+                                {row.values.map((val, vIdx) => (
+                                  <td
+                                    key={vIdx}
+                                    className="px-4 py-2.5 text-slate-700 dark:text-slate-300"
+                                  >
+                                    {val}
+                                  </td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      {table.caption && (
+                        <p className="border-t border-slate-200 bg-slate-50/50 px-4 py-2 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400">
+                          {table.caption}
+                        </p>
                       )}
                     </div>
                   ))}
@@ -565,20 +677,19 @@ export function SummaryDisplay({
             <section>
               {renderSectionHeader('takeaways', 'Key Takeaways')}
               {expandedSections.takeaways && (
-                <ul className="space-y-2 pb-5">
+                <div className="grid grid-cols-1 gap-3 pb-5 sm:grid-cols-2">
                   {summary.keyTakeaways.map((takeaway, idx) => (
-                    <li
+                    <div
                       key={idx}
-                      className="flex items-start gap-2.5 text-sm leading-relaxed text-slate-700 select-text dark:text-slate-300"
+                      className="flex items-start gap-3 rounded-xl border border-sky-200/80 bg-sky-50/60 p-3.5 text-sm leading-relaxed text-slate-800 academic-selectable dark:border-sky-900/50 dark:bg-sky-950/30 dark:text-slate-200"
                     >
-                      <span
-                        className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-600 dark:bg-cyan-400"
-                        aria-hidden="true"
-                      />
+                      <span className="mt-0.5 font-mono text-xs font-bold text-[#1D4ED8] select-none tabular-nums dark:text-sky-400">
+                        {String(idx + 1).padStart(2, '0')}
+                      </span>
                       <span>{takeaway}</span>
-                    </li>
+                    </div>
                   ))}
-                </ul>
+                </div>
               )}
             </section>
           )}

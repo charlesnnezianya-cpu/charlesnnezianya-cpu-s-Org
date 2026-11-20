@@ -11,6 +11,12 @@
   html {
     font-family: var(--font-sans);
     scroll-behavior: smooth;
+    overflow-x: hidden;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    overflow-x: hidden;
   }
 
   h1, h2, h3, h4, .font-display {
@@ -20,6 +26,67 @@
   code, pre, .font-mono {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
+  }
+
+  /* Prevent accidental blue tap/drag highlighting on interactive UI chrome & media */
+  button,
+  [role="button"],
+  nav,
+  aside,
+  header,
+  footer,
+  label,
+  summary,
+  figure,
+  img {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Intentional keyboard focus visibility without noisy click rings */
+  button:focus-visible,
+  a:focus-visible,
+  [role="button"]:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible {
+    outline: 2px solid #1D4ED8;
+    outline-offset: 2px;
+  }
+
+  .dark button:focus-visible,
+  .dark a:focus-visible,
+  .dark [role="button"]:focus-visible,
+  .dark input:focus-visible,
+  .dark textarea:focus-visible,
+  .dark select:focus-visible {
+    outline-color: #38BDF8;
+  }
+
+  /* Always preserve deliberate text selection in form controls and academic content */
+  input,
+  textarea,
+  select,
+  [contenteditable="true"],
+  .academic-selectable,
+  .academic-selectable *,
+  .select-text {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* Subtle intentional highlight color inside readable academic content */
+  .academic-selectable ::selection,
+  .academic-selectable::selection {
+    background-color: rgba(29, 78, 216, 0.18);
+    color: inherit;
+  }
+
+  .dark .academic-selectable ::selection,
+  .dark .academic-selectable::selection {
+    background-color: rgba(56, 189, 248, 0.25);
+    color: inherit;
   }
 
   button:not(:disabled),
@@ -35,6 +102,12 @@
 
 .text-balance {
   text-wrap: balance;
+}
+
+.ui-no-select {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 @media (prefers-reduced-motion: reduce) {

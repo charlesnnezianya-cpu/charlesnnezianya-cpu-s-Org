@@ -56,10 +56,28 @@ const ALLOWED_AUDIO_MIMES = new Set([
 ]);
 
 const DEFAULT_GEMINI_MODEL = 'gemini-3.1-flash-lite';
+const CANDIDATE_GEMINI_MODELS = ['gemini-3.1-flash-lite', 'gemini-4-hydrogen'];
+const MODEL_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+function getConfiguredGeminiModel(): string | null {
+  const configured = process.env.GEMINI_MODEL?.trim();
+  return configured || null;
+}
+
+let resolvedGeminiModelCache: {
+  activeModel: string;
+  configuredModel: string | null;
+  fallbackUsed: boolean;
+  reason: string | null;
+  checkedAt: number;
+} | null = null;
+let resolvingModelPromise: Promise<string> | null = null;
 
 function getGeminiModel(): string {
-  const configured = process.env.GEMINI_MODEL?.trim();
-  return configured || DEFAULT_GEMINI_MODEL;
+  if (resolvedGeminiModelCache?.activeModel) {
+    return resolvedGeminiModelCache.activeModel;
+  }
+  return getConfiguredGeminiModel() || DEFAULT_GEMINI_MODEL;
 }
 
 function getThinkingConfig(
@@ -250,18 +268,8 @@ async function withRetry<T>(
           quotaId: quotaInfo.quotaId,
           retryDelaySeconds: quotaInfo.retryDelaySeconds,
         });
-        // Never repeatedly retry exhausted daily, zero-limit, or long-cooldown quotas
-        const canShortBackoff =
-          (quotaInfo.quotaScope === 'rpm' || quotaInfo.quotaScope === 'tpm') &&
-          (quotaInfo.retryDelaySeconds === null || quotaInfo.retryDelaySeconds <= 5) &&
-          attempt === 0;
-
-        if (!canShortBackoff) {
-          throw err;
-        }
-        const waitMs = Math.min(5000, Math.max(1500, (quotaInfo.retryDelaySeconds ?? 2) * 1000));
-        await new Promise((resolve) => setTimeout(resolve, waitMs));
-        continue;
+        // Never automatically repeat requests when Gemini reports rate limits / quota exhaustion
+        throw err;
       }
 
       const isTransient =
@@ -365,20 +373,23 @@ function formatGeminiError(err: unknown): { status: number; message: string } {
         'The configured Gemini AI model is currently unavailable or unsupported. Please verify the GEMINI_MODEL environment configuration.',
     };
   }
+  const errName = err instanceof Error ? err.name : '';
   if (
     status === 503 ||
+    errName === 'AbortError' ||
     raw.includes('UNAVAILABLE') ||
     raw.includes('"code":503') ||
     raw.toLowerCase().includes('high demand') ||
     raw.toLowerCase().includes('overloaded') ||
     raw.toLowerCase().includes('took too long') ||
     raw.toLowerCase().includes('stalled') ||
-    raw.toLowerCase().includes('timeout')
+    raw.toLowerCase().includes('timeout') ||
+    raw.toLowerCase().includes('operation was aborted')
   ) {
     return {
       status: 503,
       message:
-        'The Gemini AI service is temporarily experiencing high demand. Your message has been preserved—please try again in a few moments.',
+        'The Gemini AI service is temporarily experiencing high demand or took too long to respond. Your message has been preserved—please try again in a few moments.',
     };
   }
   const readable = extractReadableApiError(raw);
@@ -582,6 +593,23 @@ function buildMarkdownSummary(summary: Omit<StructuredSummary, 'markdown'>): str
     lines.push('');
   }
 
+  if (summary.comparisonTables && summary.comparisonTables.length > 0) {
+    lines.push('## Comparison Tables');
+    for (const table of summary.comparisonTables) {
+      lines.push(`### ${table.title}`);
+      const headers = ['Criterion', ...table.headers];
+      lines.push(`| ${headers.join(' | ')} |`);
+      lines.push(`| ${headers.map(() => '---').join(' | ')} |`);
+      for (const row of table.rows) {
+        lines.push(`| ${row.criterion} | ${row.values.join(' | ')} |`);
+      }
+      if (table.caption) {
+        lines.push(`*${table.caption}*`);
+      }
+      lines.push('');
+    }
+  }
+
   if (summary.revisionNotes.length > 0) {
     lines.push('## Revision Notes');
     for (const note of summary.revisionNotes) {
@@ -610,22 +638,433 @@ const upload = multer({
 
 async function startServer() {
   const app = express();
+  app.disable('x-powered-by');
   app.set('trust proxy', true);
-  app.use(express.json({ limit: '20mb' }));
 
-  app.get('/api/health', (_req: Request, res: Response) => {
+  app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+  });
+
+  app.use(express.json({ limit: '20mb' }));
+  app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    if (err instanceof SyntaxError && 'body' in (err as object)) {
+      return res.status(400).json({ error: 'Invalid JSON request payload.' });
+    }
+    const errObj = err as { type?: string; status?: number };
+    if (errObj?.type === 'entity.too.large' || errObj?.status === 413) {
+      return res.status(413).json({
+        error: 'Request payload exceeds the 20 MB limit. Please upload a smaller image or document.',
+      });
+    }
+    next(err);
+  });
+
+  async function probeSingleModelQuick(
+    ai: GoogleGenAI,
+    modelId: string,
+    timeoutMs = 7000
+  ): Promise<{ ok: boolean; latencyMs: number; status?: number; error?: string; quotaHit?: boolean }> {
+    const start = Date.now();
+    const ac = new AbortController();
+    let abortedByTimer = false;
+    const timer = setTimeout(() => {
+      abortedByTimer = true;
+      ac.abort(new Error(`Model probe timeout (${timeoutMs}ms)`));
+    }, timeoutMs);
+    try {
+      const res = await ai.models.generateContent({
+        model: modelId,
+        contents: 'Reply with: OK',
+        config: {
+          ...getThinkingConfig(modelId, ThinkingLevel.LOW),
+          abortSignal: ac.signal,
+        },
+      });
+      return {
+        ok: Boolean((res.text ?? '').trim()),
+        latencyMs: Date.now() - start,
+      };
+    } catch (err: unknown) {
+      const quota = inspectGeminiQuotaError(err);
+      const formatted = abortedByTimer
+        ? { status: 503, message: `Timed out after ${timeoutMs}ms` }
+        : formatGeminiError(err);
+      return {
+        ok: false,
+        latencyMs: Date.now() - start,
+        status: formatted.status,
+        error: formatted.message,
+        quotaHit: quota.isQuotaError,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function ensureResolvedGeminiModel(forceRefresh = false): Promise<string> {
+    const configured = getConfiguredGeminiModel();
+    if (!isGeminiConfigured()) {
+      return configured || DEFAULT_GEMINI_MODEL;
+    }
+
+    if (
+      !forceRefresh &&
+      resolvedGeminiModelCache &&
+      resolvedGeminiModelCache.configuredModel === configured &&
+      Date.now() - resolvedGeminiModelCache.checkedAt < MODEL_CACHE_TTL_MS
+    ) {
+      return resolvedGeminiModelCache.activeModel;
+    }
+
+    // If unset or already set to verified fast default, skip probe calls
+    if (!configured || configured === DEFAULT_GEMINI_MODEL) {
+      resolvedGeminiModelCache = {
+        activeModel: DEFAULT_GEMINI_MODEL,
+        configuredModel: configured,
+        fallbackUsed: false,
+        reason: null,
+        checkedAt: Date.now(),
+      };
+      return DEFAULT_GEMINI_MODEL;
+    }
+
+    if (resolvingModelPromise && !forceRefresh) {
+      return resolvingModelPromise;
+    }
+
+    resolvingModelPromise = (async () => {
+      try {
+        const ai = getGeminiClient();
+        const configuredProbe = await probeSingleModelQuick(ai, configured, 7000);
+
+        if (configuredProbe.ok) {
+          resolvedGeminiModelCache = {
+            activeModel: configured,
+            configuredModel: configured,
+            fallbackUsed: false,
+            reason: null,
+            checkedAt: Date.now(),
+          };
+          return configured;
+        }
+
+        // Do not burn extra requests if quota is exhausted or API key is invalid
+        if (configuredProbe.quotaHit || configuredProbe.status === 403) {
+          resolvedGeminiModelCache = {
+            activeModel: configured,
+            configuredModel: configured,
+            fallbackUsed: false,
+            reason: configuredProbe.error || null,
+            checkedAt: Date.now(),
+          };
+          return configured;
+        }
+
+        // Configured model timed out, is unavailable (503), or unsupported (404/502) -> test verified candidates
+        for (const candidate of CANDIDATE_GEMINI_MODELS) {
+          if (candidate === configured) continue;
+          const candidateProbe = await probeSingleModelQuick(ai, candidate, 7000);
+          if (candidateProbe.ok) {
+            const reason = `Configured GEMINI_MODEL "${configured}" did not respond within 7s or is unavailable (${configuredProbe.error || 'timeout'}). Automatically switched to verified supported model "${candidate}".`;
+            console.warn('[Gemini Model Resolver]', reason);
+            resolvedGeminiModelCache = {
+              activeModel: candidate,
+              configuredModel: configured,
+              fallbackUsed: true,
+              reason,
+              checkedAt: Date.now(),
+            };
+            return candidate;
+          }
+          if (candidateProbe.quotaHit || candidateProbe.status === 403) {
+            break;
+          }
+        }
+
+        // Default back to verified DEFAULT_GEMINI_MODEL rather than leaving a known-stalling model active
+        const fallbackReason = `Configured GEMINI_MODEL "${configured}" failed health check (${configuredProbe.error || 'unavailable'}). Defaulting to "${DEFAULT_GEMINI_MODEL}".`;
+        console.warn('[Gemini Model Resolver]', fallbackReason);
+        resolvedGeminiModelCache = {
+          activeModel: DEFAULT_GEMINI_MODEL,
+          configuredModel: configured,
+          fallbackUsed: true,
+          reason: fallbackReason,
+          checkedAt: Date.now(),
+        };
+        return DEFAULT_GEMINI_MODEL;
+      } finally {
+        resolvingModelPromise = null;
+      }
+    })();
+
+    return resolvingModelPromise;
+  }
+
+  app.use(['/api/materials', '/api/summaries', '/api/quizzes', '/api/ai'], async (_req: Request, _res: Response, next: NextFunction) => {
+    try {
+      await ensureResolvedGeminiModel();
+    } catch {
+      // Allow downstream route error handler to report configuration errors cleanly
+    }
+    next();
+  });
+
+  app.get('/api/health', async (req: Request, res: Response) => {
     const geminiConfigured = isGeminiConfigured();
-    const supabaseConfigured = Boolean(
-      (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL) &&
-        process.env.VITE_SUPABASE_ANON_KEY
-    );
+    const supabaseUrl = (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '').trim();
+    const supabaseAnonKey = (process.env.VITE_SUPABASE_ANON_KEY || '').trim();
+    const supabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
+    const configuredModel = getConfiguredGeminiModel();
+
+    if (geminiConfigured && !resolvedGeminiModelCache) {
+      await ensureResolvedGeminiModel().catch(() => {});
+    }
+
+    if (req.query.probe === '1' && geminiConfigured) {
+      const ai = getGeminiClient();
+      const listedModels: string[] = [];
+      let listError: string | null = null;
+
+      try {
+        const pager = await ai.models.list({ config: { pageSize: 50 } });
+        for await (const m of pager) {
+          if (m.name) {
+            listedModels.push(m.name.replace(/^models\//, ''));
+          }
+          if (listedModels.length >= 60) break;
+        }
+      } catch (err: unknown) {
+        listError = err instanceof Error ? err.message : String(err);
+      }
+
+      const probeTargets = Array.from(
+        new Set(
+          [configuredModel, ...CANDIDATE_GEMINI_MODELS].filter((x): x is string => Boolean(x))
+        )
+      );
+      const probeResults = [];
+      for (const candidate of probeTargets) {
+        const result = await probeSingleModelQuick(ai, candidate, 10000);
+        probeResults.push({ model: candidate, ...result });
+        if (result.quotaHit) break;
+      }
+
+      let supabaseHealthy: boolean | null = null;
+      if (supabaseConfigured) {
+        try {
+          const sbRes = await fetch(`${supabaseUrl.replace(/\/$/, '')}/auth/v1/health`, {
+            headers: { apikey: supabaseAnonKey },
+          });
+          supabaseHealthy = sbRes.ok;
+        } catch {
+          supabaseHealthy = false;
+        }
+      }
+
+      let imageGenProbe: { model: string; available: boolean; error?: string } | null = null;
+      if (req.query.imageProbe === '1') {
+        const imgModel = 'gemini-3.1-flash-lite-image';
+        try {
+          const ac = new AbortController();
+          const timer = setTimeout(() => ac.abort(new Error('Image model probe timeout')), 10000);
+          try {
+            const imgRes = await ai.models.generateContent({
+              model: imgModel,
+              contents: 'Simple 2D educational schematic icon of a plant cell.',
+              config: {
+                responseModalities: ['IMAGE'],
+                abortSignal: ac.signal,
+              },
+            });
+            const hasImg = Boolean(
+              imgRes.candidates?.[0]?.content?.parts?.some((p) => p.inlineData?.data)
+            );
+            imageGenProbe = { model: imgModel, available: hasImg };
+          } finally {
+            clearTimeout(timer);
+          }
+        } catch (err: unknown) {
+          imageGenProbe = {
+            model: imgModel,
+            available: false,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
+
+      return res.json({
+        ok: true,
+        geminiConfigured,
+        configuredModel,
+        activeModel: getGeminiModel(),
+        modelFallbackUsed: Boolean(resolvedGeminiModelCache?.fallbackUsed),
+        modelNote: resolvedGeminiModelCache?.reason || null,
+        requiredAiEnvVar: 'GEMINI_API_KEY',
+        supabaseConfigured,
+        supabaseHealthy,
+        listedModels,
+        listError,
+        probeResults,
+        imageGenProbe,
+      });
+    }
+
     res.json({
       ok: true,
       geminiConfigured,
+      configuredModel,
       activeModel: getGeminiModel(),
+      modelFallbackUsed: Boolean(resolvedGeminiModelCache?.fallbackUsed),
+      modelNote: resolvedGeminiModelCache?.reason || null,
       requiredAiEnvVar: 'GEMINI_API_KEY',
       supabaseConfigured,
     });
+  });
+
+  app.get('/api/auth/oauth-status', async (req: Request, res: Response) => {
+    const supabaseUrl = (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '').trim().replace(/\/$/, '');
+    const supabaseAnonKey = (process.env.VITE_SUPABASE_ANON_KEY || '').trim();
+    if (!supabaseUrl || !supabaseAnonKey) {
+      return res.json({
+        supabaseConfigured: false,
+        googleEnabled: false,
+        reason: 'Supabase environment variables are not configured.',
+      });
+    }
+
+    try {
+      const settingsRes = await fetch(`${supabaseUrl}/auth/v1/settings`, {
+        headers: { apikey: supabaseAnonKey },
+      });
+      const settingsJson = settingsRes.ok
+        ? ((await settingsRes.json()) as {
+            external?: Record<string, boolean>;
+            disable_signup?: boolean;
+          })
+        : null;
+
+      const googleEnabled = Boolean(settingsJson?.external?.google);
+      const originParam =
+        typeof req.query.redirectTo === 'string' && req.query.redirectTo.trim()
+          ? req.query.redirectTo.trim()
+          : `${req.protocol}://${req.get('host') || 'localhost:3000'}`;
+
+      const authRes = await fetch(
+        `${supabaseUrl}/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(originParam)}`,
+        { redirect: 'manual' }
+      );
+
+      const location = authRes.headers.get('location') || '';
+      let supabaseErrorBody: string | null = null;
+      if (!location && !authRes.ok) {
+        supabaseErrorBody = await authRes.text().catch(() => null);
+      }
+
+      let targetHost: string | null = null;
+      let hasClientId = false;
+      let callbackMatchesSupabase = false;
+      let scopeList: string[] = [];
+      let googleEndpointStatus: number | null = null;
+      let googleRedirectLocation: string | null = null;
+      let googleErrorType: string | null = null;
+      let googleErrorDetail: string | null = null;
+
+      if (location) {
+        try {
+          const parsedLoc = new URL(location);
+          targetHost = parsedLoc.host;
+          const clientIdParam = parsedLoc.searchParams.get('client_id') || '';
+          hasClientId = Boolean(clientIdParam.trim());
+          const cbUri = parsedLoc.searchParams.get('redirect_uri') || '';
+          callbackMatchesSupabase = cbUri === `${supabaseUrl}/auth/v1/callback`;
+          scopeList = (parsedLoc.searchParams.get('scope') || '').split(/\s+/).filter(Boolean);
+
+          const gRes = await fetch(location, { redirect: 'manual' });
+          googleEndpointStatus = gRes.status;
+          const gLoc = gRes.headers.get('location');
+          if (gLoc) {
+            try {
+              const gLocUrl = new URL(gLoc, 'https://accounts.google.com');
+              googleRedirectLocation = `${gLocUrl.origin}${gLocUrl.pathname}`;
+              const explicitErr =
+                gLocUrl.searchParams.get('error') ||
+                gLocUrl.searchParams.get('errorCode') ||
+                '';
+              const authErrorB64 = gLocUrl.searchParams.get('authError') || '';
+              let decodedAuthError = '';
+              if (authErrorB64) {
+                try {
+                  decodedAuthError = Buffer.from(authErrorB64, 'base64').toString('utf8');
+                } catch {
+                  decodedAuthError = '';
+                }
+              }
+
+              if (gLocUrl.pathname.includes('/signin/oauth/error')) {
+                const errPageRes = await fetch(gLocUrl.toString(), {
+                  headers: { 'Accept-Language': 'en-US,en;q=0.9' },
+                });
+                const html = await errPageRes.text().catch(() => '');
+                const cleaned = html
+                  .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+                  .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+                  .replace(/<[^>]+>/g, ' ')
+                  .replace(/\s+/g, ' ')
+                  .trim();
+                const match = cleaned.match(
+                  /(Access blocked[^.]{0,220}|Error\s+40\d[^.]{0,220})/i
+                );
+                googleErrorDetail = (match ? match[0] : 'Google OAuth returned an error page.').trim();
+              }
+
+              const combinedHint = `${explicitErr} ${decodedAuthError} ${googleErrorDetail || ''}`.toLowerCase();
+              if (combinedHint.includes('redirect_uri_mismatch')) {
+                googleErrorType = 'redirect_uri_mismatch';
+              } else if (combinedHint.includes('org_internal')) {
+                googleErrorType = 'org_internal';
+              } else if (combinedHint.includes('access_denied')) {
+                googleErrorType = 'access_denied';
+              } else if (combinedHint.includes('deleted_client')) {
+                googleErrorType = 'deleted_client';
+              } else if (combinedHint.includes('invalid_client')) {
+                googleErrorType = 'invalid_client';
+              } else if (combinedHint.includes('disallowed_useragent')) {
+                googleErrorType = 'disallowed_useragent';
+              } else if (gLocUrl.pathname.includes('/signin/oauth/error')) {
+                googleErrorType = 'oauth_configuration_error';
+              }
+            } catch {
+              googleRedirectLocation = gLoc.split('?')[0];
+            }
+          }
+        } catch {
+          // ignore URL parse error
+        }
+      }
+
+      return res.json({
+        supabaseConfigured: true,
+        googleEnabled,
+        authorizeStatus: authRes.status,
+        supabaseErrorBody,
+        targetHost,
+        hasClientId,
+        callbackMatchesSupabase,
+        scopeCount: scopeList.length,
+        googleEndpointStatus,
+        googleRedirectLocation,
+        googleErrorType,
+        googleErrorDetail,
+      });
+    } catch (err: unknown) {
+      return res.status(500).json({
+        supabaseConfigured: true,
+        googleEnabled: false,
+        reason: err instanceof Error ? err.message : 'Unable to inspect Supabase OAuth status.',
+      });
+    }
   });
 
   app.post(
@@ -928,138 +1367,248 @@ async function startServer() {
             contents: `Material Title: ${title || 'Academic Study Material'}\nSource Format: ${materialType || 'text'}\n\n${depthInstructions}\n\nUploaded Source Content:\n${synthesisSource}`,
             config: {
               systemInstruction:
-                'You are Brainstine, an academic study companion. Prioritize the uploaded material strictly. Never fabricate facts or claim unsupported information came from the source. Clearly separate facts directly extracted from the material (sourcePoints, origin: "source", importantFacts) from helpful AI explanations/elaborations (aiClarification, plainExplanation, origin: "ai_clarification" or "ai_elaboration"). If no formulas or frameworks appear in the material, return an empty array for formulasOrFrameworks.',
+                'You are Brainstine, an academic study companion. Prioritize the uploaded material strictly. Never fabricate facts or claim unsupported information came from the source. Clearly separate facts directly extracted from the material (sourcePoints, origin: "source", importantFacts) from helpful AI explanations/elaborations (aiClarification, plainExplanation, origin: "ai_clarification" or "ai_elaboration"). If no formulas or frameworks appear in the material, return an empty array for formulasOrFrameworks. Also generate comparisonTables whenever contrasting 2+ concepts/methods/entities (or empty array if unnecessary), and 1 to 2 visualDiagrams (process_flow, concept_map, scientific_system, or cartesian_plot) when a visual schematic helps students understand relationships, sequences, or systems cleanly.',
               ...getThinkingConfig(
                 model,
                 level === 'comprehensive' ? ThinkingLevel.MEDIUM : ThinkingLevel.LOW
               ),
               abortSignal: signal,
               responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                title: { type: Type.STRING },
-                subjectArea: { type: Type.STRING },
-                topicOverview: { type: Type.STRING },
-                mainConcepts: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      heading: { type: Type.STRING },
-                      sourcePoints: {
-                        type: Type.ARRAY,
-                        items: { type: Type.STRING },
-                        description: 'Main points drawn directly from the uploaded material.',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  title: { type: Type.STRING },
+                  subjectArea: { type: Type.STRING },
+                  topicOverview: { type: Type.STRING },
+                  mainConcepts: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        heading: { type: Type.STRING },
+                        sourcePoints: {
+                          type: Type.ARRAY,
+                          items: { type: Type.STRING },
+                          description: 'Main points drawn directly from the uploaded material.',
+                        },
+                        aiClarification: {
+                          type: Type.STRING,
+                          description:
+                            'Brief AI-authored explanation or bridge clarifying why/how these source points connect.',
+                        },
                       },
-                      aiClarification: {
-                        type: Type.STRING,
-                        description:
-                          'Brief AI-authored explanation or bridge clarifying why/how these source points connect.',
-                      },
+                      required: ['heading', 'sourcePoints', 'aiClarification'],
                     },
-                    required: ['heading', 'sourcePoints', 'aiClarification'],
+                  },
+                  importantDefinitions: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        term: { type: Type.STRING },
+                        definition: { type: Type.STRING },
+                        origin: {
+                          type: Type.STRING,
+                          description: '"source" if defined in material, or "ai_clarification" if AI supplemented.',
+                        },
+                      },
+                      required: ['term', 'definition', 'origin'],
+                    },
+                  },
+                  keyTerminology: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  difficultConceptExplanations: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        concept: { type: Type.STRING },
+                        sourceContext: {
+                          type: Type.STRING,
+                          description: 'What the uploaded material states about this concept.',
+                        },
+                        plainExplanation: {
+                          type: Type.STRING,
+                          description: 'Clear AI-authored breakdown explaining the difficult concept step by step.',
+                        },
+                      },
+                      required: ['concept', 'sourceContext', 'plainExplanation'],
+                    },
+                  },
+                  importantFacts: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                    description: 'Key verifiable facts extracted directly from the uploaded material.',
+                  },
+                  relevantExamples: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        title: { type: Type.STRING },
+                        example: { type: Type.STRING },
+                        origin: {
+                          type: Type.STRING,
+                          description: '"source" if present in uploaded material, or "ai_elaboration" if generated to illustrate.',
+                        },
+                      },
+                      required: ['title', 'example', 'origin'],
+                    },
+                  },
+                  formulasOrFrameworks: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        name: { type: Type.STRING },
+                        expressionOrStructure: { type: Type.STRING },
+                        usage: { type: Type.STRING },
+                      },
+                      required: ['name', 'expressionOrStructure', 'usage'],
+                    },
+                  },
+                  comparisonTables: {
+                    type: Type.ARRAY,
+                    description: 'Optional comparison matrices contrasting key concepts/processes.',
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        title: { type: Type.STRING },
+                        headers: {
+                          type: Type.ARRAY,
+                          items: { type: Type.STRING },
+                        },
+                        rows: {
+                          type: Type.ARRAY,
+                          items: {
+                            type: Type.OBJECT,
+                            properties: {
+                              criterion: { type: Type.STRING },
+                              values: {
+                                type: Type.ARRAY,
+                                items: { type: Type.STRING },
+                              },
+                            },
+                            required: ['criterion', 'values'],
+                          },
+                        },
+                        caption: { type: Type.STRING },
+                      },
+                      required: ['title', 'headers', 'rows'],
+                    },
+                  },
+                  visualDiagrams: {
+                    type: Type.ARRAY,
+                    description: '1-2 clear educational schematics/diagrams clarifying stages, concept maps, or quantitative trends.',
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        type: {
+                          type: Type.STRING,
+                          description: '"process_flow" | "concept_map" | "scientific_system" | "cartesian_plot"',
+                        },
+                        title: { type: Type.STRING },
+                        subject: { type: Type.STRING },
+                        caption: { type: Type.STRING },
+                        nodes: {
+                          type: Type.ARRAY,
+                          items: {
+                            type: Type.OBJECT,
+                            properties: {
+                              id: { type: Type.STRING },
+                              label: { type: Type.STRING },
+                              sublabel: { type: Type.STRING },
+                              detail: { type: Type.STRING },
+                              x: { type: Type.NUMBER },
+                              y: { type: Type.NUMBER },
+                              tone: { type: Type.STRING },
+                            },
+                            required: ['id', 'label'],
+                          },
+                        },
+                        edges: {
+                          type: Type.ARRAY,
+                          items: {
+                            type: Type.OBJECT,
+                            properties: {
+                              from: { type: Type.STRING },
+                              to: { type: Type.STRING },
+                              label: { type: Type.STRING },
+                            },
+                            required: ['from', 'to'],
+                          },
+                        },
+                        xAxisLabel: { type: Type.STRING },
+                        yAxisLabel: { type: Type.STRING },
+                        series: {
+                          type: Type.ARRAY,
+                          items: {
+                            type: Type.OBJECT,
+                            properties: {
+                              name: { type: Type.STRING },
+                              color: { type: Type.STRING },
+                              points: {
+                                type: Type.ARRAY,
+                                items: {
+                                  type: Type.OBJECT,
+                                  properties: {
+                                    x: { type: Type.NUMBER },
+                                    y: { type: Type.NUMBER },
+                                    label: { type: Type.STRING },
+                                  },
+                                  required: ['x', 'y'],
+                                },
+                              },
+                            },
+                            required: ['name', 'points'],
+                          },
+                        },
+                      },
+                      required: ['type', 'title', 'caption'],
+                    },
+                  },
+                  revisionNotes: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  keyTakeaways: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
                   },
                 },
-                importantDefinitions: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      term: { type: Type.STRING },
-                      definition: { type: Type.STRING },
-                      origin: {
-                        type: Type.STRING,
-                        description: '"source" if defined in material, or "ai_clarification" if AI supplemented.',
-                      },
-                    },
-                    required: ['term', 'definition', 'origin'],
-                  },
-                },
-                keyTerminology: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                },
-                difficultConceptExplanations: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      concept: { type: Type.STRING },
-                      sourceContext: {
-                        type: Type.STRING,
-                        description: 'What the uploaded material states about this concept.',
-                      },
-                      plainExplanation: {
-                        type: Type.STRING,
-                        description: 'Clear AI-authored breakdown explaining the difficult concept step by step.',
-                      },
-                    },
-                    required: ['concept', 'sourceContext', 'plainExplanation'],
-                  },
-                },
-                importantFacts: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: 'Key verifiable facts extracted directly from the uploaded material.',
-                },
-                relevantExamples: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      title: { type: Type.STRING },
-                      example: { type: Type.STRING },
-                      origin: {
-                        type: Type.STRING,
-                        description: '"source" if present in uploaded material, or "ai_elaboration" if generated to illustrate.',
-                      },
-                    },
-                    required: ['title', 'example', 'origin'],
-                  },
-                },
-                formulasOrFrameworks: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      name: { type: Type.STRING },
-                      expressionOrStructure: { type: Type.STRING },
-                      usage: { type: Type.STRING },
-                    },
-                    required: ['name', 'expressionOrStructure', 'usage'],
-                  },
-                },
-                revisionNotes: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                },
-                keyTakeaways: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                },
+                required: [
+                  'title',
+                  'subjectArea',
+                  'topicOverview',
+                  'mainConcepts',
+                  'importantDefinitions',
+                  'keyTerminology',
+                  'difficultConceptExplanations',
+                  'importantFacts',
+                  'relevantExamples',
+                  'formulasOrFrameworks',
+                  'comparisonTables',
+                  'visualDiagrams',
+                  'revisionNotes',
+                  'keyTakeaways',
+                ],
               },
-              required: [
-                'title',
-                'subjectArea',
-                'topicOverview',
-                'mainConcepts',
-                'importantDefinitions',
-                'keyTerminology',
-                'difficultConceptExplanations',
-                'importantFacts',
-                'relevantExamples',
-                'formulasOrFrameworks',
-                'revisionNotes',
-                'keyTakeaways',
-              ],
-            },
             },
           }),
         { maxRetries: 1, timeoutMs: 75000 }
       );
 
       const parsed = JSON.parse((response.text ?? '{}').trim());
+
+      const validDiagramTypes = new Set([
+        'process_flow',
+        'concept_map',
+        'comparison_matrix',
+        'cartesian_plot',
+        'scientific_system',
+      ]);
 
       const baseSummary: Omit<StructuredSummary, 'markdown'> = {
         title: parsed.title || title || 'Study Summary',
@@ -1088,6 +1637,23 @@ async function startServer() {
           : [],
         formulasOrFrameworks: Array.isArray(parsed.formulasOrFrameworks)
           ? parsed.formulasOrFrameworks
+          : [],
+        comparisonTables: Array.isArray(parsed.comparisonTables)
+          ? parsed.comparisonTables.filter(
+              (t: { title?: string; headers?: unknown[]; rows?: unknown[] }) =>
+                t && t.title && Array.isArray(t.headers) && Array.isArray(t.rows) && t.rows.length > 0
+            )
+          : [],
+        visualDiagrams: Array.isArray(parsed.visualDiagrams)
+          ? parsed.visualDiagrams.filter(
+              (d: { type?: string; title?: string; nodes?: unknown[]; series?: unknown[] }) =>
+                d &&
+                d.title &&
+                typeof d.type === 'string' &&
+                validDiagramTypes.has(d.type) &&
+                ((Array.isArray(d.nodes) && d.nodes.length >= 2) ||
+                  (Array.isArray(d.series) && d.series.length >= 1))
+            )
           : [],
         revisionNotes: Array.isArray(parsed.revisionNotes) ? parsed.revisionNotes : [],
         keyTakeaways: Array.isArray(parsed.keyTakeaways) ? parsed.keyTakeaways : [],
@@ -1308,7 +1874,7 @@ async function startServer() {
               contents: `${sourceContext}\n\nDifficulty: ${difficultyGuide}\nFormat Requirements: ${formatGuide}${avoidDuplicatesClause}`,
               config: {
                 systemInstruction:
-                  'You are Brainstine Assessment Engine, an academic professor creating rigorous, unambiguous university-grade examinations. Base questions strictly on the supplied study material (or established academic canon when generating from a topic). Every objective question must have exactly ONE defensible correct answer among four plausible options. Never fabricate false facts.',
+                  'You are Brainstine Assessment Engine, an academic professor creating rigorous, unambiguous university-grade examinations. Base questions strictly on the supplied study material (or established academic canon when generating from a topic). Every objective question must have exactly ONE defensible correct answer among four plausible options. Never fabricate false facts. Optionally attach a visualAid diagram ONLY to 1 or 2 questions where a process diagram, quantitative plot, or labeled system genuinely helps test understanding.',
                 ...getThinkingConfig(model, ThinkingLevel.LOW),
                 abortSignal: signal,
                 responseMimeType: 'application/json',
@@ -1344,6 +1910,64 @@ async function startServer() {
                           maxMarks: { type: Type.INTEGER },
                           explanation: { type: Type.STRING },
                           topicTag: { type: Type.STRING },
+                          visualAid: {
+                            type: Type.OBJECT,
+                            description: 'Optional diagram ONLY if visual context enhances this question without revealing the answer.',
+                            properties: {
+                              type: { type: Type.STRING },
+                              title: { type: Type.STRING },
+                              caption: { type: Type.STRING },
+                              nodes: {
+                                type: Type.ARRAY,
+                                items: {
+                                  type: Type.OBJECT,
+                                  properties: {
+                                    id: { type: Type.STRING },
+                                    label: { type: Type.STRING },
+                                    sublabel: { type: Type.STRING },
+                                  },
+                                  required: ['id', 'label'],
+                                },
+                              },
+                              edges: {
+                                type: Type.ARRAY,
+                                items: {
+                                  type: Type.OBJECT,
+                                  properties: {
+                                    from: { type: Type.STRING },
+                                    to: { type: Type.STRING },
+                                    label: { type: Type.STRING },
+                                  },
+                                  required: ['from', 'to'],
+                                },
+                              },
+                              xAxisLabel: { type: Type.STRING },
+                              yAxisLabel: { type: Type.STRING },
+                              series: {
+                                type: Type.ARRAY,
+                                items: {
+                                  type: Type.OBJECT,
+                                  properties: {
+                                    name: { type: Type.STRING },
+                                    points: {
+                                      type: Type.ARRAY,
+                                      items: {
+                                        type: Type.OBJECT,
+                                        properties: {
+                                          x: { type: Type.NUMBER },
+                                          y: { type: Type.NUMBER },
+                                          label: { type: Type.STRING },
+                                        },
+                                        required: ['x', 'y'],
+                                      },
+                                    },
+                                  },
+                                  required: ['name', 'points'],
+                                },
+                              },
+                            },
+                            required: ['type', 'title'],
+                          },
                         },
                         required: [
                           'type',
@@ -1402,6 +2026,22 @@ async function startServer() {
               ? Math.min(3, Math.max(0, Number(q.correctOptionIndex) || 0))
               : undefined;
 
+          const validVisualTypes = new Set([
+            'process_flow',
+            'concept_map',
+            'cartesian_plot',
+            'scientific_system',
+          ]);
+          const visualAid =
+            q.visualAid &&
+            typeof q.visualAid === 'object' &&
+            q.visualAid.title &&
+            validVisualTypes.has(String(q.visualAid.type)) &&
+            ((Array.isArray(q.visualAid.nodes) && q.visualAid.nodes.length >= 2) ||
+              (Array.isArray(q.visualAid.series) && q.visualAid.series.length >= 1))
+              ? q.visualAid
+              : undefined;
+
           allQuestions.push({
             id: `q-${allQuestions.length + 1}`,
             number: allQuestions.length + 1,
@@ -1420,6 +2060,7 @@ async function startServer() {
             maxMarks: qType === 'objective' ? 1 : Math.max(2, Number(q.maxMarks) || 5),
             explanation: String(q.explanation || '').trim(),
             topicTag: String(q.topicTag || detectedSubject),
+            ...(visualAid ? { visualAid } : {}),
           });
         }
       }
@@ -1844,7 +2485,10 @@ async function startServer() {
 
     const systemInstruction = `You are Brainstine Academic Chat, a rigorous, helpful university academic assistant supporting Biology, Chemistry, Physics, Mathematics, Medicine, Dentistry, Computer Science, Engineering, and Humanities.
 Rules:
-- Provide accurate, clearly structured answers formatted in clean Markdown (headings, bullet lists, numbered steps, equations, and code blocks where appropriate).
+- Provide accurate, clearly structured answers formatted in clean Markdown: use headings, bullet lists, numbered steps, Markdown tables (| Column | ... |) for comparisons, formatted math ($inline$ or $$display$$), > **Key Concept:** callout highlights, and fenced code blocks where appropriate.
+- When—and ONLY when—a visual diagram genuinely clarifies a cycle, hierarchy, labeled system, or quantitative curve, include ONE single-line diagram block on its own line:
+  [[DIAGRAM:{"type":"process_flow","title":"...","subject":"...","caption":"...","nodes":[{"id":"n1","label":"...","sublabel":"...","detail":"..."}],"edges":[{"from":"n1","to":"n2","label":"..."}]}]]
+  Supported types: "process_flow", "concept_map", "scientific_system", "cartesian_plot". Never invent raw ASCII art when a structured table or [[DIAGRAM:...]] is clearer.
 - Support step-by-step academic calculations and problem solving.
 - Be thorough yet concise and scannable; avoid unnecessary filler or repetition.
 - If an image is provided (or active in this conversation): read visible text, equations, diagrams, charts, or handwritten notes carefully. Clearly state if handwriting blur, low resolution, or cropped edges prevent confident interpretation—NEVER fabricate text, numbers, or diagram labels that are not clearly legible.
@@ -1927,7 +2571,9 @@ Rules:
 Core Pedagogical Rules:
 - Teach progressively one focused step at a time (~180 to 350 words per turn) rather than dumping an entire textbook chapter at once.
 - ${modeGuide}
-- Break difficult ideas into digestible steps, introduce a practical example or analogy before advancing complexity, and explain technical terminology clearly.
+- Break difficult ideas into digestible steps, introduce a practical example or analogy before advancing complexity, and explain technical terminology clearly. Use Markdown headings, bullet lists, comparison tables (| ... | ... |) when contrasting ideas, clean equations ($...$ / $$...$$), and > **Key Concept:** highlights.
+- When a structured visual diagram genuinely helps explain a step (such as a cycle, pathway, concept tree, scientific system, or plotted curve), you may include ONE single-line diagram marker on its own line:
+  [[DIAGRAM:{"type":"process_flow","title":"...","subject":"...","caption":"...","nodes":[{"id":"n1","label":"...","sublabel":"..."}],"edges":[{"from":"n1","to":"n2"}]}]]
 - When the student answers a practice check question, evaluate their answer kindly: identify misunderstandings, explain why their answer is right or wrong, and clarify the reasoning before moving forward.
 - End with a short check-for-understanding question or concrete next step.
 - If an image is present, analyze legible text, equations, diagrams, or handwritten problems faithfully; clearly inform the student if any portion is blurry or illegible instead of guessing.${docBlock}`;
@@ -2107,8 +2753,8 @@ Core Pedagogical Rules:
         if (!clientClosed && !res.writableEnded) {
           res.write(': keepalive\n\n');
         }
-      }, 5000);
-      resetStallTimer(65000);
+      }, 4000);
+      resetStallTimer(35000);
 
       const model = getGeminiModel();
       const stream = await withRetry(
@@ -2131,7 +2777,7 @@ Core Pedagogical Rules:
 
       for await (const chunk of stream) {
         if (clientClosed) break;
-        resetStallTimer(90000);
+        resetStallTimer(45000);
         const delta = chunk.text ?? '';
         if (!delta) continue;
         fullText += delta;
@@ -2307,8 +2953,8 @@ Core Pedagogical Rules:
         if (!clientClosed && !res.writableEnded) {
           res.write(': keepalive\n\n');
         }
-      }, 5000);
-      resetStallTimer(65000);
+      }, 4000);
+      resetStallTimer(35000);
 
       const model = getGeminiModel();
       const stream = await withRetry(
@@ -2331,7 +2977,7 @@ Core Pedagogical Rules:
 
       for await (const chunk of stream) {
         if (clientClosed) break;
-        resetStallTimer(90000);
+        resetStallTimer(45000);
         const delta = chunk.text ?? '';
         if (!delta) continue;
         fullText += delta;
@@ -2412,6 +3058,7 @@ Core Pedagogical Rules:
 
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Brainstine server listening on http://0.0.0.0:${PORT}`);
+    void ensureResolvedGeminiModel().catch(() => {});
   });
 
   // Configure explicit Node HTTP timeouts suitable for streaming & multi-step AI responses

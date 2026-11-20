@@ -27,6 +27,7 @@ import {
   listAiMessages,
   listAiSessions,
   recordStudyActivity,
+  restoreSessionImageAttachment,
   updateAiSession,
   uploadSessionImageToStorage,
 } from '../lib/supabase';
@@ -39,16 +40,24 @@ import type {
   StudySummaryRecord,
   TutorMode,
 } from '../types/brainstine';
+import {
+  hasSubjectVisualMatch,
+  resolveSubjectVisual,
+} from '../lib/educationalVisuals';
 import { AcademicContentRenderer } from './AcademicContentRenderer';
+import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 import {
   SnapAttachmentPreview,
   SnapTriggerButtons,
 } from './SnapPhotoControl';
+import { SubjectVisualBanner } from './SubjectVisualBanner';
 
 interface AiTutorWorkspaceProps {
   materials: StudyMaterialRecord[];
   summaries: StudySummaryRecord[];
   geminiConfigured: boolean;
+  initialSessionId?: string | null;
+  onConsumeInitialSession?: () => void;
   incomingImage?: SnapImageAttachment | null;
   onConsumeIncomingImage?: () => void;
   onActivityRecorded: () => void;
@@ -116,6 +125,8 @@ export function AiTutorWorkspace({
   materials,
   summaries,
   geminiConfigured,
+  initialSessionId,
+  onConsumeInitialSession,
   incomingImage,
   onConsumeIncomingImage,
   onActivityRecorded,
@@ -141,6 +152,8 @@ export function AiTutorWorkspace({
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AiSessionRecord | null>(null);
+  const [deletingSession, setDeletingSession] = useState(false);
 
   const [contextPickerOpen, setContextPickerOpen] = useState(false);
   const [selectedMaterialId, setSelectedMaterialId] = useState<string | null>(null);
@@ -234,7 +247,13 @@ export function AiTutorWorkspace({
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, sending, streamingContent]);
+  }, [messages, sending]);
+
+  useEffect(() => {
+    if (streamingContent) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+    }
+  }, [streamingContent]);
 
   useEffect(() => {
     if (!isSupabaseConfigured) return;
@@ -287,11 +306,17 @@ export function AiTutorWorkspace({
     setHistoryOpen(false);
   };
 
-  const handleSelectSession = async (session: AiSessionRecord) => {
+  const activeSessionIdRef = useRef<string | null>(activeSessionId);
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  const handleSelectSession = useCallback(async (session: AiSessionRecord) => {
     abortControllerRef.current?.abort();
     inFlightRef.current = false;
     setSending(false);
     setStreamingContent('');
+    activeSessionIdRef.current = session.id;
     setActiveSessionId(session.id);
     setCurrentTopic(session.title);
     setSubjectArea(session.subject_area || 'Guided Study');
@@ -308,29 +333,57 @@ export function AiTutorWorkspace({
     if (!user || !isSupabaseConfigured) return;
     setLoadingMessages(true);
     try {
-      const loaded = await listAiMessages(user.id, session.id);
+      const [loaded, restoredImage] = await Promise.all([
+        listAiMessages(user.id, session.id),
+        session.active_image_path
+          ? restoreSessionImageAttachment(session.active_image_path, session.active_image_mime)
+          : Promise.resolve(null),
+      ]);
+      if (activeSessionIdRef.current !== session.id) return;
       setMessages(loaded);
+      if (restoredImage) {
+        setActiveSessionImage(restoredImage);
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Unable to load tutoring session.');
     } finally {
       setLoadingMessages(false);
     }
-  };
+  }, [user]);
 
-  const handleDeleteSession = async (
+  useEffect(() => {
+    if (!initialSessionId || loadingSessions) return;
+    const match = sessions.find((s) => s.id === initialSessionId);
+    if (match) {
+      handleSelectSession(match);
+    }
+    onConsumeInitialSession?.();
+  }, [initialSessionId, loadingSessions, sessions, handleSelectSession, onConsumeInitialSession]);
+
+  const requestDeleteSession = (
     e: React.MouseEvent,
-    sessionId: string
+    session: AiSessionRecord
   ) => {
     e.stopPropagation();
-    if (!user || !isSupabaseConfigured) return;
+    setDeleteTarget(session);
+  };
+
+  const confirmDeleteSession = async () => {
+    if (!user || !isSupabaseConfigured || !deleteTarget) return;
+    const sessionId = deleteTarget.id;
+    setDeletingSession(true);
     try {
       await deleteAiSession(user.id, sessionId);
       setSessions((prev) => prev.filter((s) => s.id !== sessionId));
       if (activeSessionId === sessionId) {
         handleNewSession();
       }
+      setDeleteTarget(null);
+      onActivityRecorded();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to delete session.');
+    } finally {
+      setDeletingSession(false);
     }
   };
 
@@ -460,7 +513,7 @@ export function AiTutorWorkspace({
           imageAction: options?.imageAction,
         },
         signal: controller.signal,
-        idleTimeoutMs: 150000,
+        idleTimeoutMs: 60000,
         fallbackErrorMessage: 'Personal AI Tutor request failed.',
         onChunk: (_delta, accumulated) => {
           setStreamingContent(accumulated);
@@ -722,7 +775,7 @@ export function AiTutorWorkspace({
                     </div>
                     <button
                       type="button"
-                      onClick={(e) => handleDeleteSession(e, session.id)}
+                      onClick={(e) => requestDeleteSession(e, session)}
                       aria-label={`Delete ${session.title}`}
                       className="rounded-md p-1 text-slate-400 opacity-70 transition-opacity hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100 dark:hover:bg-rose-950/40 dark:hover:text-rose-400"
                     >
@@ -778,7 +831,7 @@ export function AiTutorWorkspace({
                 </button>
 
                 {contextPickerOpen && (
-                  <div className="absolute right-0 z-30 mt-2 w-80 rounded-xl border border-slate-200 bg-white p-3 shadow-xl dark:border-slate-700 dark:bg-[#0B1325]">
+                  <div className="absolute right-0 z-30 mt-2 w-[min(20rem,calc(100vw-2.5rem))] rounded-xl border border-slate-200 bg-white p-3 shadow-xl dark:border-slate-700 dark:bg-[#0B1325]">
                     <div className="flex items-center justify-between border-b border-slate-200 pb-2 dark:border-slate-800">
                       <p className="text-xs font-bold text-slate-900 dark:text-white">
                         Teach From Study Material
@@ -911,22 +964,20 @@ export function AiTutorWorkspace({
         )}
 
         {/* Lesson Thread */}
-        <div className="flex-1 overflow-y-auto px-5 py-5">
+        <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-5">
           {loadingMessages ? (
             <div className="flex h-full items-center justify-center py-12">
               <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
             </div>
           ) : messages.length === 0 ? (
-            <div className="mx-auto flex max-w-2xl flex-col items-center justify-center py-6 text-center">
-              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-cyan-400">
-                <GraduationCap className="h-6 w-6" aria-hidden="true" />
-              </div>
-              <h2 className="mt-4 font-display text-xl font-bold text-slate-900 select-none dark:text-white">
-                Step-by-Step Guided Academic Tutoring
-              </h2>
-              <p className="mt-2 max-w-lg text-sm leading-relaxed text-slate-600 dark:text-slate-300">
-                Choose a learning depth above, enter a topic or upload a photo of a lesson problem, and Brainstine will teach you progressively with worked examples and check-for-understanding practice.
-              </p>
+            <div className="mx-auto flex max-w-2xl flex-col items-center justify-center py-4 text-center">
+              <SubjectVisualBanner
+                visualKey="tutor"
+                variant="hero"
+                title="Personal AI Tutor · Step-by-Step Studio"
+                subtitle="Choose a learning depth above, pick a subject below, or snap a photo of a lesson problem for guided mastery."
+                className="w-full text-left"
+              />
 
               {/* Mode Overview Strip */}
               <div className="mt-5 grid w-full grid-cols-1 gap-2.5 text-left sm:grid-cols-3">
@@ -935,13 +986,13 @@ export function AiTutorWorkspace({
                     key={m.id}
                     type="button"
                     onClick={() => handleModeChange(m.id)}
-                    className={`rounded-xl border p-3 text-left transition-colors ${
+                    className={`min-h-11 rounded-xl border p-3.5 text-left transition-all duration-200 select-none ${
                       tutorMode === m.id
-                        ? 'border-blue-400 bg-blue-50/70 dark:border-cyan-500 dark:bg-cyan-950/30'
-                        : 'border-slate-200 bg-slate-50/60 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-900/40 dark:hover:bg-slate-800/70'
+                        ? 'border-blue-500 bg-blue-50/75 shadow-xs dark:border-cyan-500 dark:bg-cyan-950/30'
+                        : 'border-slate-200 bg-slate-50/60 hover:border-slate-300 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-900/40 dark:hover:bg-slate-800/70'
                     }`}
                   >
-                    <p className="text-xs font-bold text-slate-900 select-none dark:text-white">
+                    <p className="text-xs font-bold text-slate-900 dark:text-white">
                       {m.label}
                     </p>
                     <p className="mt-1 text-[11px] leading-relaxed text-slate-600 dark:text-slate-400">
@@ -952,42 +1003,64 @@ export function AiTutorWorkspace({
               </div>
 
               <div className="mt-5 w-full">
-                <p className="mb-2 text-left text-xs font-semibold text-slate-500 select-none dark:text-slate-400">
+                <p className="mb-2.5 text-left text-xs font-semibold text-slate-500 select-none dark:text-slate-400">
                   Start Teaching a Topic Immediately
                 </p>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  {TOPIC_STARTERS.map((topic) => (
-                    <button
-                      key={topic.title}
-                      type="button"
-                      disabled={sending}
-                      onClick={() =>
-                        sendTutorTurn({
-                          overrideText: `Teach me ${topic.title} from the beginning, step by step.`,
-                          quickAction: 'Teach me this topic from the beginning',
-                        })
-                      }
-                      className="flex items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-left transition-colors hover:border-blue-300 hover:bg-blue-50/50 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900/50 dark:hover:border-cyan-700 dark:hover:bg-slate-800"
-                    >
-                      <div className="min-w-0">
-                        <p className="truncate text-xs font-semibold text-slate-900 dark:text-white">
-                          {topic.title}
-                        </p>
-                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                          {topic.area}
-                        </p>
-                      </div>
-                      <Sparkles
-                        className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-cyan-400"
-                        aria-hidden="true"
-                      />
-                    </button>
-                  ))}
+                <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                  {TOPIC_STARTERS.map((topic) => {
+                    const thumb = resolveSubjectVisual(`${topic.area} ${topic.title}`, 'tutor');
+                    return (
+                      <button
+                        key={topic.title}
+                        type="button"
+                        disabled={sending}
+                        onClick={() =>
+                          sendTutorTurn({
+                            overrideText: `Teach me ${topic.title} from the beginning, step by step.`,
+                            quickAction: 'Teach me this topic from the beginning',
+                          })
+                        }
+                        className="group flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-2.5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-blue-300 hover:bg-blue-50/40 hover:shadow-sm disabled:opacity-50 select-none dark:border-slate-800 dark:bg-slate-900/50 dark:hover:border-cyan-700 dark:hover:bg-slate-800"
+                      >
+                        <div className="h-14 w-20 shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-slate-100 dark:border-slate-700 dark:bg-slate-950">
+                          <img
+                            src={thumb.src}
+                            alt={thumb.alt}
+                            loading="lazy"
+                            decoding="async"
+                            referrerPolicy="no-referrer"
+                            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                          />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-xs font-semibold text-slate-900 dark:text-white">
+                            {topic.title}
+                          </p>
+                          <p className="mt-0.5 text-[11px] font-medium text-blue-700 dark:text-cyan-400">
+                            {topic.area}
+                          </p>
+                        </div>
+                        <Sparkles
+                          className="mr-1 h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-cyan-400"
+                          aria-hidden="true"
+                        />
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             </div>
           ) : (
             <div className="mx-auto max-w-3xl space-y-5">
+              {hasSubjectVisualMatch(`${subjectArea} ${currentTopic}`) && (
+                <SubjectVisualBanner
+                  subjectHint={`${subjectArea} ${currentTopic}`}
+                  fallbackKey="tutor"
+                  variant="compact"
+                  title={currentTopic || subjectArea}
+                  subtitle={`${TUTOR_MODES.find((m) => m.id === tutorMode)?.label || 'Guided'} · Step ${tutorStep}`}
+                />
+              )}
               {messages.map((msg) => {
                 const isUser = msg.role === 'user';
                 const imgSrc =
@@ -1126,7 +1199,7 @@ export function AiTutorWorkspace({
                     overrideMode,
                   });
                 }}
-                className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-semibold text-slate-700 transition-colors hover:border-blue-400 hover:bg-blue-50 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-cyan-500 dark:hover:bg-slate-800 dark:hover:text-cyan-300"
+                className="min-h-8 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 transition-colors hover:border-blue-400 hover:bg-blue-50 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-cyan-500 dark:hover:bg-slate-800 dark:hover:text-cyan-300"
               >
                 {item.label}
               </button>
@@ -1140,8 +1213,22 @@ export function AiTutorWorkspace({
               disabled={sending}
               onReplace={(next) => setPendingImage(next)}
               onRemove={() => {
+                const hadPersisted = Boolean(activeSessionImage);
                 setPendingImage(null);
                 setActiveSessionImage(null);
+                if (hadPersisted && user && isSupabaseConfigured && activeSessionId) {
+                  updateAiSession(user.id, activeSessionId, {
+                    active_image_path: null,
+                    active_image_mime: null,
+                  }).catch(() => {});
+                  setSessions((prev) =>
+                    prev.map((s) =>
+                      s.id === activeSessionId
+                        ? { ...s, active_image_path: null, active_image_mime: null }
+                        : s
+                    )
+                  );
+                }
               }}
               onQuickAction={(action, defaultPrompt) =>
                 sendTutorTurn({ overrideText: defaultPrompt, imageAction: action })
@@ -1190,6 +1277,16 @@ export function AiTutorWorkspace({
           </div>
         </div>
       </section>
+
+      <ConfirmDeleteModal
+        isOpen={Boolean(deleteTarget)}
+        title="Delete tutoring session?"
+        itemName={deleteTarget?.title}
+        description="This permanently removes this tutoring session and all lesson messages from your Academic History. This action cannot be undone."
+        busy={deletingSession}
+        onConfirm={confirmDeleteSession}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

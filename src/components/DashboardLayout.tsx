@@ -1,21 +1,22 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   BookOpen,
-  CalendarDays,
   FolderOpen,
   GraduationCap,
+  History,
   LayoutDashboard,
   ListChecks,
   LogOut,
   Menu,
   MessageSquareText,
-  Mic,
   Settings,
   Sparkles,
   X,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import {
+  listAllAiSessions,
   listQuizAttempts,
   listQuizzes,
   listStudyActivities,
@@ -23,6 +24,7 @@ import {
   listStudySummaries,
 } from '../lib/supabase';
 import type {
+  AiSessionRecord,
   DashboardSection,
   QuizAttemptRecord,
   QuizRecord,
@@ -33,11 +35,13 @@ import type {
   StudyMaterialRecord,
   StudySummaryRecord,
 } from '../types/brainstine';
+import { AcademicHistoryView } from './AcademicHistoryView';
 import { AiChatWorkspace } from './AiChatWorkspace';
 import { AiTutorWorkspace } from './AiTutorWorkspace';
 import { BrandLogo } from './BrandLogo';
 import { DashboardOverview } from './DashboardOverview';
 import { MaterialsLibraryView } from './MaterialsLibraryView';
+import { PWAInstallButton } from './PWAInstallButton';
 import { ProfileSettingsView } from './ProfileSettingsView';
 import { QuizExamSystem } from './QuizExamSystem';
 import { SavedSummariesView } from './SavedSummariesView';
@@ -57,6 +61,7 @@ export function DashboardLayout() {
   const [activities, setActivities] = useState<StudyActivityRecord[]>([]);
   const [quizzes, setQuizzes] = useState<QuizRecord[]>([]);
   const [attempts, setAttempts] = useState<QuizAttemptRecord[]>([]);
+  const [aiSessions, setAiSessions] = useState<AiSessionRecord[]>([]);
 
   const [summarizerMaterial, setSummarizerMaterial] =
     useState<StudyMaterialRecord | null>(null);
@@ -69,6 +74,24 @@ export function DashboardLayout() {
   const [incomingTutorImage, setIncomingTutorImage] =
     useState<SnapImageAttachment | null>(null);
 
+  const [openSummaryId, setOpenSummaryId] = useState<string | null>(null);
+  const [openAttempt, setOpenAttempt] = useState<QuizAttemptRecord | null>(null);
+  const [openChatSessionId, setOpenChatSessionId] = useState<string | null>(null);
+  const [openTutorSessionId, setOpenTutorSessionId] = useState<string | null>(null);
+
+  // Active exam/quiz navigation protection
+  const [activeExamInProgress, setActiveExamInProgress] = useState(false);
+  const [pendingNavSection, setPendingNavSection] = useState<DashboardSection | null>(null);
+
+  const chatSessions = useMemo(
+    () => aiSessions.filter((s) => s.session_type === 'chat'),
+    [aiSessions]
+  );
+  const tutorSessions = useMemo(
+    () => aiSessions.filter((s) => s.session_type === 'tutor'),
+    [aiSessions]
+  );
+
   const displayName =
     profile?.display_name ||
     (user?.user_metadata?.display_name as string | undefined) ||
@@ -78,18 +101,20 @@ export function DashboardLayout() {
   const loadWorkspaceData = useCallback(async () => {
     if (!user) return;
     try {
-      const [mats, sums, acts, qzs, atts] = await Promise.all([
+      const [mats, sums, acts, qzs, atts, sessions] = await Promise.all([
         listStudyMaterials(user.id).catch(() => []),
         listStudySummaries(user.id).catch(() => []),
-        listStudyActivities(user.id, 12).catch(() => []),
+        listStudyActivities(user.id, 30).catch(() => []),
         listQuizzes(user.id).catch(() => []),
         listQuizAttempts(user.id).catch(() => []),
+        listAllAiSessions(user.id).catch(() => []),
       ]);
       setMaterials(mats);
       setSummaries(sums);
       setActivities(acts);
       setQuizzes(qzs);
       setAttempts(atts);
+      setAiSessions(sessions);
     } finally {
       setLoadingData(false);
     }
@@ -112,9 +137,25 @@ export function DashboardLayout() {
     loadWorkspaceData();
   }, [loadWorkspaceData]);
 
-  const navigateTo = (section: DashboardSection) => {
-    setActiveSection(section);
-    setMobileNavOpen(false);
+  const navigateTo = useCallback(
+    (section: DashboardSection) => {
+      if (activeExamInProgress && activeSection === 'quizzes' && section !== 'quizzes') {
+        setPendingNavSection(section);
+        setMobileNavOpen(false);
+        return;
+      }
+      setActiveSection(section);
+      setMobileNavOpen(false);
+    },
+    [activeExamInProgress, activeSection]
+  );
+
+  const confirmLeaveActiveExam = () => {
+    if (!pendingNavSection) return;
+    const target = pendingNavSection;
+    setPendingNavSection(null);
+    setActiveExamInProgress(false);
+    setActiveSection(target);
   };
 
   const handleSummarizeMaterial = (mat: StudyMaterialRecord) => {
@@ -142,6 +183,26 @@ export function DashboardLayout() {
     navigateTo('tutor');
   };
 
+  const handleOpenSummary = (summaryId: string) => {
+    setOpenSummaryId(summaryId);
+    navigateTo('summaries');
+  };
+
+  const handleOpenAttempt = (attempt: QuizAttemptRecord) => {
+    setOpenAttempt(attempt);
+    navigateTo('quizzes');
+  };
+
+  const handleOpenChatSession = (sessionId: string) => {
+    setOpenChatSessionId(sessionId);
+    navigateTo('chat');
+  };
+
+  const handleOpenTutorSession = (sessionId: string) => {
+    setOpenTutorSessionId(sessionId);
+    navigateTo('tutor');
+  };
+
   const navItems: {
     id: DashboardSection;
     label: string;
@@ -153,9 +214,19 @@ export function DashboardLayout() {
       icon: <LayoutDashboard className="h-4 w-4" aria-hidden="true" />,
     },
     {
+      id: 'history',
+      label: 'Academic History',
+      icon: <History className="h-4 w-4" aria-hidden="true" />,
+    },
+    {
       id: 'summarizer',
       label: 'AI Summarizer',
       icon: <Sparkles className="h-4 w-4" aria-hidden="true" />,
+    },
+    {
+      id: 'quizzes',
+      label: 'Quiz & Exam',
+      icon: <ListChecks className="h-4 w-4" aria-hidden="true" />,
     },
     {
       id: 'chat',
@@ -166,11 +237,6 @@ export function DashboardLayout() {
       id: 'tutor',
       label: 'AI Tutor',
       icon: <GraduationCap className="h-4 w-4" aria-hidden="true" />,
-    },
-    {
-      id: 'quizzes',
-      label: 'Quiz & Exam',
-      icon: <ListChecks className="h-4 w-4" aria-hidden="true" />,
     },
     {
       id: 'summaries',
@@ -189,13 +255,9 @@ export function DashboardLayout() {
     },
   ];
 
-  const futureModules = [
-    { label: 'Study Planner', icon: <CalendarDays className="h-4 w-4" aria-hidden="true" /> },
-    { label: 'Voice Intelligence', icon: <Mic className="h-4 w-4" aria-hidden="true" /> },
-  ];
-
   const sectionTitleMap: Record<DashboardSection, string> = {
     overview: 'Dashboard',
+    history: 'My Academic History',
     summarizer: 'AI Study Material Summarizer',
     chat: 'AI Academic Chatbot',
     tutor: 'Personal AI Tutor',
@@ -220,9 +282,9 @@ export function DashboardLayout() {
                 key={item.id}
                 type="button"
                 onClick={() => navigateTo(item.id)}
-                className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors whitespace-nowrap ${
+                className={`flex min-h-11 w-full items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium transition-colors whitespace-nowrap ${
                   active
-                    ? 'bg-[#0F1E3D] text-white dark:bg-blue-600'
+                    ? 'bg-[#0F1E3D] text-white shadow-xs dark:bg-[#1D4ED8]'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800/70 dark:hover:text-white'
                 }`}
               >
@@ -232,32 +294,11 @@ export function DashboardLayout() {
             );
           })}
         </nav>
-
-        {/* Future Brainstine Module Foundations */}
-        <div className="mt-8 border-t border-slate-200 pt-5 dark:border-slate-800">
-          <p className="px-3 text-[11px] font-semibold tracking-wide text-slate-400 dark:text-slate-500">
-            Upcoming Modules
-          </p>
-          <div className="mt-2 space-y-1">
-            {futureModules.map((mod) => (
-              <div
-                key={mod.label}
-                aria-disabled="true"
-                className="flex items-center justify-between gap-2 rounded-xl px-3 py-2 text-xs font-medium text-slate-400 dark:text-slate-500"
-              >
-                <span className="inline-flex items-center gap-2.5">
-                  {mod.icon}
-                  <span>{mod.label}</span>
-                </span>
-                <span className="text-[10px]">Planned</span>
-              </div>
-            ))}
-          </div>
-        </div>
       </div>
 
-      <div className="border-t border-slate-200 pt-4 dark:border-slate-800">
-        <div className="px-2 pb-3">
+      <div className="space-y-2.5 border-t border-slate-200 pt-4 dark:border-slate-800">
+        <PWAInstallButton />
+        <div className="px-2">
           <p className="truncate text-sm font-semibold text-slate-900 dark:text-white">
             {displayName}
           </p>
@@ -268,7 +309,7 @@ export function DashboardLayout() {
         <button
           type="button"
           onClick={() => signOut()}
-          className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800/70 dark:hover:text-white"
+          className="flex min-h-10 w-full items-center gap-2.5 rounded-xl px-3 py-2 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800/70 dark:hover:text-white"
         >
           <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
           <span>Sign Out</span>
@@ -278,7 +319,7 @@ export function DashboardLayout() {
   );
 
   return (
-    <div className="flex min-h-screen bg-slate-50 text-slate-900 dark:bg-[#080F1E] dark:text-slate-100">
+    <div className="flex min-h-screen overflow-x-clip bg-slate-50 text-slate-900 dark:bg-[#080F1E] dark:text-slate-100">
       {/* Desktop Sidebar */}
       <aside className="hidden w-64 shrink-0 border-r border-slate-200 bg-white lg:block dark:border-slate-800 dark:bg-[#0B1325]">
         <div className="sticky top-0 h-screen overflow-y-auto">{sidebarContent}</div>
@@ -291,12 +332,12 @@ export function DashboardLayout() {
             className="fixed inset-0 bg-slate-950/50 backdrop-blur-xs"
             onClick={() => setMobileNavOpen(false)}
           />
-          <aside className="relative z-10 w-68 max-w-[80vw] bg-white shadow-xl dark:bg-[#0B1325]">
+          <aside className="relative z-10 w-72 max-w-[82vw] bg-white shadow-xl dark:bg-[#0B1325]">
             <button
               type="button"
               onClick={() => setMobileNavOpen(false)}
               aria-label="Close sidebar"
-              className="absolute top-4 right-4 rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+              className="absolute top-3.5 right-3.5 inline-flex h-10 w-10 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
             >
               <X className="h-5 w-5" />
             </button>
@@ -309,16 +350,16 @@ export function DashboardLayout() {
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Top Bar */}
         <header className="sticky top-0 z-20 flex items-center justify-between gap-4 border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur-md sm:px-6 lg:px-8 dark:border-slate-800 dark:bg-[#080F1E]/90">
-          <div className="flex items-center gap-3 min-w-0 select-none">
+          <div className="flex min-w-0 items-center gap-3">
             <button
               type="button"
               onClick={() => setMobileNavOpen(true)}
               aria-label="Open navigation menu"
-              className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-700 lg:hidden dark:border-slate-800 dark:text-slate-200"
+              className="inline-flex h-11 w-11 items-center justify-center rounded-lg border border-slate-200 text-slate-700 lg:hidden dark:border-slate-800 dark:text-slate-200"
             >
               <Menu className="h-5 w-5" />
             </button>
-            <div className="flex items-center gap-2 text-sm min-w-0">
+            <div className="flex min-w-0 items-center gap-2 text-sm">
               <span className="hidden text-slate-400 sm:inline">Brainstine</span>
               <span className="hidden text-slate-300 sm:inline dark:text-slate-700">/</span>
               <span className="truncate font-display font-semibold text-slate-900 dark:text-white">
@@ -349,9 +390,29 @@ export function DashboardLayout() {
                   materials={materials}
                   summaries={summaries}
                   activities={activities}
+                  quizzes={quizzes}
                   attempts={attempts}
+                  chatSessions={chatSessions}
+                  tutorSessions={tutorSessions}
                   onNavigate={navigateTo}
                   onSummarizeMaterial={handleSummarizeMaterial}
+                  onOpenAttempt={handleOpenAttempt}
+                  onOpenSummary={handleOpenSummary}
+                />
+              )}
+
+              {activeSection === 'history' && (
+                <AcademicHistoryView
+                  summaries={summaries}
+                  quizzes={quizzes}
+                  attempts={attempts}
+                  chatSessions={chatSessions}
+                  tutorSessions={tutorSessions}
+                  onRefresh={loadWorkspaceData}
+                  onOpenSummary={handleOpenSummary}
+                  onOpenAttempt={handleOpenAttempt}
+                  onOpenChatSession={handleOpenChatSession}
+                  onOpenTutorSession={handleOpenTutorSession}
                 />
               )}
 
@@ -369,6 +430,8 @@ export function DashboardLayout() {
                   materials={materials}
                   summaries={summaries}
                   geminiConfigured={geminiConfigured}
+                  initialSessionId={openChatSessionId}
+                  onConsumeInitialSession={() => setOpenChatSessionId(null)}
                   onActivityRecorded={loadWorkspaceData}
                   onSendImageToTutor={handleSendImageToTutor}
                 />
@@ -379,6 +442,8 @@ export function DashboardLayout() {
                   materials={materials}
                   summaries={summaries}
                   geminiConfigured={geminiConfigured}
+                  initialSessionId={openTutorSessionId}
+                  onConsumeInitialSession={() => setOpenTutorSessionId(null)}
                   incomingImage={incomingTutorImage}
                   onConsumeIncomingImage={() => setIncomingTutorImage(null)}
                   onActivityRecorded={loadWorkspaceData}
@@ -392,8 +457,11 @@ export function DashboardLayout() {
                   quizzes={quizzes}
                   attempts={attempts}
                   geminiConfigured={geminiConfigured}
+                  initialAttemptToOpen={openAttempt}
+                  onConsumeAttemptToOpen={() => setOpenAttempt(null)}
                   preselectedSource={quizPreselection}
                   onDataChanged={loadWorkspaceData}
+                  onActiveAttemptChange={setActiveExamInProgress}
                 />
               )}
 
@@ -402,6 +470,8 @@ export function DashboardLayout() {
                   summaries={summaries}
                   materials={materials}
                   geminiConfigured={geminiConfigured}
+                  initialSummaryId={openSummaryId}
+                  onConsumeInitialSummary={() => setOpenSummaryId(null)}
                   onRefresh={loadWorkspaceData}
                   onOpenSummarizer={() => navigateTo('summarizer')}
                   onCreateQuizFromSummary={handleQuizFromSavedSummary}
@@ -423,6 +493,52 @@ export function DashboardLayout() {
           )}
         </main>
       </div>
+
+      {/* Active Quiz/Exam Leave Confirmation Modal */}
+      {pendingNavSection && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-xs"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="leave-exam-title"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-[#0D162B]">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300">
+                <AlertTriangle className="h-5 w-5" aria-hidden="true" />
+              </div>
+              <div>
+                <h2
+                  id="leave-exam-title"
+                  className="font-display text-lg font-bold text-slate-900 dark:text-white"
+                >
+                  Assessment in Progress
+                </h2>
+                <p className="mt-1.5 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+                  You currently have an active quiz or exam attempt. Leaving now will discard your
+                  unsubmitted responses and stop the timer.
+                </p>
+              </div>
+            </div>
+            <div className="mt-6 flex flex-wrap justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setPendingNavSection(null)}
+                className="min-h-11 rounded-xl bg-[#0F1E3D] px-4 py-2 text-sm font-semibold text-white hover:bg-[#192F5D] dark:bg-[#1D4ED8] dark:hover:bg-blue-500"
+              >
+                Stay on Assessment
+              </button>
+              <button
+                type="button"
+                onClick={confirmLeaveActiveExam}
+                className="min-h-11 rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-100 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300"
+              >
+                Leave &amp; Discard
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

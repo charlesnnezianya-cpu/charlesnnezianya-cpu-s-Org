@@ -278,7 +278,7 @@ export function SnapTriggerButtons({
           aria-modal="true"
           aria-label="Snap a photo"
         >
-          <div className="w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-[#0D162B]">
+          <div className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-[#0D162B]">
             <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5 select-none dark:border-slate-800">
               <div className="flex items-center gap-2">
                 <Camera className="h-4 w-4 text-blue-600 dark:text-cyan-400" aria-hidden="true" />

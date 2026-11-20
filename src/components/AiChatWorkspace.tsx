@@ -26,6 +26,7 @@ import {
   listAiMessages,
   listAiSessions,
   recordStudyActivity,
+  restoreSessionImageAttachment,
   updateAiSession,
   uploadSessionImageToStorage,
 } from '../lib/supabase';
@@ -37,16 +38,21 @@ import type {
   StudyMaterialRecord,
   StudySummaryRecord,
 } from '../types/brainstine';
+import { resolveSubjectVisual } from '../lib/educationalVisuals';
 import { AcademicContentRenderer } from './AcademicContentRenderer';
+import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 import {
   SnapAttachmentPreview,
   SnapTriggerButtons,
 } from './SnapPhotoControl';
+import { SubjectVisualBanner } from './SubjectVisualBanner';
 
 interface AiChatWorkspaceProps {
   materials: StudyMaterialRecord[];
   summaries: StudySummaryRecord[];
   geminiConfigured: boolean;
+  initialSessionId?: string | null;
+  onConsumeInitialSession?: () => void;
   onActivityRecorded: () => void;
   onSendImageToTutor: (attachment: SnapImageAttachment) => void;
 }
@@ -74,6 +80,8 @@ export function AiChatWorkspace({
   materials,
   summaries,
   geminiConfigured,
+  initialSessionId,
+  onConsumeInitialSession,
   onActivityRecorded,
   onSendImageToTutor,
 }: AiChatWorkspaceProps) {
@@ -92,6 +100,8 @@ export function AiChatWorkspace({
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AiSessionRecord | null>(null);
+  const [deletingSession, setDeletingSession] = useState(false);
 
   // Document Context attachment
   const [contextPickerOpen, setContextPickerOpen] = useState(false);
@@ -174,7 +184,13 @@ export function AiChatWorkspace({
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, sending, streamingContent]);
+  }, [messages, sending]);
+
+  useEffect(() => {
+    if (streamingContent) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+    }
+  }, [streamingContent]);
 
   // Resolve signed URLs for stored message images
   useEffect(() => {
@@ -211,11 +227,17 @@ export function AiChatWorkspace({
     };
   }, [messages, signedImageUrls]);
 
-  const handleSelectSession = async (session: AiSessionRecord) => {
+  const activeSessionIdRef = useRef<string | null>(activeSessionId);
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  const handleSelectSession = useCallback(async (session: AiSessionRecord) => {
     abortControllerRef.current?.abort();
     inFlightRef.current = false;
     setSending(false);
     setStreamingContent('');
+    activeSessionIdRef.current = session.id;
     setActiveSessionId(session.id);
     setSelectedMaterialId(session.attached_material_id);
     setSelectedSummaryId(session.attached_summary_id);
@@ -227,14 +249,32 @@ export function AiChatWorkspace({
     if (!user || !isSupabaseConfigured) return;
     setLoadingMessages(true);
     try {
-      const loaded = await listAiMessages(user.id, session.id);
+      const [loaded, restoredImage] = await Promise.all([
+        listAiMessages(user.id, session.id),
+        session.active_image_path
+          ? restoreSessionImageAttachment(session.active_image_path, session.active_image_mime)
+          : Promise.resolve(null),
+      ]);
+      if (activeSessionIdRef.current !== session.id) return;
       setMessages(loaded);
+      if (restoredImage) {
+        setActiveSessionImage(restoredImage);
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Unable to load conversation.');
     } finally {
       setLoadingMessages(false);
     }
-  };
+  }, [user]);
+
+  useEffect(() => {
+    if (!initialSessionId || loadingSessions) return;
+    const match = sessions.find((s) => s.id === initialSessionId);
+    if (match) {
+      handleSelectSession(match);
+    }
+    onConsumeInitialSession?.();
+  }, [initialSessionId, loadingSessions, sessions, handleSelectSession, onConsumeInitialSession]);
 
   const handleNewChat = () => {
     abortControllerRef.current?.abort();
@@ -250,20 +290,30 @@ export function AiChatWorkspace({
     setHistorySidebarOpen(false);
   };
 
-  const handleDeleteSession = async (
+  const requestDeleteSession = (
     e: React.MouseEvent,
-    sessionId: string
+    session: AiSessionRecord
   ) => {
     e.stopPropagation();
-    if (!user || !isSupabaseConfigured) return;
+    setDeleteTarget(session);
+  };
+
+  const confirmDeleteSession = async () => {
+    if (!user || !isSupabaseConfigured || !deleteTarget) return;
+    const sessionId = deleteTarget.id;
+    setDeletingSession(true);
     try {
       await deleteAiSession(user.id, sessionId);
       setSessions((prev) => prev.filter((s) => s.id !== sessionId));
       if (activeSessionId === sessionId) {
         handleNewChat();
       }
+      setDeleteTarget(null);
+      onActivityRecorded();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to delete chat session.');
+    } finally {
+      setDeletingSession(false);
     }
   };
 
@@ -375,7 +425,7 @@ export function AiChatWorkspace({
           needsTitle: isFirstTurn,
         },
         signal: controller.signal,
-        idleTimeoutMs: 150000,
+        idleTimeoutMs: 60000,
         fallbackErrorMessage: 'Failed to get AI Chat response.',
         onChunk: (_delta, accumulated) => {
           setStreamingContent(accumulated);
@@ -618,7 +668,7 @@ export function AiChatWorkspace({
                     </div>
                     <button
                       type="button"
-                      onClick={(e) => handleDeleteSession(e, session.id)}
+                      onClick={(e) => requestDeleteSession(e, session)}
                       aria-label={`Delete ${session.title}`}
                       className="rounded-md p-1 text-slate-400 opacity-70 transition-opacity hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100 dark:hover:bg-rose-950/40 dark:hover:text-rose-400"
                     >
@@ -677,7 +727,7 @@ export function AiChatWorkspace({
               </button>
 
               {contextPickerOpen && (
-                <div className="absolute right-0 z-30 mt-2 w-80 rounded-xl border border-slate-200 bg-white p-3 shadow-xl dark:border-slate-700 dark:bg-[#0B1325]">
+                <div className="absolute right-0 z-30 mt-2 w-[min(20rem,calc(100vw-2.5rem))] rounded-xl border border-slate-200 bg-white p-3 shadow-xl dark:border-slate-700 dark:bg-[#0B1325]">
                   <div className="flex items-center justify-between border-b border-slate-200 pb-2 dark:border-slate-800">
                     <p className="text-xs font-bold text-slate-900 dark:text-white">
                       Ground Chat in Study Material
@@ -767,10 +817,11 @@ export function AiChatWorkspace({
             <button
               type="button"
               onClick={handleNewChat}
-              className="hidden items-center gap-1 rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 sm:inline-flex dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+              className="inline-flex min-h-9 items-center gap-1 rounded-xl border border-slate-200 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 sm:px-3 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+              aria-label="New AI chat"
             >
               <MessageSquarePlus className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>New</span>
+              <span className="hidden sm:inline">New</span>
             </button>
           </div>
         </header>
@@ -789,40 +840,53 @@ export function AiChatWorkspace({
         )}
 
         {/* Messages Thread */}
-        <div className="flex-1 overflow-y-auto px-5 py-5">
+        <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-5">
           {loadingMessages ? (
             <div className="flex h-full items-center justify-center py-12">
               <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
             </div>
           ) : messages.length === 0 ? (
-            <div className="mx-auto flex max-w-2xl flex-col items-center justify-center py-8 text-center">
-              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-cyan-400">
-                <Sparkles className="h-6 w-6" aria-hidden="true" />
-              </div>
-              <h2 className="mt-4 font-display text-xl font-bold text-slate-900 select-none dark:text-white">
-                Ask Anything Across Any Academic Discipline
-              </h2>
-              <p className="mt-2 max-w-lg text-sm leading-relaxed text-slate-600 dark:text-slate-300">
-                Work through equations step by step, compare complex concepts, attach your uploaded course notes, or snap a photo of a problem or textbook diagram.
-              </p>
+            <div className="mx-auto flex max-w-2xl flex-col items-center justify-center py-4 text-center">
+              <SubjectVisualBanner
+                visualKey="chatbot"
+                variant="hero"
+                title="AI Academic Chatbot · Research & Problem Solving"
+                subtitle="Work through equations step by step, compare concepts with structured tables, attach your notes, or snap a photo of a diagram."
+                className="w-full text-left"
+              />
 
-              <div className="mt-6 grid w-full grid-cols-1 gap-3 text-left sm:grid-cols-2">
-                {STARTER_PROMPTS.map((item) => (
-                  <button
-                    key={item.subject}
-                    type="button"
-                    disabled={sending}
-                    onClick={() => sendMessage({ overrideText: item.prompt })}
-                    className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 text-left transition-colors hover:border-blue-300 hover:bg-blue-50/60 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900/50 dark:hover:border-cyan-700 dark:hover:bg-slate-800/80"
-                  >
-                    <p className="text-[11px] font-semibold text-blue-700 select-none dark:text-cyan-400">
-                      {item.subject}
-                    </p>
-                    <p className="mt-1 text-xs leading-relaxed text-slate-700 dark:text-slate-200">
-                      {item.prompt}
-                    </p>
-                  </button>
-                ))}
+              <div className="mt-5 grid w-full grid-cols-1 gap-3 text-left sm:grid-cols-2">
+                {STARTER_PROMPTS.map((item) => {
+                  const thumb = resolveSubjectVisual(`${item.subject} ${item.prompt}`, 'chatbot');
+                  return (
+                    <button
+                      key={item.subject}
+                      type="button"
+                      disabled={sending}
+                      onClick={() => sendMessage({ overrideText: item.prompt })}
+                      className="group overflow-hidden rounded-xl border border-slate-200 bg-slate-50/70 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-blue-300 hover:bg-blue-50/60 hover:shadow-sm disabled:opacity-50 select-none dark:border-slate-800 dark:bg-slate-900/50 dark:hover:border-cyan-700 dark:hover:bg-slate-800/80"
+                    >
+                      <div className="aspect-[16/9] w-full overflow-hidden border-b border-slate-200/80 bg-slate-900 dark:border-slate-800">
+                        <img
+                          src={thumb.src}
+                          alt={thumb.alt}
+                          loading="lazy"
+                          decoding="async"
+                          referrerPolicy="no-referrer"
+                          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                        />
+                      </div>
+                      <div className="p-3.5">
+                        <p className="text-[11px] font-semibold text-blue-700 dark:text-cyan-400">
+                          {item.subject}
+                        </p>
+                        <p className="mt-1 text-xs leading-relaxed text-slate-700 dark:text-slate-200">
+                          {item.prompt}
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           ) : (
@@ -1001,8 +1065,22 @@ export function AiChatWorkspace({
               disabled={sending}
               onReplace={(next) => setPendingImage(next)}
               onRemove={() => {
+                const hadPersisted = Boolean(activeSessionImage);
                 setPendingImage(null);
                 setActiveSessionImage(null);
+                if (hadPersisted && user && isSupabaseConfigured && activeSessionId) {
+                  updateAiSession(user.id, activeSessionId, {
+                    active_image_path: null,
+                    active_image_mime: null,
+                  }).catch(() => {});
+                  setSessions((prev) =>
+                    prev.map((s) =>
+                      s.id === activeSessionId
+                        ? { ...s, active_image_path: null, active_image_mime: null }
+                        : s
+                    )
+                  );
+                }
               }}
               onQuickAction={(action, defaultPrompt) =>
                 sendMessage({ overrideText: defaultPrompt, imageAction: action })
@@ -1053,6 +1131,16 @@ export function AiChatWorkspace({
           </div>
         </div>
       </section>
+
+      <ConfirmDeleteModal
+        isOpen={Boolean(deleteTarget)}
+        title="Delete chat conversation?"
+        itemName={deleteTarget?.title}
+        description="This permanently deletes this conversation and all saved messages from your Academic History. This action cannot be undone."
+        busy={deletingSession}
+        onConfirm={confirmDeleteSession}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }
