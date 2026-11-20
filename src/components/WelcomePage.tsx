@@ -21,9 +21,10 @@ import type { AuthModalMode } from './AuthModal';
 
 interface WelcomePageProps {
   onOpenAuth: (mode: AuthModalMode) => void;
+  onNavigateToPrivacy: () => void;
 }
 
-export function WelcomePage({ onOpenAuth }: WelcomePageProps) {
+export function WelcomePage({ onOpenAuth, onNavigateToPrivacy }: WelcomePageProps) {
   const [heroImgFailed, setHeroImgFailed] = useState(false);
   const [synthImgFailed, setSynthImgFailed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -139,10 +140,13 @@ export function WelcomePage({ onOpenAuth }: WelcomePageProps) {
               <p className="text-sm font-semibold tracking-wide text-[#1D4ED8] dark:text-[#38BDF8]">
                 Your Personal AI-Powered Academic Companion
               </p>
-              <h1 className="mt-3 font-display text-4xl font-bold tracking-tight text-[#0B1528] text-balance sm:text-5xl dark:text-white">
-                Master complex coursework with structured summaries, exams, and guided tutoring.
+              <h1 className="mt-2 font-display text-5xl font-bold tracking-tight text-[#0B1528] sm:text-6xl dark:text-white academic-selectable">
+                Brainstine
               </h1>
-              <p className="mt-5 max-w-xl text-base leading-relaxed text-slate-600 dark:text-slate-300 academic-selectable">
+              <p className="mt-3 font-display text-2xl font-semibold tracking-tight text-slate-800 text-balance sm:text-3xl dark:text-slate-100">
+                Master complex coursework with structured summaries, exams, and guided tutoring.
+              </p>
+              <p className="mt-4 max-w-xl text-base leading-relaxed text-slate-600 dark:text-slate-300 academic-selectable">
                 Brainstine transforms PDFs, handwritten notebook photos, and lecture audio into
                 diagram-rich summaries, 10–40 question assessments, context-aware academic chat, and
                 step-by-step personal tutoring—saved securely to your account.
@@ -471,11 +475,25 @@ export function WelcomePage({ onOpenAuth }: WelcomePageProps) {
 
       <footer className="border-t border-slate-200 bg-white py-8 dark:border-slate-800 dark:bg-[#080F1E]">
         <div className="mx-auto flex max-w-6xl flex-col items-start justify-between gap-4 px-4 sm:flex-row sm:items-center sm:px-6 lg:px-8">
-          <div className="flex flex-col gap-1">
+          <div className="flex flex-col gap-1.5">
             <BrandLogo size="sm" />
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              Your Personal AI-Powered Academic Companion · © {new Date().getFullYear()} Brainstine
-            </p>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+              <span>
+                Your Personal AI-Powered Academic Companion · © {new Date().getFullYear()} Brainstine
+              </span>
+              <span aria-hidden="true">·</span>
+              <a
+                href="/privacy"
+                onClick={(e) => {
+                  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                  e.preventDefault();
+                  onNavigateToPrivacy();
+                }}
+                className="font-semibold text-[#1D4ED8] underline underline-offset-4 transition-colors hover:text-[#0F1E3D] dark:text-[#38BDF8] dark:hover:text-white"
+              >
+                Privacy Policy
+              </a>
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <PWAInstallButton compact />

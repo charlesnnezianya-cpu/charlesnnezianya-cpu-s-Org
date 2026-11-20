@@ -103,18 +103,11 @@ export function BrandLogo({
 
       {variant === 'full' && (
         <div className="flex flex-col leading-none">
-          <div className="flex items-baseline">
-            <span
-              className={`font-display font-bold tracking-tight text-[#0F172A] dark:text-white ${textSize}`}
-            >
-              Brain
-            </span>
-            <span
-              className={`font-display font-bold tracking-tight text-[#1D4ED8] dark:text-[#38BDF8] ${textSize}`}
-            >
-              stine
-            </span>
-          </div>
+          <span
+            className={`font-display font-bold tracking-tight text-[#0F172A] dark:text-white ${textSize}`}
+          >
+            Brain<span className="text-[#1D4ED8] dark:text-[#38BDF8]">stine</span>
+          </span>
           {showTagline && (
             <span className="mt-1 text-xs font-medium text-slate-500 dark:text-slate-400">
               AI-Powered Academic Companion
