@@ -1,3 +1,14 @@
+import heroImg from '../assets/images/hero_academic_study_1795007734160.jpg';
+import summarizerImg from '../assets/images/academic_material_synthesis_1795007733268.jpg';
+import tutorImg from '../assets/images/tutor_mentor_studio_1795175718194.jpg';
+import chatbotImg from '../assets/images/chatbot_academic_inquiry_1795175722755.jpg';
+import quizImg from '../assets/images/quiz_assessment_desk_1795175721825.jpg';
+import biologyImg from '../assets/images/edu_subject_biology_1795175722606.jpg';
+import chemistryImg from '../assets/images/edu_subject_chemistry_1795175721700.jpg';
+import physicsMathImg from '../assets/images/edu_subject_physics_math_1795175722093.jpg';
+import medicineAnatomyImg from '../assets/images/edu_subject_medicine_anatomy_1795175720511.jpg';
+import humanitiesGeoImg from '../assets/images/edu_subject_humanities_geo_1795175722201.jpg';
+
 export type EducationalVisualKey =
   | 'hero'
   | 'summarizer'
@@ -22,7 +33,7 @@ export interface EducationalVisualAsset {
 export const EDUCATIONAL_VISUALS: Record<EducationalVisualKey, EducationalVisualAsset> = {
   hero: {
     key: 'hero',
-    src: '/src/assets/images/hero_academic_study_1795007734160.jpg',
+    src: heroImg,
     alt: 'Sunlit university desk with open notebook and tablet displaying structured study notes',
     subjectLabel: 'Academic Companion',
     caption: 'Structured digital learning across uploaded notes, books, and recordings',
@@ -30,7 +41,7 @@ export const EDUCATIONAL_VISUALS: Record<EducationalVisualKey, EducationalVisual
   },
   summarizer: {
     key: 'summarizer',
-    src: '/src/assets/images/academic_material_synthesis_1795007733268.jpg',
+    src: summarizerImg,
     alt: 'Organized study sheets, textbooks, and structured academic summary cards on a clean desk',
     subjectLabel: 'Material Synthesis',
     caption: 'Structured textbook distillation with definitions, tables, and visual schematics',
@@ -38,7 +49,7 @@ export const EDUCATIONAL_VISUALS: Record<EducationalVisualKey, EducationalVisual
   },
   tutor: {
     key: 'tutor',
-    src: '/src/assets/images/tutor_mentor_studio_1795175718194.jpg',
+    src: tutorImg,
     alt: 'Personal tutoring study desk featuring orbital diagrams on a tablet, glass prism, and open notebook',
     subjectLabel: 'Personal AI Tutor',
     caption: 'Guided step-by-step mastery adapted to Beginner, Standard, and Advanced depth',
@@ -46,7 +57,7 @@ export const EDUCATIONAL_VISUALS: Record<EducationalVisualKey, EducationalVisual
   },
   chatbot: {
     key: 'chatbot',
-    src: '/src/assets/images/chatbot_academic_inquiry_1795175722755.jpg',
+    src: chatbotImg,
     alt: 'Academic research desk with translucent molecular model, open reference atlas, and warm lamp',
     subjectLabel: 'Academic Inquiry',
     caption: 'Context-grounded Q&A with equations, visual diagrams, and photo interpretation',
@@ -54,7 +65,7 @@ export const EDUCATIONAL_VISUALS: Record<EducationalVisualKey, EducationalVisual
   },
   quiz: {
     key: 'quiz',
-    src: '/src/assets/images/quiz_assessment_desk_1795175721825.jpg',
+    src: quizImg,
     alt: 'Clean assessment preparation desk with examination folio, drafting compass, and hourglass',
     subjectLabel: 'Assessment Studio',
     caption: 'Practice and timed examination engine with full question-by-question feedback',
@@ -62,7 +73,7 @@ export const EDUCATIONAL_VISUALS: Record<EducationalVisualKey, EducationalVisual
   },
   biology: {
     key: 'biology',
-    src: '/src/assets/images/edu_subject_biology_1795175722606.jpg',
+    src: biologyImg,
     alt: '3D scientific illustration of a eukaryotic cell cross-section showing mitochondria, nucleus, and ATP pathways',
     subjectLabel: 'Biological & Life Sciences',
     caption: 'Cellular organelles, bioenergetics, and metabolic pathways',
@@ -70,7 +81,7 @@ export const EDUCATIONAL_VISUALS: Record<EducationalVisualKey, EducationalVisual
   },
   chemistry: {
     key: 'chemistry',
-    src: '/src/assets/images/edu_subject_chemistry_1795175721700.jpg',
+    src: chemistryImg,
     alt: '3D scientific studio rendering of crystalline molecular lattices and volumetric laboratory glassware',
     subjectLabel: 'Chemistry & Molecular Science',
     caption: 'Molecular bonding, crystalline structures, and quantitative stoichiometry',
@@ -78,7 +89,7 @@ export const EDUCATIONAL_VISUALS: Record<EducationalVisualKey, EducationalVisual
   },
   physics_math: {
     key: 'physics_math',
-    src: '/src/assets/images/edu_subject_physics_math_1795175722093.jpg',
+    src: physicsMathImg,
     alt: 'Scientific visualization of optical glass prism dispersion, brass gyroscope rings, and wave geometry',
     subjectLabel: 'Physics, Mathematics & Engineering',
     caption: 'Optics, mechanics, harmonic equations, and formal derivations',
@@ -86,7 +97,7 @@ export const EDUCATIONAL_VISUALS: Record<EducationalVisualKey, EducationalVisual
   },
   medicine_anatomy: {
     key: 'medicine_anatomy',
-    src: '/src/assets/images/edu_subject_medicine_anatomy_1795175720511.jpg',
+    src: medicineAnatomyImg,
     alt: 'Medical anatomical illustration of human cardiopulmonary vessels, bronchial airways, and ribcage structure',
     subjectLabel: 'Medicine & Human Anatomy',
     caption: 'Cardiopulmonary circulation, physiological systems, and clinical structure',
@@ -94,7 +105,7 @@ export const EDUCATIONAL_VISUALS: Record<EducationalVisualKey, EducationalVisual
   },
   humanities_geo: {
     key: 'humanities_geo',
-    src: '/src/assets/images/edu_subject_humanities_geo_1795175722201.jpg',
+    src: humanitiesGeoImg,
     alt: 'Terrestrial globe beside a topographic relief map, brass calipers, and archival history books',
     subjectLabel: 'Geography, History & Social Sciences',
     caption: 'Spatial geography, historical synthesis, macroeconomics, and global frameworks',

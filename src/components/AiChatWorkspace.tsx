@@ -16,6 +16,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { formatClientApiError } from '../lib/apiClient';
 import { postSseStream } from '../lib/sseClient';
 import {
   createAiMessage,
@@ -425,8 +426,10 @@ export function AiChatWorkspace({
           needsTitle: isFirstTurn,
         },
         signal: controller.signal,
-        idleTimeoutMs: 60000,
-        fallbackErrorMessage: 'Failed to get AI Chat response.',
+        idleTimeoutMs: 75000,
+        fallbackErrorMessage:
+          'Unable to get a response from AI Academic Chat. Your message has been preserved—please try again.',
+        contextAction: 'generating an AI Academic Chat response',
         onChunk: (_delta, accumulated) => {
           setStreamingContent(accumulated);
         },
@@ -565,7 +568,7 @@ export function AiChatWorkspace({
         setMessages((prev) => prev.filter((m) => m.id !== tempUserMsg.id));
         return;
       }
-      setError(err instanceof Error ? err.message : 'Unable to send chat message.');
+      setError(formatClientApiError(err, 'contacting AI Academic Chat'));
       setMessages((prev) => prev.filter((m) => m.id !== tempUserMsg.id));
       if (typedInputSnapshot !== null) {
         setInputText(typedInputSnapshot);

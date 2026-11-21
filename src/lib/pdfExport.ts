@@ -12,6 +12,47 @@ function sanitizeAscii(text: string): string {
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/[\u2013\u2014]/g, '-')
     .replace(/\u2022/g, '*')
+    .replace(/\u2026/g, '...')
+    .replace(/\u00D7/g, 'x')
+    .replace(/\u00F7/g, '/')
+    .replace(/\u00B1/g, '+/-')
+    .replace(/\u2264/g, '<=')
+    .replace(/\u2265/g, '>=')
+    .replace(/\u2260/g, '!=')
+    .replace(/\u2248/g, '~=')
+    .replace(/\u2261/g, '===')
+    .replace(/\u221D/g, '~')
+    .replace(/\u221E/g, 'infinity')
+    .replace(/\u2192/g, '->')
+    .replace(/\u2190/g, '<-')
+    .replace(/\u2194/g, '<->')
+    .replace(/\u21CC/g, '<=>')
+    .replace(/\u21D2/g, '=>')
+    .replace(/\u00B0/g, ' deg')
+    .replace(/\u00B2/g, '^2')
+    .replace(/\u00B3/g, '^3')
+    .replace(/\u221A/g, 'sqrt')
+    .replace(/\u222B/g, 'integral ')
+    .replace(/\u2211/g, 'sum ')
+    .replace(/\u2202/g, 'd')
+    .replace(/\u2207/g, 'nabla ')
+    .replace(/\u03B1/g, 'alpha')
+    .replace(/\u03B2/g, 'beta')
+    .replace(/\u03B3/g, 'gamma')
+    .replace(/\u03B4/g, 'delta')
+    .replace(/\u0394/g, 'Delta')
+    .replace(/\u03B5/g, 'epsilon')
+    .replace(/\u03B8/g, 'theta')
+    .replace(/\u03BB/g, 'lambda')
+    .replace(/[\u03BC\u00B5]/g, 'mu')
+    .replace(/\u03C0/g, 'pi')
+    .replace(/\u03C1/g, 'rho')
+    .replace(/\u03C3/g, 'sigma')
+    .replace(/\u03A3/g, 'Sigma')
+    .replace(/\u03C4/g, 'tau')
+    .replace(/\u03C6/g, 'phi')
+    .replace(/\u03C9/g, 'omega')
+    .replace(/\u03A9/g, 'Omega')
     .replace(/[^\x20-\x7E]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -32,19 +73,25 @@ function wrapText(text: string, maxChars: number): string[] {
   let current = '';
 
   for (const word of words) {
-    if (!current) {
+    if (current && current.length + 1 + word.length <= maxChars) {
+      current = `${current} ${word}`;
+    } else {
+      if (current) {
+        lines.push(current);
+        current = '';
+      }
       if (word.length > maxChars) {
         for (let i = 0; i < word.length; i += maxChars) {
-          lines.push(word.slice(i, i + maxChars));
+          const chunk = word.slice(i, i + maxChars);
+          if (i + maxChars < word.length) {
+            lines.push(chunk);
+          } else {
+            current = chunk;
+          }
         }
       } else {
         current = word;
       }
-    } else if (current.length + 1 + word.length <= maxChars) {
-      current = `${current} ${word}`;
-    } else {
-      lines.push(current);
-      current = word;
     }
   }
   if (current) lines.push(current);
@@ -277,5 +324,5 @@ export function exportSummaryToPdf(summary: StructuredSummary): void {
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

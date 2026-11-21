@@ -17,6 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { formatClientApiError } from '../lib/apiClient';
 import { postSseStream } from '../lib/sseClient';
 import {
   createAiMessage,
@@ -513,8 +514,10 @@ export function AiTutorWorkspace({
           imageAction: options?.imageAction,
         },
         signal: controller.signal,
-        idleTimeoutMs: 60000,
-        fallbackErrorMessage: 'Personal AI Tutor request failed.',
+        idleTimeoutMs: 75000,
+        fallbackErrorMessage:
+          'Unable to get a response from Personal AI Tutor. Your message has been preserved—please try again.',
+        contextAction: 'contacting Personal AI Tutor',
         onChunk: (_delta, accumulated) => {
           setStreamingContent(accumulated);
         },
@@ -668,7 +671,7 @@ export function AiTutorWorkspace({
         setMessages((prev) => prev.filter((m) => m.id !== tempUserMsg.id));
         return;
       }
-      setError(err instanceof Error ? err.message : 'Unable to reach Personal AI Tutor.');
+      setError(formatClientApiError(err, 'contacting Personal AI Tutor'));
       setMessages((prev) => prev.filter((m) => m.id !== tempUserMsg.id));
       if (typedInputSnapshot !== null) {
         setInputText(typedInputSnapshot);

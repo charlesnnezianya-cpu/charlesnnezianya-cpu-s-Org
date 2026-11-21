@@ -59,6 +59,67 @@ const ACCEPTED_IMAGE_TYPES = new Set([
 ]);
 
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
+const TARGET_UPLOAD_IMAGE_BYTES = 1.3 * 1024 * 1024;
+
+export async function compressImageFile(
+  file: File,
+  maxDimension = 1800,
+  targetBytes = TARGET_UPLOAD_IMAGE_BYTES
+): Promise<File> {
+  if (file.size <= targetBytes) return file;
+
+  const mime = (file.type || '').toLowerCase();
+  const outputMime = mime === 'image/webp' ? 'image/webp' : 'image/jpeg';
+
+  return new Promise<File>((resolve) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, maxDimension / Math.max(img.width, img.height, 1));
+        const targetW = Math.max(1, Math.round(img.width * scale));
+        const targetH = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          URL.revokeObjectURL(objectUrl);
+          resolve(file);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, targetW, targetH);
+        canvas.toBlob(
+          (blob) => {
+            URL.revokeObjectURL(objectUrl);
+            if (!blob || blob.size >= file.size) {
+              resolve(file);
+              return;
+            }
+            const ext = outputMime === 'image/webp' ? 'webp' : 'jpg';
+            const baseName = file.name ? file.name.replace(/\.[^.]+$/, '') : 'study-image';
+            resolve(
+              new File([blob], `${baseName}.${ext}`, {
+                type: outputMime,
+                lastModified: Date.now(),
+              })
+            );
+          },
+          outputMime,
+          0.86
+        );
+      } catch {
+        URL.revokeObjectURL(objectUrl);
+        resolve(file);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(file);
+    };
+    img.src = objectUrl;
+  });
+}
 
 function readFileAsBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -89,16 +150,19 @@ export async function fileToSnapAttachment(file: File): Promise<SnapImageAttachm
   if (file.size > MAX_IMAGE_BYTES) {
     throw new Error('Image exceeds the 15 MB limit. Please upload a smaller photo.');
   }
-  const base64 = await readFileAsBase64(file);
-  const normalizedMime = mime === 'image/jpg' ? 'image/jpeg' : mime;
+
+  const processedFile = await compressImageFile(file);
+  const processedMime = (processedFile.type || mime).toLowerCase();
+  const base64 = await readFileAsBase64(processedFile);
+  const normalizedMime = processedMime === 'image/jpg' ? 'image/jpeg' : processedMime;
   const previewUrl = `data:${normalizedMime};base64,${base64}`;
   return {
-    file,
+    file: processedFile,
     base64,
     mimeType: normalizedMime,
     previewUrl,
-    fileName: file.name || `study-snap-${Date.now()}.jpg`,
-    fileSizeBytes: file.size,
+    fileName: processedFile.name || `study-snap-${Date.now()}.jpg`,
+    fileSizeBytes: processedFile.size,
   };
 }
 

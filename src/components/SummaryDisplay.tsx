@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { formatClientApiError, parseApiJsonResponse, resolveApiUrl } from '../lib/apiClient';
 import {
   AlertCircle,
   BookmarkCheck,
@@ -95,6 +96,13 @@ export function SummaryDisplay({
   const [followUpLoading, setFollowUpLoading] = useState(false);
   const [followUpError, setFollowUpError] = useState<string | null>(null);
 
+  useEffect(() => {
+    setFollowUps([]);
+    setQuestionInput('');
+    setFollowUpError(null);
+    setFollowUpLoading(false);
+  }, [summary]);
+
   const allExpanded = ALL_SECTIONS.every((key) => expandedSections[key]);
 
   const toggleAllSections = () => {
@@ -120,10 +128,13 @@ export function SummaryDisplay({
     }
   };
 
+  const followUpRef = useRef(false);
+
   const runFollowUp = async (
     actionType: 'question' | 'simpler_explanation' | 'examples' | 'revision_notes',
     customQuestion?: string
   ) => {
+    if (followUpRef.current) return;
     setFollowUpError(null);
     if (!geminiConfigured) {
       setFollowUpError(
@@ -136,11 +147,12 @@ export function SummaryDisplay({
       return;
     }
 
+    followUpRef.current = true;
     setFollowUpLoading(true);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 75000);
     try {
-      const res = await fetch('/api/summaries/followup', {
+      const res = await fetch(resolveApiUrl('/api/summaries/followup'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
@@ -151,10 +163,10 @@ export function SummaryDisplay({
           sourceText,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Follow-up request failed.');
-      }
+      const data = await parseApiJsonResponse<{ fromSource: string; aiExplanation: string }>(
+        res,
+        'answering your follow-up request'
+      );
 
       const labelMap = {
         question: 'Follow-Up Question',
@@ -180,13 +192,16 @@ export function SummaryDisplay({
         setQuestionInput('');
       }
     } catch (err: unknown) {
-      if ((err as { name?: string })?.name === 'AbortError') {
-        setFollowUpError('Follow-up request timed out. Please try again in a moment.');
-      } else {
-        setFollowUpError(err instanceof Error ? err.message : 'Unable to process follow-up.');
-      }
+      setFollowUpError(
+        formatClientApiError(
+          err,
+          'processing your follow-up request',
+          'Follow-up request timed out. Please try again in a moment.'
+        )
+      );
     } finally {
       clearTimeout(timer);
+      followUpRef.current = false;
       setFollowUpLoading(false);
     }
   };
@@ -636,7 +651,7 @@ export function SummaryDisplay({
                         <span className="font-display text-sm font-semibold text-slate-900 select-text dark:text-white">
                           {formula.name}
                         </span>
-                        <code className="rounded-md border border-slate-200 bg-white px-2.5 py-1 font-mono text-xs font-medium text-blue-800 select-text dark:border-slate-700 dark:bg-slate-950 dark:text-cyan-300">
+                        <code className="max-w-full break-all rounded-md border border-slate-200 bg-white px-2.5 py-1 font-mono text-xs font-medium text-blue-800 select-text dark:border-slate-700 dark:bg-slate-950 dark:text-cyan-300">
                           {formula.expressionOrStructure}
                         </code>
                       </div>
@@ -697,7 +712,7 @@ export function SummaryDisplay({
       </article>
 
       {/* Summary Interaction & Scoped Follow-up Panel */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
         <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-4 sm:flex-row sm:items-center dark:border-slate-800">
           <div>
             <h3 className="font-display text-base font-bold text-slate-900 select-none dark:text-white">

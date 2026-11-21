@@ -57,6 +57,9 @@ function formatReadableOAuthError(
   if (combined.includes('unable to exchange external code') || combined.includes('server_error')) {
     return 'Google Sign-In could not complete verification with Supabase. Please verify the Google Client Secret in Supabase or sign in with Email & Password.';
   }
+  if (combined.includes('bad_oauth_state') || combined.includes('invalid_request')) {
+    return 'Google Sign-In session expired or could not be verified. Please click Continue with Google again or sign in with Email & Password.';
+  }
   const cleanDesc = errorDescription.replace(/\+/g, ' ').trim();
   return cleanDesc || 'Google Sign-In could not be completed. Please try again or use Email & Password.';
 }
@@ -116,6 +119,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const fallbackName =
         (authUser.user_metadata?.display_name as string | undefined) ||
         (authUser.user_metadata?.full_name as string | undefined) ||
+        (authUser.user_metadata?.name as string | undefined) ||
         authUser.email?.split('@')[0] ||
         'Student';
 
@@ -130,6 +134,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const fallbackName =
         (authUser.user_metadata?.display_name as string | undefined) ||
         (authUser.user_metadata?.full_name as string | undefined) ||
+        (authUser.user_metadata?.name as string | undefined) ||
         authUser.email?.split('@')[0] ||
         'Student';
       setProfile({
@@ -269,45 +274,51 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setOauthError(null);
     setPendingOauthUrl(null);
 
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 4000);
-      const statusRes = await fetch(
-        `/api/auth/oauth-status?redirectTo=${encodeURIComponent(window.location.origin)}`,
-        { signal: controller.signal }
-      ).finally(() => clearTimeout(timer));
+    const hasBackendPreflight =
+      window.location.hostname === 'localhost' ||
+      window.location.hostname === '127.0.0.1' ||
+      window.location.hostname.endsWith('.run.app');
 
-      if (statusRes.ok) {
-        const status = (await statusRes.json()) as {
-          supabaseConfigured?: boolean;
-          googleEnabled?: boolean;
-          hasClientId?: boolean;
-          googleErrorType?: string | null;
-        };
+    if (hasBackendPreflight) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 2000);
+        const statusRes = await fetch(
+          `/api/auth/oauth-status?redirectTo=${encodeURIComponent(window.location.origin)}`,
+          { signal: controller.signal }
+        ).finally(() => clearTimeout(timer));
 
-        if (status.supabaseConfigured && !status.googleEnabled) {
-          throw new Error(
-            'Google Sign-In is not currently enabled in Supabase Authentication. Please sign in with your email and password.'
-          );
+        if (statusRes.ok) {
+          const status = (await statusRes.json()) as {
+            supabaseConfigured?: boolean;
+            googleEnabled?: boolean;
+            hasClientId?: boolean;
+            googleErrorType?: string | null;
+          };
+
+          if (status.supabaseConfigured && !status.googleEnabled) {
+            throw new Error(
+              'Google Sign-In is not currently enabled in Supabase Authentication. Please sign in with your email and password.'
+            );
+          }
+          if (status.googleEnabled && !status.hasClientId) {
+            throw new Error(
+              'Google Sign-In is enabled in Supabase, but the Google OAuth Client ID is missing. Please sign in with your email and password meanwhile.'
+            );
+          }
+          if (status.googleErrorType) {
+            throw new Error(formatReadableOAuthError(status.googleErrorType, '', ''));
+          }
         }
-        if (status.googleEnabled && !status.hasClientId) {
-          throw new Error(
-            'Google Sign-In is enabled in Supabase, but the Google OAuth Client ID is missing. Please sign in with your email and password meanwhile.'
-          );
+      } catch (preflightErr: unknown) {
+        if (
+          preflightErr instanceof Error &&
+          preflightErr.name !== 'AbortError' &&
+          (preflightErr.message.includes('Google Sign-In') ||
+            preflightErr.message.includes('OAuth'))
+        ) {
+          throw preflightErr;
         }
-        if (status.googleErrorType) {
-          throw new Error(formatReadableOAuthError(status.googleErrorType, '', ''));
-        }
-      }
-    } catch (preflightErr: unknown) {
-      // Re-throw deliberate configuration messages; ignore transient pre-flight network timeouts
-      if (
-        preflightErr instanceof Error &&
-        preflightErr.name !== 'AbortError' &&
-        (preflightErr.message.includes('Google Sign-In') ||
-          preflightErr.message.includes('OAuth'))
-      ) {
-        throw preflightErr;
       }
     }
 
@@ -319,15 +330,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     })();
 
+    const redirectTo = window.location.origin;
+
     const { data, error } = await client.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        redirectTo: window.location.origin,
+        redirectTo,
         skipBrowserRedirect: inIframe,
       },
     });
     if (error) {
       throw new Error(error.message);
+    }
+
+    if (data?.url && data.url.includes('google.com/url')) {
+      throw new Error(
+        'OAuth redirect URL is wrapped in a Google Redirect Notice link. Please update Supabase Authentication URL Configuration to use clean Brainstine URLs.'
+      );
     }
 
     if (inIframe) {

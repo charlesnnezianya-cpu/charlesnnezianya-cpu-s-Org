@@ -371,7 +371,7 @@ export function AcademicHistoryView({
   return (
     <div className="space-y-6">
       {/* Overall Academic Performance Summary */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
         <div className="flex flex-col justify-between gap-3 border-b border-slate-200 pb-4 sm:flex-row sm:items-center dark:border-slate-800">
           <div>
             <p className="text-xs font-semibold tracking-wide text-blue-700 select-none dark:text-cyan-400">
@@ -505,7 +505,7 @@ export function AcademicHistoryView({
       </section>
 
       {/* Search, Filters & Unified Academic Records */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
         <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-5 sm:flex-row sm:items-center dark:border-slate-800">
           <div>
             <h2 className="font-display text-lg font-bold text-slate-900 select-none dark:text-white">

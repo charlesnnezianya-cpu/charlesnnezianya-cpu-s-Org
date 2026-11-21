@@ -14,6 +14,7 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
+import { EDUCATIONAL_VISUALS } from '../lib/educationalVisuals';
 import { BrandLogo } from './BrandLogo';
 import { PWAInstallButton } from './PWAInstallButton';
 import { ThemeSelector } from './ThemeSelector';
@@ -186,8 +187,8 @@ export function WelcomePage({ onOpenAuth, onNavigateToPrivacy }: WelcomePageProp
               <div className="h-full overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
                 {!heroImgFailed ? (
                   <img
-                    src="/src/assets/images/hero_academic_study_1795007734160.jpg"
-                    alt="Modern sunlit university desk with an open academic notebook and laptop displaying structured study notes"
+                    src={EDUCATIONAL_VISUALS.hero.src}
+                    alt={EDUCATIONAL_VISUALS.hero.alt}
                     referrerPolicy="no-referrer"
                     onError={() => setHeroImgFailed(true)}
                     className="aspect-video h-full w-full object-cover"
@@ -285,8 +286,8 @@ export function WelcomePage({ onOpenAuth, onNavigateToPrivacy }: WelcomePageProp
                 <div className="h-full overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
                   {!synthImgFailed ? (
                     <img
-                      src="/src/assets/images/academic_material_synthesis_1795007733268.jpg"
-                      alt="Organized lecture slides and study flashcards on a clean study desk"
+                      src={EDUCATIONAL_VISUALS.summarizer.src}
+                      alt={EDUCATIONAL_VISUALS.summarizer.alt}
                       referrerPolicy="no-referrer"
                       onError={() => setSynthImgFailed(true)}
                       className="aspect-4/3 h-full w-full object-cover"

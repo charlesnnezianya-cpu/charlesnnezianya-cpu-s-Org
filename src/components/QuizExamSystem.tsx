@@ -17,6 +17,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { formatClientApiError, parseApiJsonResponse, resolveApiUrl } from '../lib/apiClient';
 import {
   deleteQuiz,
   deleteQuizAttempt,
@@ -62,6 +63,7 @@ interface QuizExamSystemProps {
     summaryId?: string;
     inlineSummary?: StructuredSummary;
   } | null;
+  onConsumePreselection?: () => void;
   onDataChanged: () => void;
   onActiveAttemptChange?: (active: boolean) => void;
 }
@@ -83,6 +85,7 @@ export function QuizExamSystem({
   initialAttemptToOpen,
   onConsumeAttemptToOpen,
   preselectedSource,
+  onConsumePreselection,
   onDataChanged,
   onActiveAttemptChange,
 }: QuizExamSystemProps) {
@@ -97,7 +100,6 @@ export function QuizExamSystem({
   const [selectedSummaryId, setSelectedSummaryId] = useState<string>('');
   const [pastedText, setPastedText] = useState<string>('');
   const [topicTitle, setTopicTitle] = useState<string>('');
-  const [inlineSummaryText, setInlineSummaryText] = useState<string>('');
 
   const [assessmentMode, setAssessmentMode] = useState<QuizAssessmentMode>('practice');
   const [questionCount, setQuestionCount] = useState<QuizQuestionCount>(10);
@@ -223,11 +225,11 @@ export function QuizExamSystem({
       if (preselectedSource.inlineSummary) {
         setSourceMode('text');
         setTopicTitle(preselectedSource.inlineSummary.title);
-        setInlineSummaryText(preselectedSource.inlineSummary.markdown);
         setPastedText(preselectedSource.inlineSummary.markdown);
       }
+      onConsumePreselection?.();
     }
-  }, [preselectedSource]);
+  }, [preselectedSource, onConsumePreselection]);
 
   useEffect(() => {
     if (!selectedMaterialId && materials.length > 0) {
@@ -312,7 +314,7 @@ export function QuizExamSystem({
     }
     if (sourceMode === 'text') {
       return {
-        text: pastedText || inlineSummaryText,
+        text: pastedText,
         title: topicTitle || 'Study Assessment',
         materialId: null,
         summaryId: null,
@@ -331,7 +333,6 @@ export function QuizExamSystem({
     summaries,
     selectedSummaryId,
     pastedText,
-    inlineSummaryText,
     topicTitle,
   ]);
 
@@ -369,9 +370,9 @@ export function QuizExamSystem({
     setGenerating(true);
     setCloudNotice(null);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 110000);
+    const timer = setTimeout(() => controller.abort(), 150000);
     try {
-      const res = await fetch('/api/quizzes/generate', {
+      const res = await fetch(resolveApiUrl('/api/quizzes/generate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
@@ -384,12 +385,10 @@ export function QuizExamSystem({
           questionCount,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Quiz generation failed.');
-      }
-
-      const generated = data as GeneratedQuizPayload;
+      const generated = await parseApiJsonResponse<GeneratedQuizPayload>(
+        res,
+        'generating your quiz'
+      );
       let savedQuizId: string | null = null;
       let syncWarning: string | null = null;
 
@@ -432,13 +431,13 @@ export function QuizExamSystem({
         setCloudNotice(syncWarning);
       }
     } catch (err: unknown) {
-      if ((err as { name?: string })?.name === 'AbortError') {
-        setErrorMsg(
+      setErrorMsg(
+        formatClientApiError(
+          err,
+          'generating your quiz',
           'Quiz generation timed out while waiting for the AI service. Please try fewer questions or try again shortly.'
-        );
-      } else {
-        setErrorMsg(err instanceof Error ? err.message : 'Unable to generate quiz.');
-      }
+        )
+      );
     } finally {
       clearTimeout(timer);
       generatingRef.current = false;
@@ -509,7 +508,7 @@ export function QuizExamSystem({
     setErrorMsg(null);
     setCloudNotice(null);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 80000);
+    const timer = setTimeout(() => controller.abort(), 150000);
 
     try {
       const answersArray = activeQuiz.questions.map((q) => {
@@ -522,7 +521,7 @@ export function QuizExamSystem({
         );
       });
 
-      const res = await fetch('/api/quizzes/grade', {
+      const res = await fetch(resolveApiUrl('/api/quizzes/grade'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
@@ -533,12 +532,10 @@ export function QuizExamSystem({
           timeTakenSeconds: elapsedSeconds,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Examination grading failed.');
-      }
-
-      const graded = data as QuizGradingResponse;
+      const graded = await parseApiJsonResponse<QuizGradingResponse>(
+        res,
+        'grading your examination'
+      );
       const mode: QuizAssessmentMode =
         activeQuiz.timeLimitMinutes && activeQuiz.timeLimitMinutes > 0 ? 'exam' : 'practice';
       let savedAttemptId: string | null = null;
@@ -588,11 +585,13 @@ export function QuizExamSystem({
       });
       setStage('results');
     } catch (err: unknown) {
-      if ((err as { name?: string })?.name === 'AbortError') {
-        setErrorMsg('Examination grading timed out. Your answers are preserved—please try submitting again.');
-      } else {
-        setErrorMsg(err instanceof Error ? err.message : 'Unable to grade examination.');
-      }
+      setErrorMsg(
+        formatClientApiError(
+          err,
+          'grading your examination',
+          'Examination grading timed out. Your answers are preserved—please try submitting again.'
+        )
+      );
     } finally {
       clearTimeout(timer);
       gradingRef.current = false;
@@ -1159,7 +1158,7 @@ export function QuizExamSystem({
           />
 
           {/* Metrics Grid */}
-          <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-7">
+          <div className="mt-6 grid grid-cols-2 gap-3.5 sm:grid-cols-4 lg:grid-cols-7">
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
               <p className="text-[11px] font-medium text-slate-500 select-none dark:text-slate-400">
                 Percentage

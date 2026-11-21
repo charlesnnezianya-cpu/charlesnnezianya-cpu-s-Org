@@ -15,6 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { parseApiJsonResponse, resolveApiUrl } from '../lib/apiClient';
 import {
   listAllAiSessions,
   listQuizAttempts,
@@ -121,15 +122,15 @@ export function DashboardLayout() {
   }, [user]);
 
   useEffect(() => {
-    fetch('/api/health')
-      .then((res) => res.json())
+    fetch(resolveApiUrl('/api/health'))
+      .then((res) => parseApiJsonResponse<{ geminiConfigured?: boolean }>(res, 'checking AI health'))
       .then((data) => {
         if (typeof data.geminiConfigured === 'boolean') {
           setGeminiConfigured(data.geminiConfigured);
         }
       })
       .catch(() => {
-        // leave default true until actual API call reports status
+        // Leave default true so users can still attempt requests and see detailed endpoint diagnostics
       });
   }, []);
 
@@ -419,6 +420,7 @@ export function DashboardLayout() {
               {activeSection === 'summarizer' && (
                 <StudySummarizer
                   initialMaterial={summarizerMaterial}
+                  onConsumeInitialMaterial={() => setSummarizerMaterial(null)}
                   geminiConfigured={geminiConfigured}
                   onActivityRecorded={loadWorkspaceData}
                   onGenerateQuizFromSummary={handleQuizFromInlineSummary}
@@ -460,6 +462,7 @@ export function DashboardLayout() {
                   initialAttemptToOpen={openAttempt}
                   onConsumeAttemptToOpen={() => setOpenAttempt(null)}
                   preselectedSource={quizPreselection}
+                  onConsumePreselection={() => setQuizPreselection(null)}
                   onDataChanged={loadWorkspaceData}
                   onActiveAttemptChange={setActiveExamInProgress}
                 />

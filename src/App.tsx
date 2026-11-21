@@ -22,6 +22,20 @@ function hasStoredAuthSession(): boolean {
   }
 }
 
+function hasOAuthCallbackParams(): boolean {
+  try {
+    const hash = window.location.hash || '';
+    const search = new URLSearchParams(window.location.search);
+    return (
+      hash.includes('access_token=') ||
+      hash.includes('refresh_token=') ||
+      search.has('code')
+    );
+  } catch {
+    return false;
+  }
+}
+
 function BrainstineRoot() {
   const { user, profile, loading, isPasswordRecovery, oauthError } = useAuth();
   const { setTheme } = useTheme();
@@ -108,13 +122,15 @@ function BrainstineRoot() {
     );
   }
 
-  // Only show session restoration screen if a cached auth session exists; unauthenticated visitors see the public home page immediately
-  if (loading && hasStoredAuthSession()) {
+  // Only show session restoration screen if a cached auth session or active OAuth callback exists; unauthenticated visitors see the public home page immediately
+  if (loading && (hasStoredAuthSession() || hasOAuthCallbackParams())) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center bg-slate-50 px-4 dark:bg-[#080F1E]">
         <BrandLogo size="md" />
         <p className="mt-4 text-xs font-medium text-slate-500 select-none dark:text-slate-400">
-          Restoring your study workspace...
+          {hasOAuthCallbackParams()
+            ? 'Completing Google Sign-In...'
+            : 'Restoring your study workspace...'}
         </p>
       </div>
     );

@@ -14,6 +14,12 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import {
+  extractErrorFromHttpBody,
+  formatClientApiError,
+  parseApiJsonResponse,
+  resolveApiUrl,
+} from '../lib/apiClient';
+import {
   createStudyMaterialRecord,
   recordStudyActivity,
   saveStudySummaryRecord,
@@ -26,11 +32,13 @@ import type {
   StudyMaterialRecord,
   SummaryLevel,
 } from '../types/brainstine';
+import { compressImageFile } from './SnapPhotoControl';
 import { SubjectVisualBanner } from './SubjectVisualBanner';
 import { SummaryDisplay } from './SummaryDisplay';
 
 interface StudySummarizerProps {
   initialMaterial?: StudyMaterialRecord | null;
+  onConsumeInitialMaterial?: () => void;
   geminiConfigured: boolean;
   onActivityRecorded?: () => void;
   onGenerateQuizFromSummary?: (summary: StructuredSummary) => void;
@@ -78,6 +86,7 @@ function formatBytes(bytes: number | null): string {
 
 export function StudySummarizer({
   initialMaterial,
+  onConsumeInitialMaterial,
   geminiConfigured,
   onActivityRecorded,
   onGenerateQuizFromSummary,
@@ -133,8 +142,9 @@ export function StudySummarizer({
       setSummarySaved(false);
       setErrorMsg(null);
       setNoticeMsg(`Loaded "${initialMaterial.title}" from your uploaded materials.`);
+      onConsumeInitialMaterial?.();
     }
-  }, [initialMaterial]);
+  }, [initialMaterial, onConsumeInitialMaterial]);
 
   const resetAll = () => {
     setSelectedFile(null);
@@ -165,6 +175,9 @@ export function StudySummarizer({
     }
     setSelectedFile(file);
     setExtraction(null);
+    setEditableExtractedText('');
+    setEditableTitle('');
+    setSavedMaterialId(null);
     setSummary(null);
     setSummarySaved(false);
   };
@@ -214,15 +227,17 @@ export function StudySummarizer({
                 : 'Reading text file...';
         setExtractionStatus(typeLabel);
 
+        const uploadFile =
+          fileCheck.type === 'image' ? await compressImageFile(selectedFile) : selectedFile;
         const formData = new FormData();
-        formData.append('file', selectedFile);
+        formData.append('file', uploadFile);
         if (editableTitle.trim()) {
           formData.append('title', editableTitle.trim());
         }
 
         result = await new Promise<ExtractionResult>((resolve, reject) => {
           const xhr = new XMLHttpRequest();
-          xhr.open('POST', '/api/materials/extract');
+          xhr.open('POST', resolveApiUrl('/api/materials/extract'));
           xhr.timeout = 120000;
           xhr.upload.onprogress = (evt) => {
             if (evt.lengthComputable) {
@@ -232,18 +247,37 @@ export function StudySummarizer({
           };
           xhr.onload = () => {
             setUploadProgress(95);
-            try {
-              const json = JSON.parse(xhr.responseText);
-              if (xhr.status >= 200 && xhr.status < 300) {
+            const contentType = xhr.getResponseHeader('content-type') || '';
+            if (xhr.status >= 200 && xhr.status < 300) {
+              try {
+                const json = JSON.parse(xhr.responseText);
                 resolve(json as ExtractionResult);
-              } else {
-                reject(new Error(json.error || 'Content extraction failed.'));
+              } catch {
+                reject(
+                  new Error(
+                    'The server returned an invalid or non-JSON response while extracting the file. Verify the Brainstine /api backend is active.'
+                  )
+                );
               }
-            } catch {
-              reject(new Error('Invalid server response during extraction.'));
+            } else {
+              reject(
+                new Error(
+                  extractErrorFromHttpBody(
+                    xhr.status,
+                    xhr.responseText || '',
+                    contentType,
+                    'extracting study content from your file'
+                  )
+                )
+              );
             }
           };
-          xhr.onerror = () => reject(new Error('Network error while uploading file.'));
+          xhr.onerror = () =>
+            reject(
+              new Error(
+                'Network connection error while uploading file. Check your internet connection and verify the Brainstine server is running.'
+              )
+            );
           xhr.ontimeout = () =>
             reject(
               new Error(
@@ -258,7 +292,7 @@ export function StudySummarizer({
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 75000);
         try {
-          const res = await fetch('/api/materials/extract', {
+          const res = await fetch(resolveApiUrl('/api/materials/extract'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             signal: controller.signal,
@@ -267,11 +301,10 @@ export function StudySummarizer({
               title: pastedTitle.trim() || 'Pasted Study Notes',
             }),
           });
-          const data = await res.json();
-          if (!res.ok) {
-            throw new Error(data.error || 'Text processing failed.');
-          }
-          result = data as ExtractionResult;
+          result = await parseApiJsonResponse<ExtractionResult>(
+            res,
+            'processing your pasted study notes'
+          );
         } finally {
           clearTimeout(timer);
         }
@@ -323,11 +356,13 @@ export function StudySummarizer({
         }
       }
     } catch (err: unknown) {
-      if ((err as { name?: string })?.name === 'AbortError') {
-        setErrorMsg('Text processing timed out. Please try again.');
-      } else {
-        setErrorMsg(err instanceof Error ? err.message : 'Failed to extract content.');
-      }
+      setErrorMsg(
+        formatClientApiError(
+          err,
+          'extracting study content',
+          'Content extraction timed out. Please try again.'
+        )
+      );
       setUploadProgress(0);
     } finally {
       extractingRef.current = false;
@@ -359,9 +394,9 @@ export function StudySummarizer({
     setSummarySaved(false);
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 110000);
+    const timer = setTimeout(() => controller.abort(), 150000);
     try {
-      const res = await fetch('/api/summaries/generate', {
+      const res = await fetch(resolveApiUrl('/api/summaries/generate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
@@ -372,12 +407,10 @@ export function StudySummarizer({
           summaryLevel,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Summary generation failed.');
-      }
-
-      const generated = data as StructuredSummary;
+      const generated = await parseApiJsonResponse<StructuredSummary>(
+        res,
+        'generating your study summary'
+      );
       setSummary(generated);
 
       if (user && isConfigured) {
@@ -413,13 +446,13 @@ export function StudySummarizer({
         onActivityRecorded?.();
       }
     } catch (err: unknown) {
-      if ((err as { name?: string })?.name === 'AbortError') {
-        setErrorMsg(
+      setErrorMsg(
+        formatClientApiError(
+          err,
+          'generating your study summary',
           'Summary generation timed out while waiting for the AI service. Please try again or choose a shorter depth.'
-        );
-      } else {
-        setErrorMsg(err instanceof Error ? err.message : 'Unable to generate summary.');
-      }
+        )
+      );
     } finally {
       clearTimeout(timer);
       generatingRef.current = false;
@@ -735,7 +768,7 @@ export function StudySummarizer({
 
       {/* Extracted Content & Summary Configuration */}
       {extraction && (
-        <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
           <div className="flex flex-col justify-between gap-3 border-b border-slate-200 pb-4 sm:flex-row sm:items-center dark:border-slate-800">
             <div>
               <h3 className="font-display text-lg font-bold text-slate-900 select-none dark:text-white">

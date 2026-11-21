@@ -1,3 +1,10 @@
+import {
+  extractErrorFromHttpBody,
+  formatClientApiError,
+  parseApiJsonResponse,
+  resolveApiUrl,
+} from './apiClient';
+
 export interface SseStreamOptions<TDone> {
   url: string;
   body: Record<string, unknown>;
@@ -6,16 +13,18 @@ export interface SseStreamOptions<TDone> {
   onChunk: (delta: string, accumulated: string) => void;
   onStart?: () => void;
   fallbackErrorMessage: string;
+  contextAction?: string;
 }
 
 export async function postSseStream<TDone>({
   url,
   body,
   signal,
-  idleTimeoutMs = 60000,
+  idleTimeoutMs = 75000,
   onChunk,
   onStart,
   fallbackErrorMessage,
+  contextAction = 'communicating with the AI service',
 }: SseStreamOptions<TDone>): Promise<TDone> {
   const internalController = new AbortController();
 
@@ -89,7 +98,7 @@ export async function postSseStream<TDone>({
   };
 
   try {
-    const response = await fetch(url, {
+    const response = await fetch(resolveApiUrl(url), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -100,20 +109,23 @@ export async function postSseStream<TDone>({
     });
 
     if (!response.ok) {
-      let message = fallbackErrorMessage;
-      try {
-        const errJson = await response.json();
-        if (errJson?.error) message = String(errJson.error);
-      } catch {
-        const text = await response.text().catch(() => '');
-        if (text) message = text;
-      }
-      throw new Error(message);
+      const contentType = response.headers.get('content-type') || '';
+      const rawText = await response.text().catch(() => '');
+      const parsedMessage = extractErrorFromHttpBody(
+        response.status,
+        rawText,
+        contentType,
+        contextAction
+      );
+      throw new Error(parsedMessage || fallbackErrorMessage);
     }
 
     const contentType = response.headers.get('content-type') || '';
     if (!contentType.includes('text/event-stream') || !response.body) {
-      const json = (await response.json()) as TDone & { reply?: string };
+      const json = await parseApiJsonResponse<TDone & { reply?: string }>(
+        response,
+        contextAction
+      );
       if (json.reply) {
         onChunk(json.reply, json.reply);
       }
@@ -202,17 +214,22 @@ export async function postSseStream<TDone>({
       if (latestAccumulated.trim()) {
         return { reply: latestAccumulated.trim() } as unknown as TDone;
       }
-      throw new Error(fallbackErrorMessage);
+      throw new Error(
+        `The AI stream ended before returning a response while ${contextAction}. Your message has been preserved—please try again.`
+      );
     }
 
     return donePayload;
   } catch (err: unknown) {
     if (timedOut) {
       throw new Error(
-        'The AI response took longer than expected without streaming data. Please try again.'
+        `The AI response timed out without streaming data while ${contextAction}. Your message has been preserved—please try again.`
       );
     }
-    throw err;
+    if (signal?.aborted) {
+      throw err;
+    }
+    throw new Error(formatClientApiError(err, contextAction));
   } finally {
     cancelScheduledFlush();
     if (timeoutHandle) clearTimeout(timeoutHandle);

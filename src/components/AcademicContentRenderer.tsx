@@ -66,7 +66,7 @@ function formatMathExpression(raw: string): string {
 function renderMathText(expr: string, keyPrefix: string): React.ReactNode {
   const formatted = formatMathExpression(expr);
   // Render simple superscripts ^{...} / ^x and subscripts _{...} / _x cleanly
-  const parts = formatted.split(/(\^\{[^}]+\}|_[{}]|\^[0-9a-zA-Z+\-]|_[0-9a-zA-Z+\-]|_\{[^}]+\})/g);
+  const parts = formatted.split(/(\^\{[^}]+\}|_\{[^}]+\}|\^[0-9a-zA-Z+\-]|_[0-9a-zA-Z+\-])/g);
   return parts.map((part, idx) => {
     const key = `${keyPrefix}-m-${idx}`;
     if (!part) return null;
@@ -83,7 +83,9 @@ function renderMathText(expr: string, keyPrefix: string): React.ReactNode {
 }
 
 function renderInlineSegments(text: string, keyPrefix: string): React.ReactNode[] {
-  const tokens = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\$[^$\n]+\$)/g);
+  const tokens = text.split(
+    /(`[^`]+`|\*\*[^*\n]+?\*\*|\*[^*\s](?:[^*\n]*?[^*\s])?\*|\\\([^\n]+?\\\)|\$(?!\s)[^$\n]*?(?:[a-zA-Z\\_^=+\-*/(){}])[^$\n]*?\$)/g
+  );
   return tokens.map((token, idx) => {
     const key = `${keyPrefix}-${idx}`;
     if (!token) return null;
@@ -91,7 +93,7 @@ function renderInlineSegments(text: string, keyPrefix: string): React.ReactNode[
       return (
         <code
           key={key}
-          className="rounded-md border border-slate-200 bg-slate-100 px-1.5 py-0.5 font-mono text-[0.85em] text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-cyan-300"
+          className="break-words rounded-md border border-slate-200 bg-slate-100 px-1.5 py-0.5 font-mono text-[0.85em] text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-cyan-300"
         >
           {token.slice(1, -1)}
         </code>
@@ -104,11 +106,21 @@ function renderInlineSegments(text: string, keyPrefix: string): React.ReactNode[
         </strong>
       );
     }
-    if (token.startsWith('*') && token.endsWith('*') && token.length >= 2) {
+    if (token.startsWith('*') && token.endsWith('*') && token.length >= 3) {
       return (
         <em key={key} className="italic">
           {token.slice(1, -1)}
         </em>
+      );
+    }
+    if (token.startsWith('\\(') && token.endsWith('\\)') && token.length >= 5) {
+      return (
+        <span
+          key={key}
+          className="mx-0.5 inline-block rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[0.9em] font-medium text-[#0F1E3D] dark:bg-slate-800/90 dark:text-sky-300"
+        >
+          {renderMathText(token.slice(2, -2), key)}
+        </span>
       );
     }
     if (token.startsWith('$') && token.endsWith('$') && token.length >= 3) {
@@ -199,9 +211,9 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
     }
   }
 
-  // Split by fenced code blocks, display math blocks ($$...$$), and [[DIAGRAM:{...}]]
+  // Split by fenced code blocks, display math blocks ($$...$$ or \[...\]), and [[DIAGRAM:{...}]]
   const segments = displayContent.split(
-    /(```[\s\S]*?```|\$\$[\s\S]*?\$\$|\[\[DIAGRAM:[\s\S]*?\]\])/g
+    /(```[\s\S]*?```|\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\[\[DIAGRAM:[\s\S]*?\]\])/g
   );
 
   const renderMarkdownBlock = (blockText: string, segIdx: number) => {
@@ -414,7 +426,7 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
   };
 
   return (
-    <div className={`space-y-2.5 academic-selectable ${className}`}>
+    <div className={`space-y-2.5 break-words academic-selectable ${className}`}>
       {segments.map((seg, idx) => {
         if (!seg) return null;
 
@@ -426,7 +438,10 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
           return <CodeBlock key={`code-${idx}`} code={code} language={language} />;
         }
 
-        if (seg.startsWith('$$') && seg.endsWith('$$') && seg.length > 4) {
+        if (
+          (seg.startsWith('$$') && seg.endsWith('$$') && seg.length > 4) ||
+          (seg.startsWith('\\[') && seg.endsWith('\\]') && seg.length > 4)
+        ) {
           const expr = seg.slice(2, -2).trim();
           return (
             <div

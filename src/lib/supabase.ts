@@ -639,6 +639,36 @@ export async function updateAiSession(
 
 export async function deleteAiSession(userId: string, sessionId: string): Promise<void> {
   const client = requireSupabase();
+
+  try {
+    const [{ data: sessionRow }, { data: msgRows }] = await Promise.all([
+      client
+        .from('ai_sessions')
+        .select('active_image_path')
+        .eq('id', sessionId)
+        .eq('user_id', userId)
+        .maybeSingle(),
+      client
+        .from('ai_messages')
+        .select('image_path')
+        .eq('session_id', sessionId)
+        .eq('user_id', userId),
+    ]);
+
+    const paths = new Set<string>();
+    if (sessionRow?.active_image_path) {
+      paths.add(String(sessionRow.active_image_path));
+    }
+    for (const row of msgRows || []) {
+      if (row?.image_path) paths.add(String(row.image_path));
+    }
+    if (paths.size > 0) {
+      await client.storage.from('study-materials').remove(Array.from(paths));
+    }
+  } catch (cleanupErr) {
+    console.warn('Optional session image storage cleanup warning:', cleanupErr);
+  }
+
   const { error } = await client
     .from('ai_sessions')
     .delete()

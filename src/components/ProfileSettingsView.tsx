@@ -99,7 +99,7 @@ export function ProfileSettingsView() {
       )}
 
       {/* Profile Details */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
         <h2 className="font-display text-lg font-bold text-slate-900 select-none dark:text-white">
           Profile & Display Preferences
         </h2>
@@ -167,7 +167,7 @@ export function ProfileSettingsView() {
       </section>
 
       {/* Password Security */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
         <h2 className="font-display text-lg font-bold text-slate-900 select-none dark:text-white">
           Security & Password
         </h2>
@@ -223,7 +223,7 @@ export function ProfileSettingsView() {
       </section>
 
       {/* Sign Out */}
-      <section className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+      <section className="flex flex-col justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-4 sm:flex-row sm:items-center sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
         <div>
           <h3 className="font-display text-sm font-bold text-slate-900 select-none dark:text-white">
             Session
