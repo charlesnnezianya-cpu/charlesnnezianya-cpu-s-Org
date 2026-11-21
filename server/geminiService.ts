@@ -1,11 +1,11 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 /**
  * Single source of truth for Brainstine's authorized AI model.
- * Locked permanently to Gemini 2.5 Flash for Google free-tier compliance.
- * Automatic switching to alternate, newer, lite, or paid models is strictly disabled.
+ * Locked permanently to Gemini 3.1 Flash-Lite for verified free-tier reliability.
+ * Automatic switching to alternate, newer, or paid models is strictly disabled.
  */
-export const AUTHORIZED_GEMINI_MODEL = 'gemini-2.5-flash' as const;
+export const AUTHORIZED_GEMINI_MODEL = 'gemini-3.1-flash-lite' as const;
 export const DEFAULT_GEMINI_MODEL = AUTHORIZED_GEMINI_MODEL;
 export const MODEL_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -68,6 +68,12 @@ export function getGeminiModel(): string {
     );
   }
   return AUTHORIZED_GEMINI_MODEL;
+}
+
+export function getModelThinkingConfig(
+  level: ThinkingLevel = ThinkingLevel.MINIMAL
+): { thinkingConfig: { thinkingLevel: ThinkingLevel } } {
+  return { thinkingConfig: { thinkingLevel: level } };
 }
 
 export function getResolvedModelState(): ResolvedModelState | null {
@@ -288,14 +294,14 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
       return {
         status: 429,
         message:
-          'Gemini 2.5 Flash free-tier daily quota is currently exhausted. Your input has been preserved—please try again after the free-tier quota resets.',
+          'Gemini 3.1 Flash-Lite free-tier daily quota is currently exhausted. Your input has been preserved—please try again after your free-tier quota resets.',
       };
     }
     if (quotaInfo.quotaScope === 'tpm') {
       return {
         status: 429,
         message:
-          'Gemini 2.5 Flash token-per-minute free-tier limit reached. Your input has been preserved—please wait a moment or try shorter content, then retry.',
+          'Gemini 3.1 Flash-Lite token-per-minute free-tier limit reached. Your input has been preserved—please wait a moment or try shorter content, then retry.',
       };
     }
     const waitHint =
@@ -304,23 +310,15 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
         : ' Please wait a moment and retry.';
     return {
       status: 429,
-      message: `Gemini 2.5 Flash free-tier rate limit reached due to high request frequency.${waitHint} Your input has been preserved.`,
+      message: `Gemini 3.1 Flash-Lite free-tier rate limit reached due to high request frequency.${waitHint} Your input has been preserved.`,
     };
   }
 
   if (isUnsupportedModelError(err)) {
-    const upstreamMsg = extractReadableApiError(raw);
-    if (upstreamMsg.toLowerCase().includes('no longer available')) {
-      return {
-        status: 502,
-        message:
-          'Gemini 2.5 Flash (gemini-2.5-flash) is unavailable for this API key/project on Google Gemini ("no longer available to new users"). Brainstine is locked to gemini-2.5-flash and will not automatically switch models.',
-      };
-    }
     return {
       status: 502,
       message:
-        'Gemini 2.5 Flash (gemini-2.5-flash) is temporarily unavailable for this API key or endpoint. Brainstine is configured to use gemini-2.5-flash only—please verify your Gemini API project access or retry shortly.',
+        'Gemini 3.1 Flash-Lite (gemini-3.1-flash-lite) is temporarily unavailable for this API key or endpoint. Brainstine is configured to use gemini-3.1-flash-lite only—please verify your Gemini API project access or retry shortly.',
     };
   }
 
@@ -349,7 +347,7 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
     return {
       status: 504,
       message:
-        'Gemini 2.5 Flash took too long to respond and the request timed out. Your work has been preserved—please try again or shorten the prompt.',
+        'Gemini 3.1 Flash-Lite took too long to respond and the request timed out. Your work has been preserved—please try again or shorten the prompt.',
     };
   }
 
@@ -364,7 +362,7 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
     return {
       status: 503,
       message:
-        'Gemini 2.5 Flash is temporarily experiencing high demand or is unavailable. Your input has been preserved—please wait a moment and retry.',
+        'Gemini 3.1 Flash-Lite is temporarily experiencing high demand or is unavailable. Your input has been preserved—please wait a moment and retry.',
     };
   }
 
@@ -372,7 +370,7 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
     return {
       status: 422,
       message:
-        'Gemini 2.5 Flash declined to generate a response for this input due to content safety filters. Please rephrase your study prompt and try again.',
+        'Gemini 3.1 Flash-Lite declined to generate a response for this input due to content safety filters. Please rephrase your study prompt and try again.',
     };
   }
 
@@ -382,7 +380,7 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
     message:
       readable && !readable.toLowerCase().includes('request failed')
         ? readable
-        : 'An unexpected server error occurred while contacting Gemini 2.5 Flash. Your input has been preserved—please try again.',
+        : 'An unexpected server error occurred while contacting Gemini 3.1 Flash-Lite. Your input has been preserved—please try again.',
   };
 }
 
@@ -445,7 +443,7 @@ export async function withRetry<T>(
       if (timedOut) {
         throw Object.assign(
           new Error(
-            'Gemini 2.5 Flash timed out while waiting to respond. Your input has been preserved—please try again in a moment.'
+            'Gemini 3.1 Flash-Lite timed out while waiting to respond. Your input has been preserved—please try again in a moment.'
           ),
           { status: 504 }
         );
@@ -502,7 +500,7 @@ export async function withRetry<T>(
 }
 
 /**
- * Executes an AI operation strictly on Gemini 2.5 Flash (`gemini-2.5-flash`).
+ * Executes an AI operation strictly on Gemini 3.1 Flash-Lite (`gemini-3.1-flash-lite`).
  * Same-model transient retry only — never switches to another model.
  */
 export async function runWithGeminiModel<T>(
@@ -571,6 +569,7 @@ export async function probeSingleModelQuick(
       model: modelId,
       contents: 'Reply with: OK',
       config: {
+        ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
         abortSignal: ac.signal,
       },
     });

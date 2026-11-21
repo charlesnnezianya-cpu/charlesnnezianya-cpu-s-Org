@@ -1,7 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import multer from 'multer';
 import path from 'path';
-import { Type } from '@google/genai';
+import { ThinkingLevel, Type } from '@google/genai';
 import { extractText as extractPdfText } from 'unpdf';
 import type {
   ExtractionResult,
@@ -27,6 +27,7 @@ import {
   getConfiguredGeminiModel,
   getGeminiClient,
   getGeminiModel,
+  getModelThinkingConfig,
   getResolvedModelState,
   isGeminiConfigured,
   parseAiJsonResponse,
@@ -1031,6 +1032,7 @@ export function createApiApp() {
                     ],
                   },
                   config: {
+                    ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
                     abortSignal: signal,
                   },
                 }),
@@ -1067,6 +1069,7 @@ export function createApiApp() {
                   ],
                 },
                 config: {
+                  ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
                   abortSignal: signal,
                 },
               }),
@@ -1102,6 +1105,7 @@ export function createApiApp() {
                   ],
                 },
                 config: {
+                  ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
                   abortSignal: signal,
                 },
               }),
@@ -1179,6 +1183,7 @@ export function createApiApp() {
                 config: {
                   systemInstruction:
                     'You are a rigorous academic research assistant. Distill each document section faithfully from the provided text without inventing facts.',
+                  ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
                   abortSignal: signal,
                 },
               }),
@@ -1210,6 +1215,9 @@ export function createApiApp() {
             config: {
               systemInstruction:
                 'You are Brainstine, an academic study companion. Prioritize the uploaded material strictly. Never fabricate facts or claim unsupported information came from the source. Clearly separate facts directly extracted from the material (sourcePoints, origin: "source", importantFacts) from helpful AI explanations/elaborations (aiClarification, plainExplanation, origin: "ai_clarification" or "ai_elaboration"). If no formulas or frameworks appear in the material, return an empty array for formulasOrFrameworks. Also generate comparisonTables whenever contrasting 2+ concepts/methods/entities (or empty array if unnecessary), and 1 to 2 visualDiagrams (process_flow, concept_map, scientific_system, or cartesian_plot) when a visual schematic helps students understand relationships, sequences, or systems cleanly.',
+              ...getModelThinkingConfig(
+                level === 'comprehensive' ? ThinkingLevel.LOW : ThinkingLevel.MINIMAL
+              ),
               abortSignal: signal,
               responseMimeType: 'application/json',
               responseSchema: {
@@ -1573,6 +1581,7 @@ export function createApiApp() {
             config: {
               systemInstruction:
                 'You are Brainstine answering a scoped follow-up request on a specific study summary. Strictly separate what is explicitly stated in the uploaded source material ("fromSource") from any supplemental AI explanation, analogy, or examples ("aiExplanation"). Never claim AI-generated examples or clarifications came from the source text if they did not.',
+              ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
               abortSignal: signal,
               responseMimeType: 'application/json',
               responseSchema: {
@@ -1765,6 +1774,7 @@ export function createApiApp() {
               config: {
                 systemInstruction:
                   'You are Brainstine Assessment Engine, an academic professor creating rigorous, unambiguous university-grade examinations. Base questions strictly on the supplied study material (or established academic canon when generating from a topic). Every objective question must have exactly ONE defensible correct answer among four plausible options. Never fabricate false facts. Optionally attach a visualAid diagram ONLY to 1 or 2 questions where a process diagram, quantitative plot, or labeled system genuinely helps test understanding.',
+                ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
                 abortSignal: signal,
                 responseMimeType: 'application/json',
                 responseSchema: {
@@ -2146,6 +2156,7 @@ export function createApiApp() {
                 config: {
                   systemInstruction:
                     'You are an objective academic examiner evaluating student theory answers. Award marks from 0 up to maxMarks based strictly on how accurately and completely the student addressed the marking criteria. Provide concise, constructive feedback and list any important missing points.',
+                  ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
                   abortSignal: signal,
                   responseMimeType: 'application/json',
                   responseSchema: {
@@ -2273,6 +2284,7 @@ export function createApiApp() {
               contents: { parts },
               config: {
                 systemInstruction,
+                ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
                 abortSignal: signal,
                 responseMimeType: 'application/json',
                 responseSchema: {
@@ -2323,6 +2335,7 @@ export function createApiApp() {
             contents: { parts },
             config: {
               systemInstruction,
+              ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
               abortSignal: signal,
             },
           }),
@@ -2408,6 +2421,7 @@ export function createApiApp() {
               contents: { parts },
               config: {
                 systemInstruction: streamInstruction,
+                ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
                 abortSignal: combined.signal,
               },
             });
@@ -2508,6 +2522,7 @@ export function createApiApp() {
             contents: { parts },
             config: {
               systemInstruction,
+              ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
               abortSignal: signal,
               responseMimeType: 'application/json',
               responseSchema: {
@@ -2641,6 +2656,7 @@ export function createApiApp() {
               contents: { parts },
               config: {
                 systemInstruction: streamInstruction,
+                ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
                 abortSignal: combined.signal,
               },
             });
