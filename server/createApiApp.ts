@@ -1160,54 +1160,13 @@ export function createApiApp() {
               .trim();
             extractionMethod = 'pdf-text';
           } catch (pdfErr) {
-            console.warn('Primary PDF text extraction failed, attempting AI PDF OCR:', pdfErr);
-          }
-
-          if (extractedText.length < 60) {
-            if (file.buffer.byteLength > 20 * 1024 * 1024) {
-              return res.status(422).json({
-                error:
-                  'This scanned PDF is larger than 20 MB and has no selectable embedded text. Please upload a text-selectable PDF or compress/split scanned PDFs under 20 MB.',
-              });
-            }
-            const ai = getGeminiClient();
-            const base64Pdf = file.buffer.toString('base64');
-            const isLargeScannedPdf = file.buffer.byteLength > 3 * 1024 * 1024;
-            const { result: ocrResponse } = await runWithGeminiModel(
-              (model, signal) =>
-                ai.models.generateContent({
-                  model,
-                  contents: {
-                    parts: [
-                      {
-                        inlineData: {
-                          mimeType: 'application/pdf',
-                          data: base64Pdf,
-                        },
-                      },
-                      {
-                        text: 'Extract all readable academic text, headings, equations, diagram labels, and footnotes from this PDF in exact reading order. Preserve paragraph structure and section headings. Return only the extracted content without meta-commentary.',
-                      },
-                    ],
-                  },
-                  config: {
-                    ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-                    abortSignal: signal,
-                  },
-                }),
-              {
-                maxRetries: isLargeScannedPdf ? 0 : 1,
-                timeoutMs: isLargeScannedPdf ? 42000 : 48000,
-              }
-            );
-            extractedText = (ocrResponse.text ?? '').trim();
-            extractionMethod = 'pdf-ocr';
+            console.warn('Primary PDF text extraction failed:', pdfErr);
           }
 
           if (!extractedText) {
             return res.status(422).json({
               error:
-                'Could not extract readable text from this PDF. The file may be encrypted, corrupted, or blank.',
+                'Could not extract text from this PDF. The file may contain no selectable text, or may be scanned/encrypted. Please upload a text-selectable PDF or paste your study text directly.',
             });
           }
         } else if (materialType === 'image') {
