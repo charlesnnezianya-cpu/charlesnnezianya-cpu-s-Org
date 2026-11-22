@@ -26,9 +26,11 @@ import {
   createStudyMaterialRecord,
   deleteQuiz,
   deleteQuizAttempt,
+  getMaterialSignedUrl,
   recordStudyActivity,
   saveQuizAttemptRecord,
   saveQuizRecord,
+  uploadMaterialFileToStorage,
 } from '../lib/supabase';
 import type {
   GeneratedQuizPayload,
@@ -363,6 +365,9 @@ export function QuizExamSystem({
     uploadFile,
   ]);
 
+  const HOSTED_DIRECT_UPLOAD_LIMIT_BYTES = Math.floor(3.8 * 1024 * 1024);
+  const stagedStoragePathRef = useRef<string | null>(null);
+
   const handleQuizFileChosen = async (file: File | null) => {
     if (!file) return;
     setUploadFile(file);
@@ -372,24 +377,70 @@ export function QuizExamSystem({
     setExtractedUploadTitle('');
     setUploading(true);
     setExtractingUpload(true);
-    setUploadProgress(20);
-
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('title', file.name.replace(/\.[^/.]+$/, ''));
+    setUploadProgress(15);
 
     try {
-      setUploadProgress(50);
-      const res = await fetch(resolveApiUrl('/api/materials/extract'), {
-        method: 'POST',
-        body: formData,
-      });
-      setUploadProgress(85);
+      const arrayBuffer = await file.arrayBuffer();
+      if (arrayBuffer.byteLength === 0) {
+        throw new Error(`"${file.name}" is empty (0 bytes). Please choose a valid study file.`);
+      }
+
+      const isLocalOrigin =
+        window.location.hostname === 'localhost' ||
+        window.location.hostname === '127.0.0.1' ||
+        window.location.hostname === '[::1]';
+
+      let extractRes: Response;
+
+      if (!isLocalOrigin && file.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES) {
+        if (!user || !isConfigured) {
+          throw new Error(
+            `Files larger than 3.8 MB require signing in with a Supabase account on cloud-hosted deployments (file is ${(file.size / (1024 * 1024)).toFixed(1)} MB). Please sign in or choose a smaller file.`
+          );
+        }
+
+        setUploadProgress(30);
+        const storagePath = await uploadMaterialFileToStorage(user.id, file, {
+          preBuffered: arrayBuffer,
+          onProgress: (pct) => {
+            setUploadProgress(30 + Math.round(pct * 0.35));
+          },
+        });
+        stagedStoragePathRef.current = storagePath;
+
+        setUploadProgress(70);
+        const signedStorageUrl = await getMaterialSignedUrl(storagePath);
+
+        setUploadProgress(85);
+        extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            signedStorageUrl,
+            fileName: file.name,
+            mimeType: file.type,
+            fileSizeBytes: file.size,
+            title: file.name.replace(/\.[^/.]+$/, ''),
+          }),
+        });
+      } else {
+        const formData = new FormData();
+        formData.append('file', file, file.name);
+        formData.append('title', file.name.replace(/\.[^/.]+$/, ''));
+
+        setUploadProgress(50);
+        extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
+          method: 'POST',
+          body: formData,
+        });
+      }
+
+      setUploadProgress(95);
       const extracted = await parseApiJsonResponse<{
         title: string;
         extractedText: string;
         wordCount: number;
-      }>(res, 'extracting uploaded study material');
+      }>(extractRes, 'extracting uploaded study material');
 
       setExtractedUploadText(extracted.extractedText);
       setExtractedUploadTitle(extracted.title);
@@ -405,7 +456,7 @@ export function QuizExamSystem({
             fileName: file.name,
             fileSize: file.size,
             mimeType: file.type,
-            storagePath: null,
+            storagePath: stagedStoragePathRef.current,
             extractedText: extracted.extractedText,
             wordCount: extracted.wordCount,
             chunkCount: 1,
