@@ -96,25 +96,236 @@ export async function upsertUserProfile(profile: {
   return data as UserProfile;
 }
 
+function inferStorageMimeType(fileName: string, rawType?: string | null): string {
+  const cleaned = (rawType || '').split(';')[0].trim().toLowerCase();
+  if (cleaned && cleaned !== 'application/octet-stream') {
+    return cleaned === 'image/jpg' ? 'image/jpeg' : cleaned;
+  }
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith('.pdf')) return 'application/pdf';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.heic')) return 'image/heic';
+  if (lower.endsWith('.heif')) return 'image/heif';
+  if (lower.endsWith('.mp3')) return 'audio/mpeg';
+  if (lower.endsWith('.wav')) return 'audio/wav';
+  if (lower.endsWith('.m4a') || lower.endsWith('.mp4')) return 'audio/mp4';
+  if (lower.endsWith('.webm')) return 'audio/webm';
+  if (lower.endsWith('.ogg')) return 'audio/ogg';
+  if (lower.endsWith('.aac')) return 'audio/aac';
+  if (lower.endsWith('.flac')) return 'audio/flac';
+  if (lower.endsWith('.md')) return 'text/markdown';
+  if (lower.endsWith('.txt')) return 'text/plain';
+  return 'application/octet-stream';
+}
+
+async function resolveFreshAccessToken(
+  client: SupabaseClient,
+  expectedUserId: string
+): Promise<string> {
+  const { data: sessionData, error: sessionErr } = await client.auth.getSession();
+  if (sessionErr) {
+    throw new Error(`Authentication check failed: ${sessionErr.message}`);
+  }
+
+  let activeSession = sessionData.session;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const expiresAt = activeSession?.expires_at ?? 0;
+
+  if (!activeSession || !activeSession.access_token || (expiresAt > 0 && expiresAt - nowSeconds < 60)) {
+    const { data: refreshed, error: refreshErr } = await client.auth.refreshSession();
+    if (refreshErr || !refreshed.session?.access_token) {
+      throw new Error(
+        'Your sign-in session expired. Please sign in again before uploading study files.'
+      );
+    }
+    activeSession = refreshed.session;
+  }
+
+  if (activeSession.user?.id && activeSession.user.id !== expectedUserId) {
+    throw new Error('Your active account changed. Please refresh and sign in again.');
+  }
+
+  return activeSession.access_token;
+}
+
+function encodeStorageObjectPath(storagePath: string): string {
+  return storagePath
+    .split('/')
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+}
+
+async function uploadBufferToStudyMaterialsBucket(params: {
+  client: SupabaseClient;
+  userId: string;
+  storagePath: string;
+  buffer: ArrayBuffer;
+  contentType: string;
+  onProgress?: (percent: number) => void;
+}): Promise<string> {
+  const { client, userId, storagePath, buffer, contentType, onProgress } = params;
+  const baseUrl = supabaseUrl.replace(/\/+$/, '');
+  const encodedPath = encodeStorageObjectPath(storagePath);
+  const uploadUrl = `${baseUrl}/storage/v1/object/study-materials/${encodedPath}`;
+
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const accessToken = await resolveFreshAccessToken(client, userId);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', uploadUrl);
+        xhr.timeout = 120000;
+        xhr.setRequestHeader('apikey', supabaseAnonKey);
+        xhr.setRequestHeader('Authorization', `Bearer ${accessToken}`);
+        xhr.setRequestHeader('x-upsert', 'false');
+        xhr.setRequestHeader('cache-control', 'max-age=3600');
+        xhr.setRequestHeader('Content-Type', contentType);
+
+        xhr.upload.onprogress = (evt) => {
+          if (evt.lengthComputable && evt.total > 0) {
+            onProgress?.(Math.min(99, Math.round((evt.loaded / evt.total) * 100)));
+          }
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            onProgress?.(100);
+            resolve();
+            return;
+          }
+
+          let serverMsg = '';
+          try {
+            const parsed = JSON.parse(xhr.responseText || '{}') as {
+              message?: string;
+              error?: string;
+            };
+            serverMsg = (parsed.message || parsed.error || '').trim();
+          } catch {
+            serverMsg = (xhr.responseText || '').trim().slice(0, 200);
+          }
+
+          if (xhr.status === 401 || xhr.status === 403) {
+            reject(
+              Object.assign(
+                new Error(
+                  `Storage upload failed (${xhr.status}): ${serverMsg || 'Permission denied by storage security policy. Please sign out and sign back in.'}`
+                ),
+                { retryable: false }
+              )
+            );
+            return;
+          }
+          if (xhr.status === 404) {
+            reject(
+              Object.assign(
+                new Error(
+                  'Storage upload failed: The "study-materials" storage bucket was not found in Supabase.'
+                ),
+                { retryable: false }
+              )
+            );
+            return;
+          }
+          if (xhr.status === 413) {
+            reject(
+              Object.assign(
+                new Error(
+                  'Storage upload failed: This file exceeds the Supabase Storage bucket file size limit.'
+                ),
+                { retryable: false }
+              )
+            );
+            return;
+          }
+
+          reject(
+            Object.assign(
+              new Error(
+                `Storage upload failed (HTTP ${xhr.status}): ${serverMsg || 'Unexpected storage server response.'}`
+              ),
+              { retryable: xhr.status >= 500 || xhr.status === 429 }
+            )
+          );
+        };
+
+        xhr.onerror = () => {
+          reject(
+            Object.assign(
+              new Error(
+                'Storage upload failed: Network or connection drop while sending the file to cloud storage.'
+              ),
+              { retryable: true }
+            )
+          );
+        };
+
+        xhr.ontimeout = () => {
+          reject(
+            Object.assign(
+              new Error(
+                'Storage upload failed: Timed out while uploading file to cloud storage. Check your connection speed and try again.'
+              ),
+              { retryable: true }
+            )
+          );
+        };
+
+        xhr.send(buffer);
+      });
+
+      return storagePath;
+    } catch (err: unknown) {
+      const retryable = Boolean((err as { retryable?: boolean })?.retryable);
+      lastError = err instanceof Error ? err : new Error('Storage upload failed.');
+      if (!retryable || attempt >= 2) {
+        throw lastError;
+      }
+      await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+    }
+  }
+
+  throw lastError || new Error('Storage upload failed.');
+}
+
 export async function uploadMaterialFileToStorage(
   userId: string,
-  file: File
+  file: File,
+  options?: { onProgress?: (percent: number) => void; preBuffered?: ArrayBuffer }
 ): Promise<string> {
   const client = requireSupabase();
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   const storagePath = `${userId}/${Date.now()}-${safeName}`;
+  const contentType = inferStorageMimeType(file.name, file.type);
 
-  const { error } = await client.storage
-    .from('study-materials')
-    .upload(storagePath, file, {
-      cacheControl: '3600',
-      upsert: false,
-    });
-
-  if (error) {
-    throw new Error(`Storage upload failed: ${error.message}`);
+  let buffer: ArrayBuffer;
+  try {
+    buffer = options?.preBuffered ?? (await file.arrayBuffer());
+  } catch {
+    throw new Error(
+      `Unable to read "${file.name}" from your device storage. Please re-select the file and try again.`
+    );
   }
-  return storagePath;
+
+  if (buffer.byteLength === 0) {
+    throw new Error(`"${file.name}" is empty (0 bytes) and cannot be uploaded.`);
+  }
+
+  return uploadBufferToStudyMaterialsBucket({
+    client,
+    userId,
+    storagePath,
+    buffer,
+    contentType,
+    onProgress: options?.onProgress,
+  });
 }
 
 export async function getMaterialSignedUrl(storagePath: string): Promise<string> {
@@ -477,18 +688,22 @@ export async function uploadSessionImageToStorage(
   const client = requireSupabase();
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   const storagePath = `${userId}/images/${Date.now()}-${safeName}`;
+  const contentType = inferStorageMimeType(file.name, file.type);
 
-  const { error } = await client.storage
-    .from('study-materials')
-    .upload(storagePath, file, {
-      cacheControl: '3600',
-      upsert: false,
-    });
-
-  if (error) {
-    throw new Error(`Image storage upload failed: ${error.message}`);
+  let buffer: ArrayBuffer;
+  try {
+    buffer = await file.arrayBuffer();
+  } catch {
+    throw new Error('Image storage upload failed: Unable to read the selected image from your device.');
   }
-  return storagePath;
+
+  return uploadBufferToStudyMaterialsBucket({
+    client,
+    userId,
+    storagePath,
+    buffer,
+    contentType,
+  });
 }
 
 export async function restoreSessionImageAttachment(

@@ -988,6 +988,10 @@ export function createApiApp() {
             }
           : undefined;
 
+        if (uploadedFile && uploadedFile.size === 0) {
+          return res.status(400).json({ error: 'The uploaded file is empty (0 bytes).' });
+        }
+
         const signedStorageUrl =
           typeof req.body?.signedStorageUrl === 'string' ? req.body.signedStorageUrl.trim() : '';
 
@@ -1015,21 +1019,26 @@ export function createApiApp() {
 
           if (
             parsedSignedUrl.protocol !== 'https:' ||
+            Boolean(parsedSignedUrl.username) ||
+            Boolean(parsedSignedUrl.password) ||
             !expectedHost ||
             parsedSignedUrl.hostname.toLowerCase() !== expectedHost ||
-            !parsedSignedUrl.pathname.startsWith('/storage/v1/object/sign/')
+            !parsedSignedUrl.pathname.startsWith('/storage/v1/object/sign/study-materials/')
           ) {
             return res.status(400).json({
-              error: 'Signed storage URL must originate from your configured Supabase Storage project.',
+              error: 'Signed storage URL must originate from your configured Supabase Storage study-materials bucket.',
             });
           }
 
           const fetchAc = new AbortController();
-          const fetchTimer = setTimeout(() => fetchAc.abort(), 45000);
+          const fetchTimer = setTimeout(() => fetchAc.abort(), 35000);
           let fileArrayBuf: ArrayBuffer;
           let responseMime = '';
           try {
-            const fileRes = await fetch(parsedSignedUrl.toString(), { signal: fetchAc.signal });
+            const fileRes = await fetch(parsedSignedUrl.toString(), {
+              signal: fetchAc.signal,
+              redirect: 'error',
+            });
             if (!fileRes.ok) {
               return res.status(400).json({
                 error: `Unable to fetch staged study file from cloud storage (HTTP ${fileRes.status}). Please retry the upload.`,
@@ -1163,6 +1172,7 @@ export function createApiApp() {
             }
             const ai = getGeminiClient();
             const base64Pdf = file.buffer.toString('base64');
+            const isLargeScannedPdf = file.buffer.byteLength > 3 * 1024 * 1024;
             const { result: ocrResponse } = await runWithGeminiModel(
               (model, signal) =>
                 ai.models.generateContent({
@@ -1185,7 +1195,10 @@ export function createApiApp() {
                     abortSignal: signal,
                   },
                 }),
-              { maxRetries: 2, timeoutMs: 55000 }
+              {
+                maxRetries: isLargeScannedPdf ? 0 : 1,
+                timeoutMs: isLargeScannedPdf ? 42000 : 48000,
+              }
             );
             extractedText = (ocrResponse.text ?? '').trim();
             extractionMethod = 'pdf-ocr';

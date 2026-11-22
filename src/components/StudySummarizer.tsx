@@ -46,10 +46,35 @@ interface StudySummarizerProps {
 }
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
-const HOSTED_DIRECT_UPLOAD_LIMIT_BYTES = Math.floor(4.2 * 1024 * 1024);
+const HOSTED_DIRECT_UPLOAD_LIMIT_BYTES = Math.floor(3.8 * 1024 * 1024);
 
 const ACCEPTED_EXTENSIONS =
   '.pdf,.png,.jpg,.jpeg,.webp,.gif,.heic,.mp3,.wav,.m4a,.webm,.ogg,.aac,.flac,.txt,.md';
+
+function inferUploadMimeType(fileName: string, rawType?: string | null): string {
+  const cleaned = (rawType || '').split(';')[0].trim().toLowerCase();
+  if (cleaned && cleaned !== 'application/octet-stream') {
+    return cleaned === 'image/jpg' ? 'image/jpeg' : cleaned;
+  }
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith('.pdf')) return 'application/pdf';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.heic')) return 'image/heic';
+  if (lower.endsWith('.heif')) return 'image/heif';
+  if (lower.endsWith('.mp3')) return 'audio/mpeg';
+  if (lower.endsWith('.wav')) return 'audio/wav';
+  if (lower.endsWith('.m4a') || lower.endsWith('.mp4')) return 'audio/mp4';
+  if (lower.endsWith('.webm')) return 'audio/webm';
+  if (lower.endsWith('.ogg')) return 'audio/ogg';
+  if (lower.endsWith('.aac')) return 'audio/aac';
+  if (lower.endsWith('.flac')) return 'audio/flac';
+  if (lower.endsWith('.md')) return 'text/markdown';
+  if (lower.endsWith('.txt')) return 'text/plain';
+  return 'application/octet-stream';
+}
 
 function validateFile(file: File): { valid: boolean; error?: string; type?: MaterialSourceType } {
   if (file.size > MAX_FILE_BYTES) {
@@ -103,6 +128,9 @@ export function StudySummarizer({
   const [pastedText, setPastedText] = useState('');
 
   const [uploadProgress, setUploadProgress] = useState<number>(0);
+  const [uploadState, setUploadState] = useState<
+    'idle' | 'reading' | 'ready' | 'uploading' | 'extracting' | 'uploaded' | 'error'
+  >('idle');
   const [extracting, setExtracting] = useState(false);
   const [extractionStatus, setExtractionStatus] = useState<string>('');
   const [extraction, setExtraction] = useState<ExtractionResult | null>(null);
@@ -120,6 +148,9 @@ export function StudySummarizer({
   const [noticeMsg, setNoticeMsg] = useState<string | null>(null);
   const extractingRef = useRef(false);
   const generatingRef = useRef(false);
+  const bufferedBufferRef = useRef<ArrayBuffer | null>(null);
+  const stagedStoragePathRef = useRef<string | null>(null);
+  const fileSelectionSeqRef = useRef(0);
 
   useEffect(() => {
     if (initialMaterial) {
@@ -140,6 +171,7 @@ export function StudySummarizer({
       setEditableExtractedText(initialMaterial.extracted_text);
       setEditableTitle(initialMaterial.title);
       setSavedMaterialId(initialMaterial.id);
+      setUploadState('uploaded');
       setSummary(null);
       setSummarySaved(false);
       setErrorMsg(null);
@@ -149,10 +181,14 @@ export function StudySummarizer({
   }, [initialMaterial, onConsumeInitialMaterial]);
 
   const resetAll = () => {
+    fileSelectionSeqRef.current += 1;
+    bufferedBufferRef.current = null;
+    stagedStoragePathRef.current = null;
     setSelectedFile(null);
     setPastedTitle('');
     setPastedText('');
     setUploadProgress(0);
+    setUploadState('idle');
     setExtraction(null);
     setEditableExtractedText('');
     setEditableTitle('');
@@ -166,22 +202,68 @@ export function StudySummarizer({
     }
   };
 
-  const handleFileChosen = (file: File | null) => {
+  const handleFileChosen = async (file: File | null) => {
     if (!file) return;
+    const seq = ++fileSelectionSeqRef.current;
+    bufferedBufferRef.current = null;
+    stagedStoragePathRef.current = null;
     setErrorMsg(null);
     setNoticeMsg(null);
-    const check = validateFile(file);
-    if (!check.valid) {
-      setErrorMsg(check.error || 'Unsupported file.');
-      return;
-    }
-    setSelectedFile(file);
     setExtraction(null);
     setEditableExtractedText('');
     setEditableTitle('');
     setSavedMaterialId(null);
     setSummary(null);
     setSummarySaved(false);
+    setUploadProgress(0);
+
+    const check = validateFile(file);
+    if (!check.valid) {
+      setSelectedFile(null);
+      setUploadState('error');
+      setErrorMsg(check.error || 'Unsupported file.');
+      return;
+    }
+    if (file.size === 0) {
+      setSelectedFile(null);
+      setUploadState('error');
+      setErrorMsg(`"${file.name}" is empty (0 bytes). Please choose a valid study document.`);
+      return;
+    }
+
+    setUploadState('reading');
+    setSelectedFile(file);
+
+    try {
+      // Materialize file bytes immediately while mobile content:// URI picker permissions are fresh
+      const buffer = await file.arrayBuffer();
+      if (seq !== fileSelectionSeqRef.current) return;
+
+      if (buffer.byteLength === 0) {
+        setSelectedFile(null);
+        setUploadState('error');
+        setErrorMsg(`"${file.name}" appears empty (0 bytes) and cannot be uploaded.`);
+        return;
+      }
+
+      const resolvedMime = inferUploadMimeType(file.name, file.type);
+      const materializedFile = new File([buffer], file.name, {
+        type: resolvedMime,
+        lastModified: file.lastModified || Date.now(),
+      });
+
+      bufferedBufferRef.current = buffer;
+      setSelectedFile(materializedFile);
+      setUploadState('ready');
+    } catch {
+      if (seq !== fileSelectionSeqRef.current) return;
+      bufferedBufferRef.current = null;
+      setSelectedFile(null);
+      setUploadState('error');
+      setErrorMsg(
+        `Unable to read "${file.name}" from your device storage. On mobile, save or download the file locally first, then re-select it.`
+      );
+    }
   };
 
   const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
@@ -190,14 +272,119 @@ export function StudySummarizer({
     const file = e.dataTransfer.files?.[0];
     if (file) {
       setInputMode('file');
-      handleFileChosen(file);
+      void handleFileChosen(file);
+    }
+  };
+
+  const uploadViaFetchFallback = async (formData: FormData): Promise<ExtractionResult> => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 120000);
+    try {
+      const res = await fetch(resolveApiUrl('/api/materials/extract'), {
+        method: 'POST',
+        body: formData,
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      setUploadProgress(95);
+      return await parseApiJsonResponse<ExtractionResult>(
+        res,
+        'extracting study content from your file'
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const uploadDirectWithXhrAndFallback = async (uploadFile: File): Promise<ExtractionResult> => {
+    const buildFormData = () => {
+      const fd = new FormData();
+      fd.append('file', uploadFile, uploadFile.name);
+      if (editableTitle.trim()) {
+        fd.append('title', editableTitle.trim());
+      }
+      return fd;
+    };
+
+    try {
+      return await new Promise<ExtractionResult>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', resolveApiUrl('/api/materials/extract'));
+        xhr.timeout = 120000;
+        xhr.upload.onprogress = (evt) => {
+          if (evt.lengthComputable && evt.total > 0) {
+            const pct = Math.min(55, Math.max(10, Math.round((evt.loaded / evt.total) * 55)));
+            setUploadProgress(pct);
+          }
+        };
+        xhr.onload = () => {
+          setUploadProgress(95);
+          const contentType = xhr.getResponseHeader('content-type') || '';
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const json = JSON.parse(xhr.responseText);
+              resolve(json as ExtractionResult);
+            } catch {
+              reject(
+                new Error(
+                  'The server returned an invalid or non-JSON response while extracting the file. Verify the Brainstine /api backend is active.'
+                )
+              );
+            }
+          } else {
+            reject(
+              Object.assign(
+                new Error(
+                  extractErrorFromHttpBody(
+                    xhr.status,
+                    xhr.responseText || '',
+                    contentType,
+                    'extracting study content from your file'
+                  )
+                ),
+                { isHttpError: true }
+              )
+            );
+          }
+        };
+        xhr.onerror = () =>
+          reject(
+            Object.assign(
+              new Error(
+                'Network connection error while uploading file. Check your internet connection and verify the Brainstine server is running.'
+              ),
+              { isTransportError: true }
+            )
+          );
+        xhr.ontimeout = () =>
+          reject(
+            new Error(
+              'Content extraction timed out while processing the file. Try a smaller file or split long documents.'
+            )
+          );
+        xhr.send(buildFormData());
+      });
+    } catch (xhrErr: unknown) {
+      if (!(xhrErr as { isTransportError?: boolean })?.isTransportError) {
+        throw xhrErr;
+      }
+      // Mobile HTTP/2 idle-socket or XHR drop recovery: retry once via fresh fetch()
+      await new Promise((r) => setTimeout(r, 650));
+      setUploadProgress(25);
+      return uploadViaFetchFallback(buildFormData());
     }
   };
 
   const extractContent = async () => {
     if (extractingRef.current) return;
+    if (inputMode === 'file' && uploadState === 'reading') {
+      setErrorMsg('Please wait a moment while your file finishes loading from device storage.');
+      return;
+    }
+
     setErrorMsg(null);
     setNoticeMsg(null);
+    setExtraction(null);
     setSummary(null);
     setSummarySaved(false);
 
@@ -212,11 +399,12 @@ export function StudySummarizer({
 
     extractingRef.current = true;
     setExtracting(true);
+    setUploadState('uploading');
     setUploadProgress(10);
 
     try {
       let result: ExtractionResult;
-      let preUploadedStoragePath: string | null = null;
+      let preUploadedStoragePath: string | null = stagedStoragePathRef.current;
 
       if (inputMode === 'file' && selectedFile) {
         const fileCheck = validateFile(selectedFile);
@@ -228,10 +416,31 @@ export function StudySummarizer({
               : fileCheck.type === 'audio'
                 ? 'Transcribing lecture audio...'
                 : 'Reading text file...';
-        setExtractionStatus(typeLabel);
+        setExtractionStatus('Preparing file for upload...');
 
-        const uploadFile =
-          fileCheck.type === 'image' ? await compressImageFile(selectedFile) : selectedFile;
+        // Ensure we have an in-memory File & ArrayBuffer even if selectedFile came from compression
+        let uploadFile = selectedFile;
+        let uploadBuffer = bufferedBufferRef.current;
+
+        if (fileCheck.type === 'image') {
+          uploadFile = await compressImageFile(selectedFile);
+          uploadBuffer = await uploadFile.arrayBuffer();
+        } else if (!uploadBuffer) {
+          try {
+            uploadBuffer = await selectedFile.arrayBuffer();
+            const resolvedMime = inferUploadMimeType(selectedFile.name, selectedFile.type);
+            uploadFile = new File([uploadBuffer], selectedFile.name, {
+              type: resolvedMime,
+              lastModified: selectedFile.lastModified || Date.now(),
+            });
+            bufferedBufferRef.current = uploadBuffer;
+          } catch {
+            throw new Error(
+              `Unable to read "${selectedFile.name}" from your device. Please re-select the file and try again.`
+            );
+          }
+        }
+
         const isLocalOrigin =
           window.location.hostname === 'localhost' ||
           window.location.hostname === '127.0.0.1' ||
@@ -240,17 +449,27 @@ export function StudySummarizer({
         if (!isLocalOrigin && uploadFile.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES) {
           if (!user || !isConfigured) {
             throw new Error(
-              `This file (${formatBytes(uploadFile.size)}) exceeds the 4.2 MB direct upload limit. Please sign in to upload files up to 25 MB, or compress/split the file under 4.2 MB.`
+              `This file (${formatBytes(uploadFile.size)}) exceeds the 3.8 MB direct upload limit. Please sign in to upload files up to 25 MB, or compress/split the file under 3.8 MB.`
             );
           }
 
-          setExtractionStatus('Staging large file via secure cloud storage...');
-          setUploadProgress(25);
-          preUploadedStoragePath = await uploadMaterialFileToStorage(user.id, uploadFile);
-          setUploadProgress(50);
+          if (!preUploadedStoragePath) {
+            setExtractionStatus('Uploading large file to cloud storage...');
+            setUploadProgress(15);
+            preUploadedStoragePath = await uploadMaterialFileToStorage(user.id, uploadFile, {
+              preBuffered: uploadBuffer,
+              onProgress: (pct) => {
+                setUploadProgress(15 + Math.round(pct * 0.45));
+              },
+            });
+            stagedStoragePathRef.current = preUploadedStoragePath;
+          }
+
+          setUploadProgress(62);
+          setUploadState('extracting');
           const signedStorageUrl = await getMaterialSignedUrl(preUploadedStoragePath);
           setExtractionStatus(typeLabel);
-          setUploadProgress(65);
+          setUploadProgress(70);
 
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 120000);
@@ -258,6 +477,7 @@ export function StudySummarizer({
             const extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
+              cache: 'no-store',
               signal: controller.signal,
               body: JSON.stringify({
                 signedStorageUrl,
@@ -272,69 +492,25 @@ export function StudySummarizer({
               extractRes,
               'extracting study content from your file'
             );
+          } catch (extractErr) {
+            // Reset staged path if storage URL fetch failed so retry re-uploads cleanly
+            if (
+              extractErr instanceof Error &&
+              extractErr.message.includes('staged study file from cloud storage')
+            ) {
+              stagedStoragePathRef.current = null;
+            }
+            throw extractErr;
           } finally {
             clearTimeout(timer);
           }
         } else {
-          const formData = new FormData();
-          formData.append('file', uploadFile);
-          if (editableTitle.trim()) {
-            formData.append('title', editableTitle.trim());
-          }
-
-          result = await new Promise<ExtractionResult>((resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            xhr.open('POST', resolveApiUrl('/api/materials/extract'));
-            xhr.timeout = 120000;
-            xhr.upload.onprogress = (evt) => {
-              if (evt.lengthComputable) {
-                const pct = Math.min(55, Math.round((evt.loaded / evt.total) * 55));
-                setUploadProgress(pct);
-              }
-            };
-            xhr.onload = () => {
-              setUploadProgress(95);
-              const contentType = xhr.getResponseHeader('content-type') || '';
-              if (xhr.status >= 200 && xhr.status < 300) {
-                try {
-                  const json = JSON.parse(xhr.responseText);
-                  resolve(json as ExtractionResult);
-                } catch {
-                  reject(
-                    new Error(
-                      'The server returned an invalid or non-JSON response while extracting the file. Verify the Brainstine /api backend is active.'
-                    )
-                  );
-                }
-              } else {
-                reject(
-                  new Error(
-                    extractErrorFromHttpBody(
-                      xhr.status,
-                      xhr.responseText || '',
-                      contentType,
-                      'extracting study content from your file'
-                    )
-                  )
-                );
-              }
-            };
-            xhr.onerror = () =>
-              reject(
-                new Error(
-                  'Network connection error while uploading file. Check your internet connection and verify the Brainstine server is running.'
-                )
-              );
-            xhr.ontimeout = () =>
-              reject(
-                new Error(
-                  'Content extraction timed out while processing the file. Try a smaller file or split long documents.'
-                )
-              );
-            xhr.send(formData);
-          });
+          setExtractionStatus(typeLabel);
+          setUploadState('extracting');
+          result = await uploadDirectWithXhrAndFallback(uploadFile);
         }
       } else {
+        setUploadState('extracting');
         setExtractionStatus('Chunking and indexing pasted study text...');
         setUploadProgress(50);
         const controller = new AbortController();
@@ -359,6 +535,7 @@ export function StudySummarizer({
       }
 
       setUploadProgress(100);
+      setUploadState('uploaded');
       setExtraction(result);
       setEditableExtractedText(result.extractedText);
       setEditableTitle(result.title);
@@ -368,7 +545,10 @@ export function StudySummarizer({
           setExtractionStatus('Saving material to your Supabase library...');
           let storagePath: string | null = preUploadedStoragePath;
           if (!storagePath && inputMode === 'file' && selectedFile) {
-            storagePath = await uploadMaterialFileToStorage(user.id, selectedFile);
+            storagePath = await uploadMaterialFileToStorage(user.id, selectedFile, {
+              preBuffered: bufferedBufferRef.current ?? undefined,
+            });
+            stagedStoragePathRef.current = storagePath;
           }
           const materialRecord = await createStudyMaterialRecord({
             userId: user.id,
@@ -397,13 +577,15 @@ export function StudySummarizer({
         } catch (storageErr) {
           console.warn('Material cloud sync notice:', storageErr);
           setNoticeMsg(
-            `Content extracted, but cloud sync encountered an issue: ${
+            `Content extracted, but cloud library sync encountered an issue: ${
               storageErr instanceof Error ? storageErr.message : 'Check Supabase schema/bucket.'
             }`
           );
         }
       }
     } catch (err: unknown) {
+      setUploadState('error');
+      setExtraction(null);
       setErrorMsg(
         formatClientApiError(
           err,
@@ -618,10 +800,22 @@ export function StudySummarizer({
         {errorMsg && (
           <div
             role="alert"
-            className="mt-5 flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 p-3.5 text-sm text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200"
+            className="mt-5 flex flex-col gap-3 rounded-xl border border-red-200 bg-red-50 p-3.5 text-sm text-red-800 sm:flex-row sm:items-center sm:justify-between dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200"
           >
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
-            <span>{errorMsg}</span>
+            <div className="flex items-start gap-2.5 min-w-0">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+              <span className="break-words">{errorMsg}</span>
+            </div>
+            {inputMode === 'file' && selectedFile && uploadState === 'error' && !extracting && (
+              <button
+                type="button"
+                onClick={extractContent}
+                className="inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 dark:border-red-800 dark:bg-red-950 dark:text-red-200 dark:hover:bg-red-900/60"
+              >
+                <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Retry Upload</span>
+              </button>
+            )}
           </div>
         )}
 
@@ -638,7 +832,9 @@ export function StudySummarizer({
               ref={fileInputRef}
               type="file"
               accept={ACCEPTED_EXTENSIONS}
-              onChange={(e) => handleFileChosen(e.target.files?.[0] || null)}
+              onChange={(e) => {
+                void handleFileChosen(e.target.files?.[0] || null);
+              }}
               className="sr-only"
               id="study-material-file-input"
             />
@@ -691,6 +887,28 @@ export function StudySummarizer({
                     </p>
                     <p className="mt-0.5 font-mono text-xs text-slate-500 tabular-nums select-none dark:text-slate-400">
                       {selectedFileCheck?.type?.toUpperCase()} · {formatBytes(selectedFile.size)}
+                      {' · '}
+                      <span
+                        className={
+                          uploadState === 'uploaded'
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : uploadState === 'error'
+                              ? 'text-red-600 dark:text-red-400'
+                              : 'text-blue-600 dark:text-cyan-400'
+                        }
+                      >
+                        {uploadState === 'reading'
+                          ? 'Loading file...'
+                          : uploadState === 'uploading'
+                            ? `Uploading ${uploadProgress}%`
+                            : uploadState === 'extracting'
+                              ? 'Extracting...'
+                              : uploadState === 'uploaded'
+                                ? 'Uploaded & extracted'
+                                : uploadState === 'error'
+                                  ? 'Upload failed'
+                                  : 'Ready to upload'}
+                      </span>
                     </p>
                   </div>
                 </div>
@@ -699,7 +917,7 @@ export function StudySummarizer({
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
-                    disabled={extracting}
+                    disabled={extracting || uploadState === 'reading'}
                     className="inline-flex min-h-10 sm:min-h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-800"
                   >
                     <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
@@ -740,13 +958,18 @@ export function StudySummarizer({
               <button
                 type="button"
                 onClick={extractContent}
-                disabled={!selectedFile || extracting}
+                disabled={!selectedFile || extracting || uploadState === 'reading'}
                 className="inline-flex min-h-11 w-full justify-center sm:w-auto items-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500"
               >
                 {extracting ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
                     <span>Extracting Content...</span>
+                  </>
+                ) : uploadState === 'reading' ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    <span>Loading File...</span>
                   </>
                 ) : (
                   <span>Extract Study Content</span>
