@@ -384,6 +384,30 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
   };
 }
 
+export function isTransientGeminiError(err: unknown): boolean {
+  const raw = err instanceof Error ? err.message : String(err);
+  const lower = raw.toLowerCase();
+  const status = (err as { status?: number })?.status;
+  return (
+    status === 503 ||
+    status === 500 ||
+    status === 502 ||
+    status === 504 ||
+    raw.includes('503') ||
+    raw.includes('500') ||
+    raw.includes('502') ||
+    raw.includes('504') ||
+    raw.includes('UNAVAILABLE') ||
+    lower.includes('high demand') ||
+    lower.includes('overloaded') ||
+    raw.includes('ECONNRESET') ||
+    raw.includes('ETIMEDOUT') ||
+    raw.includes('EAI_AGAIN') ||
+    lower.includes('fetch failed') ||
+    lower.includes('network error')
+  );
+}
+
 export interface RetryOptions {
   maxRetries?: number;
   timeoutMs?: number;
@@ -396,7 +420,7 @@ export async function withRetry<T>(
 ): Promise<T> {
   const opts: RetryOptions =
     typeof options === 'number' ? { maxRetries: options } : options;
-  const maxRetries = opts.maxRetries ?? 1;
+  const maxRetries = opts.maxRetries ?? 2;
   const timeoutMs = opts.timeoutMs;
   const externalSignal = opts.externalSignal;
 
@@ -463,7 +487,7 @@ export async function withRetry<T>(
         const canShortWait =
           !isHardDaily &&
           attempt < maxRetries &&
-          attemptElapsedMs <= 12000 &&
+          attemptElapsedMs <= 15000 &&
           (quotaInfo.retryDelaySeconds === null || quotaInfo.retryDelaySeconds <= 10);
         if (!canShortWait) {
           throw err;
@@ -477,18 +501,13 @@ export async function withRetry<T>(
         throw err;
       }
 
-      const raw = err instanceof Error ? err.message : String(err);
-      const isTransient =
-        raw.includes('503') ||
-        raw.includes('500') ||
-        raw.includes('UNAVAILABLE') ||
-        raw.includes('ECONNRESET');
+      const isTransient = isTransientGeminiError(err);
 
-      if (!isTransient || attemptElapsedMs > 12000 || attempt >= maxRetries) {
+      if (!isTransient || attemptElapsedMs > 18000 || attempt >= maxRetries) {
         throw err;
       }
       const jitter = Math.floor(Math.random() * 250);
-      await new Promise((resolve) => setTimeout(resolve, 800 * Math.pow(2, attempt) + jitter));
+      await new Promise((resolve) => setTimeout(resolve, 600 * Math.pow(2, attempt) + jitter));
     } finally {
       if (timeoutHandle) clearTimeout(timeoutHandle);
       if (externalSignal) {
@@ -509,7 +528,7 @@ export async function runWithGeminiModel<T>(
 ): Promise<{ result: T; modelUsed: string }> {
   const modelId = getGeminiModel();
   const result = await withRetry((signal) => operation(modelId, signal), {
-    maxRetries: options.maxRetries ?? 1,
+    maxRetries: options.maxRetries ?? 2,
     timeoutMs: options.timeoutMs,
     externalSignal: options.externalSignal,
   });
@@ -565,31 +584,53 @@ export async function probeSingleModelQuick(
     ac.abort(new Error(`Model probe timeout (${timeoutMs}ms)`));
   }, timeoutMs);
   try {
-    const res = await ai.models.generateContent({
-      model: modelId,
-      contents: 'Reply with: OK',
-      config: {
-        ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-        abortSignal: ac.signal,
-      },
-    });
-    return {
-      ok: Boolean((res.text ?? '').trim()),
-      latencyMs: Date.now() - start,
-    };
-  } catch (err: unknown) {
-    const quota = inspectGeminiQuotaError(err);
-    const rawMsg = err instanceof Error ? err.message : String(err);
-    const formatted = abortedByTimer
-      ? { status: 504, message: `Timed out after ${timeoutMs}ms` }
-      : formatGeminiError(err);
+    for (let attempt = 0; attempt <= 1; attempt++) {
+      try {
+        const res = await ai.models.generateContent({
+          model: modelId,
+          contents: 'Reply with: OK',
+          config: {
+            ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+            abortSignal: ac.signal,
+          },
+        });
+        return {
+          ok: Boolean((res.text ?? '').trim()),
+          latencyMs: Date.now() - start,
+        };
+      } catch (err: unknown) {
+        const quota = inspectGeminiQuotaError(err);
+        const canRetry =
+          attempt === 0 &&
+          !abortedByTimer &&
+          !quota.isQuotaError &&
+          !isInvalidApiKeyError(err) &&
+          !isUnsupportedModelError(err) &&
+          isTransientGeminiError(err) &&
+          Date.now() - start < timeoutMs - 4000;
+        if (canRetry) {
+          await new Promise((resolve) => setTimeout(resolve, 650));
+          continue;
+        }
+        const rawMsg = err instanceof Error ? err.message : String(err);
+        const formatted = abortedByTimer
+          ? { status: 504, message: `Timed out after ${timeoutMs}ms` }
+          : formatGeminiError(err);
+        return {
+          ok: false,
+          latencyMs: Date.now() - start,
+          status: formatted.status,
+          error: formatted.message,
+          upstreamError: extractReadableApiError(rawMsg).slice(0, 300),
+          quotaHit: quota.isQuotaError,
+        };
+      }
+    }
     return {
       ok: false,
       latencyMs: Date.now() - start,
-      status: formatted.status,
-      error: formatted.message,
-      upstreamError: extractReadableApiError(rawMsg).slice(0, 300),
-      quotaHit: quota.isQuotaError,
+      status: 503,
+      error: 'Model probe did not complete.',
     };
   } finally {
     clearTimeout(timer);

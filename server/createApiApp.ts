@@ -619,10 +619,57 @@ function getSafeStreamEnd(fullText: string, markerPrefix: string): number {
   return fullText.length;
 }
 
+async function openStreamAndPullFirstChunk<T extends { text?: string }>(
+  createStream: (signal?: AbortSignal) => Promise<AsyncIterable<T>>,
+  options: { timeoutMs: number; externalSignal: AbortSignal }
+): Promise<{ iterator: AsyncIterator<T>; firstResult: IteratorResult<T> }> {
+  return withRetry(
+    async (signal) => {
+      const combined = new AbortController();
+      const abortBoth = () => combined.abort();
+      signal?.addEventListener('abort', abortBoth, { once: true });
+      options.externalSignal.addEventListener('abort', abortBoth, { once: true });
+      return (async () => {
+        const stream = await createStream(combined.signal);
+        const iterator = stream[Symbol.asyncIterator]();
+        const firstResult = await iterator.next();
+        return { iterator, firstResult };
+      })().catch((err) => {
+        signal?.removeEventListener('abort', abortBoth);
+        options.externalSignal.removeEventListener('abort', abortBoth);
+        throw err;
+      });
+    },
+    {
+      maxRetries: 2,
+      timeoutMs: options.timeoutMs,
+      externalSignal: options.externalSignal,
+    }
+  );
+}
+
 export function createApiApp() {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', true);
+
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    const rawUrl = req.url || '/';
+    try {
+      const parsed = new URL(rawUrl, 'http://localhost');
+      if (parsed.pathname === '/api/index' || parsed.searchParams.has('__apiPath')) {
+        const apiPathRaw = parsed.searchParams.get('__apiPath') ?? '';
+        parsed.searchParams.delete('__apiPath');
+        const cleanPath = apiPathRaw.replace(/^\/+/, '');
+        const nextPathname = cleanPath ? `/api/${cleanPath}` : '/api';
+        const nextSearch = parsed.searchParams.toString();
+        req.url = `${nextPathname}${nextSearch ? `?${nextSearch}` : ''}`;
+      }
+    } catch {
+      // ignore malformed URLs
+    }
+    next();
+  });
 
   app.use((req: Request, res: Response, next: NextFunction) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -930,7 +977,103 @@ export function createApiApp() {
     },
     async (req: Request, res: Response) => {
       try {
-        if (!req.file) {
+        let uploadedFile:
+          | { buffer: Buffer; originalname: string; mimetype: string; size: number }
+          | undefined = req.file
+          ? {
+              buffer: req.file.buffer,
+              originalname: req.file.originalname,
+              mimetype: req.file.mimetype,
+              size: req.file.size,
+            }
+          : undefined;
+
+        const signedStorageUrl =
+          typeof req.body?.signedStorageUrl === 'string' ? req.body.signedStorageUrl.trim() : '';
+
+        if (!uploadedFile && signedStorageUrl) {
+          const supabaseUrlRaw = (
+            process.env.VITE_SUPABASE_URL ||
+            process.env.SUPABASE_URL ||
+            ''
+          ).trim();
+          let expectedHost = '';
+          try {
+            if (supabaseUrlRaw) {
+              expectedHost = new URL(supabaseUrlRaw).hostname.toLowerCase();
+            }
+          } catch {
+            expectedHost = '';
+          }
+
+          let parsedSignedUrl: URL;
+          try {
+            parsedSignedUrl = new URL(signedStorageUrl);
+          } catch {
+            return res.status(400).json({ error: 'Invalid signed storage URL provided.' });
+          }
+
+          if (
+            parsedSignedUrl.protocol !== 'https:' ||
+            !expectedHost ||
+            parsedSignedUrl.hostname.toLowerCase() !== expectedHost ||
+            !parsedSignedUrl.pathname.startsWith('/storage/v1/object/sign/')
+          ) {
+            return res.status(400).json({
+              error: 'Signed storage URL must originate from your configured Supabase Storage project.',
+            });
+          }
+
+          const fetchAc = new AbortController();
+          const fetchTimer = setTimeout(() => fetchAc.abort(), 45000);
+          let fileArrayBuf: ArrayBuffer;
+          let responseMime = '';
+          try {
+            const fileRes = await fetch(parsedSignedUrl.toString(), { signal: fetchAc.signal });
+            if (!fileRes.ok) {
+              return res.status(400).json({
+                error: `Unable to fetch staged study file from cloud storage (HTTP ${fileRes.status}). Please retry the upload.`,
+              });
+            }
+            const lenHeader = Number(fileRes.headers.get('content-length') || 0);
+            if (lenHeader > MAX_FILE_SIZE_BYTES) {
+              return res.status(400).json({
+                error: 'File exceeds the 25 MB maximum upload limit. Please compress or split the file.',
+              });
+            }
+            responseMime = (fileRes.headers.get('content-type') || '').split(';')[0].trim();
+            fileArrayBuf = await fileRes.arrayBuffer();
+          } finally {
+            clearTimeout(fetchTimer);
+          }
+
+          if (fileArrayBuf.byteLength === 0) {
+            return res.status(400).json({ error: 'The uploaded file is empty.' });
+          }
+          if (fileArrayBuf.byteLength > MAX_FILE_SIZE_BYTES) {
+            return res.status(400).json({
+              error: 'File exceeds the 25 MB maximum upload limit. Please compress or split the file.',
+            });
+          }
+
+          const providedName =
+            typeof req.body?.fileName === 'string' && req.body.fileName.trim()
+              ? path.basename(req.body.fileName.trim())
+              : 'study-material';
+          const providedMime =
+            typeof req.body?.mimeType === 'string' && req.body.mimeType.trim()
+              ? req.body.mimeType.trim()
+              : responseMime || 'application/octet-stream';
+
+          uploadedFile = {
+            buffer: Buffer.from(fileArrayBuf),
+            originalname: providedName,
+            mimetype: providedMime,
+            size: fileArrayBuf.byteLength,
+          };
+        }
+
+        if (!uploadedFile) {
           const rawText = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
           const titleInput = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
 
@@ -964,7 +1107,7 @@ export function createApiApp() {
           return res.json(result);
         }
 
-        const file = req.file;
+        const file = uploadedFile;
         const materialType = detectMaterialType(file.mimetype, file.originalname);
         if (!materialType) {
           return res.status(400).json({
@@ -1012,6 +1155,12 @@ export function createApiApp() {
           }
 
           if (extractedText.length < 60) {
+            if (file.buffer.byteLength > 20 * 1024 * 1024) {
+              return res.status(422).json({
+                error:
+                  'This scanned PDF is larger than 20 MB and has no selectable embedded text. Please upload a text-selectable PDF or compress/split scanned PDFs under 20 MB.',
+              });
+            }
             const ai = getGeminiClient();
             const base64Pdf = file.buffer.toString('base64');
             const { result: ocrResponse } = await runWithGeminiModel(
@@ -1036,7 +1185,7 @@ export function createApiApp() {
                     abortSignal: signal,
                   },
                 }),
-              { maxRetries: 1, timeoutMs: 60000 }
+              { maxRetries: 2, timeoutMs: 55000 }
             );
             extractedText = (ocrResponse.text ?? '').trim();
             extractionMethod = 'pdf-ocr';
@@ -1073,7 +1222,7 @@ export function createApiApp() {
                   abortSignal: signal,
                 },
               }),
-            { maxRetries: 1, timeoutMs: 55000 }
+            { maxRetries: 2, timeoutMs: 55000 }
           );
           extractedText = (ocrResponse.text ?? '').trim();
           extractionMethod = 'image-ocr';
@@ -1085,6 +1234,12 @@ export function createApiApp() {
             });
           }
         } else if (materialType === 'audio') {
+          if (file.buffer.byteLength > 20 * 1024 * 1024) {
+            return res.status(422).json({
+              error:
+                'This audio recording exceeds the 20 MB inline AI transcription limit. Please trim or compress the recording under 20 MB.',
+            });
+          }
           const ai = getGeminiClient();
           const base64Audio = file.buffer.toString('base64');
           const { result: transcriptResponse } = await runWithGeminiModel(
@@ -1109,7 +1264,7 @@ export function createApiApp() {
                   abortSignal: signal,
                 },
               }),
-            { maxRetries: 1, timeoutMs: 90000 }
+            { maxRetries: 2, timeoutMs: 85000 }
           );
           extractedText = (transcriptResponse.text ?? '').trim();
           extractionMethod = 'audio-transcription';
@@ -1169,12 +1324,12 @@ export function createApiApp() {
           : 'detailed';
 
       const ai = getGeminiClient();
-      const chunks = chunkText(extractedText.trim(), 14000, 350);
+      const chunks = chunkText(extractedText.trim(), 18000, 350);
 
       let synthesisSource = extractedText.trim();
 
       if (chunks.length > 2) {
-        const chunkNotes = await mapWithConcurrency(chunks, 2, async (chunkTextItem, i) => {
+        const chunkNotes = await mapWithConcurrency(chunks, 3, async (chunkTextItem, i) => {
           const { result: partRes } = await runWithGeminiModel(
             (model, signal) =>
               ai.models.generateContent({
@@ -1689,7 +1844,7 @@ export function createApiApp() {
       const ai = getGeminiClient();
 
       const batchSizes: number[] = [];
-      const maxBatchSize = validFormat === 'objective' ? 15 : 10;
+      const maxBatchSize = validFormat === 'objective' ? 10 : 8;
       let remainingCount = totalCount;
       while (remainingCount > 0) {
         const nextSize = Math.min(maxBatchSize, remainingCount);
@@ -1697,7 +1852,6 @@ export function createApiApp() {
         remainingCount -= nextSize;
       }
 
-      const allQuestions: QuizQuestion[] = [];
       let detectedTitle = cleanTitle || 'Academic Assessment';
       let detectedSubject = 'General Studies';
 
@@ -1728,179 +1882,211 @@ export function createApiApp() {
         return 0;
       };
 
-      const seenQuestionStems = new Set<string>();
+      const quizResponseSchema = {
+        type: Type.OBJECT,
+        properties: {
+          title: { type: Type.STRING },
+          subjectArea: { type: Type.STRING },
+          questions: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                type: {
+                  type: Type.STRING,
+                  description: '"objective" or "theory"',
+                },
+                question: { type: Type.STRING },
+                options: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description:
+                    'Exactly 4 options for objective questions, empty array for theory.',
+                },
+                correctOptionIndex: {
+                  type: Type.INTEGER,
+                  description: '0-3 for objective questions, 0 for theory.',
+                },
+                expectedAnswer: { type: Type.STRING },
+                markingCriteria: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                maxMarks: { type: Type.INTEGER },
+                explanation: { type: Type.STRING },
+                topicTag: { type: Type.STRING },
+                visualAid: {
+                  type: Type.OBJECT,
+                  description:
+                    'Optional diagram ONLY if visual context enhances this question without revealing the answer.',
+                  properties: {
+                    type: { type: Type.STRING },
+                    title: { type: Type.STRING },
+                    caption: { type: Type.STRING },
+                    nodes: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          id: { type: Type.STRING },
+                          label: { type: Type.STRING },
+                          sublabel: { type: Type.STRING },
+                        },
+                        required: ['id', 'label'],
+                      },
+                    },
+                    edges: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          from: { type: Type.STRING },
+                          to: { type: Type.STRING },
+                          label: { type: Type.STRING },
+                        },
+                        required: ['from', 'to'],
+                      },
+                    },
+                    xAxisLabel: { type: Type.STRING },
+                    yAxisLabel: { type: Type.STRING },
+                    series: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          name: { type: Type.STRING },
+                          points: {
+                            type: Type.ARRAY,
+                            items: {
+                              type: Type.OBJECT,
+                              properties: {
+                                x: { type: Type.NUMBER },
+                                y: { type: Type.NUMBER },
+                                label: { type: Type.STRING },
+                              },
+                              required: ['x', 'y'],
+                            },
+                          },
+                        },
+                        required: ['name', 'points'],
+                      },
+                    },
+                  },
+                  required: ['type', 'title'],
+                },
+              },
+              required: [
+                'type',
+                'question',
+                'options',
+                'correctOptionIndex',
+                'expectedAnswer',
+                'markingCriteria',
+                'maxMarks',
+                'explanation',
+                'topicTag',
+              ],
+            },
+          },
+        },
+        required: ['title', 'subjectArea', 'questions'],
+      };
 
-      for (let b = 0; b < batchSizes.length; b++) {
-        const batchCount = batchSizes[b];
+      const difficultyGuide =
+        validDifficulty === 'easy'
+          ? 'EASY difficulty: test foundational recall, core definitions, and direct comprehension.'
+          : validDifficulty === 'intermediate'
+            ? 'INTERMEDIATE difficulty: test conceptual understanding, relationships, and applied reasoning.'
+            : validDifficulty === 'advanced'
+              ? 'ADVANCED difficulty: test rigorous analytical synthesis, edge cases, multi-step problem solving, and deep academic mastery.'
+              : 'MIXED difficulty: distribute questions progressively across Easy (foundational recall), Intermediate (conceptual application), and Advanced (deep analytical synthesis).';
+
+      const buildFormatGuide = (count: number) => {
         const objTarget =
           validFormat === 'objective'
-            ? batchCount
+            ? count
             : validFormat === 'theory'
               ? 0
-              : Math.round(batchCount * 0.7);
-        const theoryTarget = batchCount - objTarget;
+              : Math.round(count * 0.7);
+        const theoryTarget = count - objTarget;
 
-        const existingStems = allQuestions.map((q) => `- ${q.question}`).join('\n');
-        const avoidDuplicatesClause = existingStems
-          ? `\nDo NOT repeat or closely paraphrase any of these already-generated questions:\n${existingStems}`
-          : '';
+        return validFormat === 'objective'
+          ? `Generate exactly ${count} OBJECTIVE (multiple-choice) questions. Every question MUST have type="objective", exactly 4 distinct options (A, B, C, D) in the options array, a valid correctOptionIndex (0, 1, 2, or 3), expectedAnswer matching the correct option text, maxMarks=1, and a clear educational explanation.`
+          : validFormat === 'theory'
+            ? `Generate exactly ${count} THEORY (short-answer / essay) questions testing explanation and application. Every question MUST have type="theory", empty options array [], expectedAnswer with a complete model answer, 2 to 4 concrete markingCriteria points, maxMarks=5, and an explanation.`
+            : `Generate exactly ${count} MIXED questions: ${objTarget} OBJECTIVE questions (type="objective", 4 options, correctOptionIndex 0-3, maxMarks=1) followed by ${theoryTarget} THEORY questions (type="theory", empty options [], expectedAnswer, 2-4 markingCriteria points, maxMarks=5).`;
+      };
 
-        const batchScopeHint =
-          batchSizes.length > 1
-            ? `\nBatch ${b + 1} of ${batchSizes.length}: Focus on distinct subtopics, principles, and angles not covered in earlier questions.`
+      const batchFocusAngles = [
+        'Focus on foundational principles, core definitions, primary mechanisms, and fundamental laws.',
+        'Focus on quantitative applications, real-world scenarios, step-by-step problem solving, and cause-and-effect.',
+        'Focus on structural comparisons, classification, interactions between sub-systems, and diagnostic reasoning.',
+        'Focus on edge cases, common misconceptions, experimental evidence, and higher-order analytical synthesis.',
+      ];
+
+      const requestBatch = async (
+        batchCount: number,
+        batchScopeHint: string,
+        avoidStems: string[]
+      ) => {
+        const avoidDuplicatesClause =
+          avoidStems.length > 0
+            ? `\nDo NOT repeat or closely paraphrase any of these already-generated questions:\n${avoidStems
+                .map((s) => `- ${s}`)
+                .join('\n')}`
             : '';
 
-        const difficultyGuide =
-          validDifficulty === 'easy'
-            ? 'EASY difficulty: test foundational recall, core definitions, and direct comprehension.'
-            : validDifficulty === 'intermediate'
-              ? 'INTERMEDIATE difficulty: test conceptual understanding, relationships, and applied reasoning.'
-              : validDifficulty === 'advanced'
-                ? 'ADVANCED difficulty: test rigorous analytical synthesis, edge cases, multi-step problem solving, and deep academic mastery.'
-                : 'MIXED difficulty: distribute questions progressively across Easy (foundational recall), Intermediate (conceptual application), and Advanced (deep analytical synthesis).';
-
-        const formatGuide =
-          validFormat === 'objective'
-            ? `Generate exactly ${batchCount} OBJECTIVE (multiple-choice) questions. Every question MUST have type="objective", exactly 4 distinct options (A, B, C, D) in the options array, a valid correctOptionIndex (0, 1, 2, or 3), expectedAnswer matching the correct option text, maxMarks=1, and a clear educational explanation.`
-            : validFormat === 'theory'
-              ? `Generate exactly ${batchCount} THEORY (short-answer / essay) questions testing explanation and application. Every question MUST have type="theory", empty options array [], expectedAnswer with a complete model answer, 2 to 4 concrete markingCriteria points, maxMarks=5, and an explanation.`
-              : `Generate exactly ${batchCount} MIXED questions: ${objTarget} OBJECTIVE questions (type="objective", 4 options, correctOptionIndex 0-3, maxMarks=1) followed by ${theoryTarget} THEORY questions (type="theory", empty options [], expectedAnswer, 2-4 markingCriteria points, maxMarks=5).`;
+        const diagramGuidance =
+          totalCount <= 20
+            ? ' Optionally attach a visualAid diagram ONLY to 1 question per batch where a process diagram, quantitative plot, or labeled system genuinely helps test understanding.'
+            : ' Do NOT include visualAid objects on bulk 30-40 question exams so every question remains crisp and fast to generate.';
 
         const { result: response } = await runWithGeminiModel(
           (model, signal) =>
             ai.models.generateContent({
               model,
-              contents: `${sourceContext}\n\nDifficulty: ${difficultyGuide}\nFormat Requirements: ${formatGuide}${batchScopeHint}${avoidDuplicatesClause}`,
+              contents: `${sourceContext}\n\nDifficulty: ${difficultyGuide}\nFormat Requirements: ${buildFormatGuide(batchCount)}${batchScopeHint}${avoidDuplicatesClause}`,
               config: {
-                systemInstruction:
-                  'You are Brainstine Assessment Engine, an academic professor creating rigorous, unambiguous university-grade examinations. Base questions strictly on the supplied study material (or established academic canon when generating from a topic). Every objective question must have exactly ONE defensible correct answer among four plausible options. Never fabricate false facts. Optionally attach a visualAid diagram ONLY to 1 or 2 questions where a process diagram, quantitative plot, or labeled system genuinely helps test understanding.',
+                systemInstruction: `You are Brainstine Assessment Engine, an academic professor creating rigorous, unambiguous university-grade examinations. Base questions strictly on the supplied study material (or established academic canon when generating from a topic). Every objective question must have exactly ONE defensible correct answer among four plausible options. Never fabricate false facts.${diagramGuidance}`,
                 ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
                 abortSignal: signal,
                 responseMimeType: 'application/json',
-                responseSchema: {
-                  type: Type.OBJECT,
-                  properties: {
-                    title: { type: Type.STRING },
-                    subjectArea: { type: Type.STRING },
-                    questions: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          type: {
-                            type: Type.STRING,
-                            description: '"objective" or "theory"',
-                          },
-                          question: { type: Type.STRING },
-                          options: {
-                            type: Type.ARRAY,
-                            items: { type: Type.STRING },
-                            description:
-                              'Exactly 4 options for objective questions, empty array for theory.',
-                          },
-                          correctOptionIndex: {
-                            type: Type.INTEGER,
-                            description: '0-3 for objective questions, 0 for theory.',
-                          },
-                          expectedAnswer: { type: Type.STRING },
-                          markingCriteria: {
-                            type: Type.ARRAY,
-                            items: { type: Type.STRING },
-                          },
-                          maxMarks: { type: Type.INTEGER },
-                          explanation: { type: Type.STRING },
-                          topicTag: { type: Type.STRING },
-                          visualAid: {
-                            type: Type.OBJECT,
-                            description:
-                              'Optional diagram ONLY if visual context enhances this question without revealing the answer.',
-                            properties: {
-                              type: { type: Type.STRING },
-                              title: { type: Type.STRING },
-                              caption: { type: Type.STRING },
-                              nodes: {
-                                type: Type.ARRAY,
-                                items: {
-                                  type: Type.OBJECT,
-                                  properties: {
-                                    id: { type: Type.STRING },
-                                    label: { type: Type.STRING },
-                                    sublabel: { type: Type.STRING },
-                                  },
-                                  required: ['id', 'label'],
-                                },
-                              },
-                              edges: {
-                                type: Type.ARRAY,
-                                items: {
-                                  type: Type.OBJECT,
-                                  properties: {
-                                    from: { type: Type.STRING },
-                                    to: { type: Type.STRING },
-                                    label: { type: Type.STRING },
-                                  },
-                                  required: ['from', 'to'],
-                                },
-                              },
-                              xAxisLabel: { type: Type.STRING },
-                              yAxisLabel: { type: Type.STRING },
-                              series: {
-                                type: Type.ARRAY,
-                                items: {
-                                  type: Type.OBJECT,
-                                  properties: {
-                                    name: { type: Type.STRING },
-                                    points: {
-                                      type: Type.ARRAY,
-                                      items: {
-                                        type: Type.OBJECT,
-                                        properties: {
-                                          x: { type: Type.NUMBER },
-                                          y: { type: Type.NUMBER },
-                                          label: { type: Type.STRING },
-                                        },
-                                        required: ['x', 'y'],
-                                      },
-                                    },
-                                  },
-                                  required: ['name', 'points'],
-                                },
-                              },
-                            },
-                            required: ['type', 'title'],
-                          },
-                        },
-                        required: [
-                          'type',
-                          'question',
-                          'options',
-                          'correctOptionIndex',
-                          'expectedAnswer',
-                          'markingCriteria',
-                          'maxMarks',
-                          'explanation',
-                          'topicTag',
-                        ],
-                      },
-                    },
-                  },
-                  required: ['title', 'subjectArea', 'questions'],
-                },
+                responseSchema: quizResponseSchema,
               },
             }),
-          { maxRetries: 1, timeoutMs: 75000 }
+          { maxRetries: 1, timeoutMs: 40000 }
         );
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const parsed = parseAiJsonResponse<Record<string, any>>(
+        return parseAiJsonResponse<Record<string, any>>(
           response.text,
           'generating quiz questions'
         );
-        if (b === 0) {
+      };
+
+      const batchResults = await mapWithConcurrency(batchSizes, 2, async (batchCount, b) => {
+        const scopeHint =
+          batchSizes.length > 1
+            ? `\nBatch ${b + 1} of ${batchSizes.length}: ${batchFocusAngles[b % batchFocusAngles.length]} Do not overlap with other batches.`
+            : '';
+        return requestBatch(batchCount, scopeHint, []);
+      });
+
+      const allQuestions: QuizQuestion[] = [];
+      const seenQuestionStems = new Set<string>();
+      const validVisualTypes = new Set([
+        'process_flow',
+        'concept_map',
+        'cartesian_plot',
+        'scientific_system',
+      ]);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const appendParsedQuestions = (parsed: Record<string, any>, isPrimary: boolean) => {
+        if (isPrimary) {
           detectedTitle = cleanTitle || parsed.title || 'Academic Assessment';
           detectedSubject = parsed.subjectArea || 'General Studies';
         }
-
         const rawQs = Array.isArray(parsed.questions) ? parsed.questions : [];
         for (const q of rawQs) {
           if (allQuestions.length >= totalCount) break;
@@ -1937,12 +2123,6 @@ export function createApiApp() {
               ? normalizeCorrectIndex(q.correctOptionIndex, opts, q.expectedAnswer)
               : undefined;
 
-          const validVisualTypes = new Set([
-            'process_flow',
-            'concept_map',
-            'cartesian_plot',
-            'scientific_system',
-          ]);
           const visualAid =
             q.visualAid &&
             typeof q.visualAid === 'object' &&
@@ -1973,6 +2153,22 @@ export function createApiApp() {
             topicTag: String(q.topicTag || detectedSubject),
             ...(visualAid ? { visualAid } : {}),
           });
+        }
+      };
+
+      batchResults.forEach((parsed, idx) => appendParsedQuestions(parsed, idx === 0));
+
+      if (allQuestions.length > 0 && allQuestions.length < totalCount) {
+        const missingCount = totalCount - allQuestions.length;
+        try {
+          const topUpParsed = await requestBatch(
+            missingCount,
+            `\nTop-up batch: Generate ${missingCount} completely new, non-overlapping questions.`,
+            allQuestions.map((q) => q.question)
+          );
+          appendParsedQuestions(topUpParsed, false);
+        } catch (topUpErr) {
+          console.warn('Quiz top-up batch warning:', topUpErr);
         }
       }
 
@@ -2410,46 +2606,42 @@ export function createApiApp() {
 
       try {
         resetStallTimer(60000);
-        const stream = await withRetry(
-          (signal) => {
-            const combined = new AbortController();
-            const abortBoth = () => combined.abort();
-            signal?.addEventListener('abort', abortBoth, { once: true });
-            attemptController.signal.addEventListener('abort', abortBoth, { once: true });
-            return ai.models.generateContentStream({
+        const { iterator, firstResult } = await openStreamAndPullFirstChunk(
+          (signal) =>
+            ai.models.generateContentStream({
               model,
               contents: { parts },
               config: {
                 systemInstruction: streamInstruction,
                 ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-                abortSignal: combined.signal,
+                abortSignal: signal,
               },
-            });
-          },
+            }),
           {
-            maxRetries: 1,
             timeoutMs: 45000,
             externalSignal: attemptController.signal,
           }
         );
 
-        for await (const chunk of stream) {
+        let step = firstResult;
+        while (!step.done) {
           if (clientClosed) break;
           resetStallTimer(45000);
-          const delta = chunk.text ?? '';
-          if (!delta) continue;
-          fullText += delta;
-
-          if (needsTitle) {
-            const safeLimit = getSafeStreamEnd(fullText, META_PREFIX);
-            if (safeLimit > emittedLength) {
-              writeSseEvent(res, 'chunk', { delta: fullText.slice(emittedLength, safeLimit) });
-              emittedLength = safeLimit;
+          const delta = step.value.text ?? '';
+          if (delta) {
+            fullText += delta;
+            if (needsTitle) {
+              const safeLimit = getSafeStreamEnd(fullText, META_PREFIX);
+              if (safeLimit > emittedLength) {
+                writeSseEvent(res, 'chunk', { delta: fullText.slice(emittedLength, safeLimit) });
+                emittedLength = safeLimit;
+              }
+            } else {
+              writeSseEvent(res, 'chunk', { delta });
+              emittedLength = fullText.length;
             }
-          } else {
-            writeSseEvent(res, 'chunk', { delta });
-            emittedLength = fullText.length;
           }
+          step = await iterator.next();
         }
       } finally {
         clientDisconnectController.signal.removeEventListener('abort', abortOnDisconnect);
@@ -2645,41 +2837,37 @@ export function createApiApp() {
 
       try {
         resetStallTimer(60000);
-        const stream = await withRetry(
-          (signal) => {
-            const combined = new AbortController();
-            const abortBoth = () => combined.abort();
-            signal?.addEventListener('abort', abortBoth, { once: true });
-            attemptController.signal.addEventListener('abort', abortBoth, { once: true });
-            return ai.models.generateContentStream({
+        const { iterator, firstResult } = await openStreamAndPullFirstChunk(
+          (signal) =>
+            ai.models.generateContentStream({
               model,
               contents: { parts },
               config: {
                 systemInstruction: streamInstruction,
                 ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-                abortSignal: combined.signal,
+                abortSignal: signal,
               },
-            });
-          },
+            }),
           {
-            maxRetries: 1,
             timeoutMs: 45000,
             externalSignal: attemptController.signal,
           }
         );
 
-        for await (const chunk of stream) {
+        let step = firstResult;
+        while (!step.done) {
           if (clientClosed) break;
           resetStallTimer(45000);
-          const delta = chunk.text ?? '';
-          if (!delta) continue;
-          fullText += delta;
-
-          const safeLimit = getSafeStreamEnd(fullText, META_PREFIX);
-          if (safeLimit > emittedLength) {
-            writeSseEvent(res, 'chunk', { delta: fullText.slice(emittedLength, safeLimit) });
-            emittedLength = safeLimit;
+          const delta = step.value.text ?? '';
+          if (delta) {
+            fullText += delta;
+            const safeLimit = getSafeStreamEnd(fullText, META_PREFIX);
+            if (safeLimit > emittedLength) {
+              writeSseEvent(res, 'chunk', { delta: fullText.slice(emittedLength, safeLimit) });
+              emittedLength = safeLimit;
+            }
           }
+          step = await iterator.next();
         }
       } finally {
         clientDisconnectController.signal.removeEventListener('abort', abortOnDisconnect);

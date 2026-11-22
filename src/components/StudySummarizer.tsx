@@ -21,6 +21,7 @@ import {
 } from '../lib/apiClient';
 import {
   createStudyMaterialRecord,
+  getMaterialSignedUrl,
   recordStudyActivity,
   saveStudySummaryRecord,
   uploadMaterialFileToStorage,
@@ -45,6 +46,7 @@ interface StudySummarizerProps {
 }
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const HOSTED_DIRECT_UPLOAD_LIMIT_BYTES = Math.floor(4.2 * 1024 * 1024);
 
 const ACCEPTED_EXTENSIONS =
   '.pdf,.png,.jpg,.jpeg,.webp,.gif,.heic,.mp3,.wav,.m4a,.webm,.ogg,.aac,.flac,.txt,.md';
@@ -214,6 +216,7 @@ export function StudySummarizer({
 
     try {
       let result: ExtractionResult;
+      let preUploadedStoragePath: string | null = null;
 
       if (inputMode === 'file' && selectedFile) {
         const fileCheck = validateFile(selectedFile);
@@ -229,63 +232,108 @@ export function StudySummarizer({
 
         const uploadFile =
           fileCheck.type === 'image' ? await compressImageFile(selectedFile) : selectedFile;
-        const formData = new FormData();
-        formData.append('file', uploadFile);
-        if (editableTitle.trim()) {
-          formData.append('title', editableTitle.trim());
-        }
+        const isLocalOrigin =
+          window.location.hostname === 'localhost' ||
+          window.location.hostname === '127.0.0.1' ||
+          window.location.hostname === '[::1]';
 
-        result = await new Promise<ExtractionResult>((resolve, reject) => {
-          const xhr = new XMLHttpRequest();
-          xhr.open('POST', resolveApiUrl('/api/materials/extract'));
-          xhr.timeout = 120000;
-          xhr.upload.onprogress = (evt) => {
-            if (evt.lengthComputable) {
-              const pct = Math.min(55, Math.round((evt.loaded / evt.total) * 55));
-              setUploadProgress(pct);
-            }
-          };
-          xhr.onload = () => {
+        if (!isLocalOrigin && uploadFile.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES) {
+          if (!user || !isConfigured) {
+            throw new Error(
+              `This file (${formatBytes(uploadFile.size)}) exceeds the 4.2 MB direct upload limit. Please sign in to upload files up to 25 MB, or compress/split the file under 4.2 MB.`
+            );
+          }
+
+          setExtractionStatus('Staging large file via secure cloud storage...');
+          setUploadProgress(25);
+          preUploadedStoragePath = await uploadMaterialFileToStorage(user.id, uploadFile);
+          setUploadProgress(50);
+          const signedStorageUrl = await getMaterialSignedUrl(preUploadedStoragePath);
+          setExtractionStatus(typeLabel);
+          setUploadProgress(65);
+
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 120000);
+          try {
+            const extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              signal: controller.signal,
+              body: JSON.stringify({
+                signedStorageUrl,
+                fileName: uploadFile.name,
+                mimeType: uploadFile.type,
+                fileSizeBytes: uploadFile.size,
+                ...(editableTitle.trim() ? { title: editableTitle.trim() } : {}),
+              }),
+            });
             setUploadProgress(95);
-            const contentType = xhr.getResponseHeader('content-type') || '';
-            if (xhr.status >= 200 && xhr.status < 300) {
-              try {
-                const json = JSON.parse(xhr.responseText);
-                resolve(json as ExtractionResult);
-              } catch {
+            result = await parseApiJsonResponse<ExtractionResult>(
+              extractRes,
+              'extracting study content from your file'
+            );
+          } finally {
+            clearTimeout(timer);
+          }
+        } else {
+          const formData = new FormData();
+          formData.append('file', uploadFile);
+          if (editableTitle.trim()) {
+            formData.append('title', editableTitle.trim());
+          }
+
+          result = await new Promise<ExtractionResult>((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', resolveApiUrl('/api/materials/extract'));
+            xhr.timeout = 120000;
+            xhr.upload.onprogress = (evt) => {
+              if (evt.lengthComputable) {
+                const pct = Math.min(55, Math.round((evt.loaded / evt.total) * 55));
+                setUploadProgress(pct);
+              }
+            };
+            xhr.onload = () => {
+              setUploadProgress(95);
+              const contentType = xhr.getResponseHeader('content-type') || '';
+              if (xhr.status >= 200 && xhr.status < 300) {
+                try {
+                  const json = JSON.parse(xhr.responseText);
+                  resolve(json as ExtractionResult);
+                } catch {
+                  reject(
+                    new Error(
+                      'The server returned an invalid or non-JSON response while extracting the file. Verify the Brainstine /api backend is active.'
+                    )
+                  );
+                }
+              } else {
                 reject(
                   new Error(
-                    'The server returned an invalid or non-JSON response while extracting the file. Verify the Brainstine /api backend is active.'
+                    extractErrorFromHttpBody(
+                      xhr.status,
+                      xhr.responseText || '',
+                      contentType,
+                      'extracting study content from your file'
+                    )
                   )
                 );
               }
-            } else {
+            };
+            xhr.onerror = () =>
               reject(
                 new Error(
-                  extractErrorFromHttpBody(
-                    xhr.status,
-                    xhr.responseText || '',
-                    contentType,
-                    'extracting study content from your file'
-                  )
+                  'Network connection error while uploading file. Check your internet connection and verify the Brainstine server is running.'
                 )
               );
-            }
-          };
-          xhr.onerror = () =>
-            reject(
-              new Error(
-                'Network connection error while uploading file. Check your internet connection and verify the Brainstine server is running.'
-              )
-            );
-          xhr.ontimeout = () =>
-            reject(
-              new Error(
-                'Content extraction timed out while processing the file. Try a smaller file or split long documents.'
-              )
-            );
-          xhr.send(formData);
-        });
+            xhr.ontimeout = () =>
+              reject(
+                new Error(
+                  'Content extraction timed out while processing the file. Try a smaller file or split long documents.'
+                )
+              );
+            xhr.send(formData);
+          });
+        }
       } else {
         setExtractionStatus('Chunking and indexing pasted study text...');
         setUploadProgress(50);
@@ -318,8 +366,8 @@ export function StudySummarizer({
       if (user && isConfigured) {
         try {
           setExtractionStatus('Saving material to your Supabase library...');
-          let storagePath: string | null = null;
-          if (inputMode === 'file' && selectedFile) {
+          let storagePath: string | null = preUploadedStoragePath;
+          if (!storagePath && inputMode === 'file' && selectedFile) {
             storagePath = await uploadMaterialFileToStorage(user.id, selectedFile);
           }
           const materialRecord = await createStudyMaterialRecord({

@@ -1,5 +1,18 @@
 {
+  "functions": {
+    "api/index.ts": {
+      "maxDuration": 60
+    }
+  },
   "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index?__apiPath=$1"
+    },
+    {
+      "source": "/api",
+      "destination": "/api/index"
+    },
     {
       "source": "/((?!api/|assets/|src/assets/).*)",
       "destination": "/index.html"
