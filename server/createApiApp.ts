@@ -1017,12 +1017,15 @@ export function createApiApp() {
             return res.status(400).json({ error: 'Invalid signed storage URL provided.' });
           }
 
+          const isSupabaseHost =
+            (expectedHost && parsedSignedUrl.hostname.toLowerCase() === expectedHost) ||
+            parsedSignedUrl.hostname.toLowerCase().endsWith('.supabase.co');
+
           if (
             parsedSignedUrl.protocol !== 'https:' ||
             Boolean(parsedSignedUrl.username) ||
             Boolean(parsedSignedUrl.password) ||
-            !expectedHost ||
-            parsedSignedUrl.hostname.toLowerCase() !== expectedHost ||
+            !isSupabaseHost ||
             !parsedSignedUrl.pathname.startsWith('/storage/v1/object/sign/study-materials/')
           ) {
             return res.status(400).json({
@@ -1163,10 +1166,48 @@ export function createApiApp() {
             console.warn('Primary PDF text extraction failed:', pdfErr);
           }
 
+          if (!extractedText || extractedText.length < 60) {
+            if (file.buffer.byteLength <= 20 * 1024 * 1024 && isGeminiConfigured()) {
+              try {
+                const ai = getGeminiClient();
+                const base64Pdf = file.buffer.toString('base64');
+                const { result: ocrResponse } = await runWithGeminiModel(
+                  (model, signal) =>
+                    ai.models.generateContent({
+                      model,
+                      contents: [
+                        {
+                          inlineData: {
+                            mimeType: 'application/pdf',
+                            data: base64Pdf,
+                          },
+                        },
+                        {
+                          text: 'Extract all readable academic text, headings, formulas, equations, diagram labels, and bullet points from this document in exact reading order. Preserve section headers. Output only the extracted study text without commentary.',
+                        },
+                      ],
+                      config: {
+                        ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+                        abortSignal: signal,
+                      },
+                    }),
+                  { maxRetries: 1, timeoutMs: 45000 }
+                );
+                const ocrText = (ocrResponse.text ?? '').trim();
+                if (ocrText && ocrText.length >= 20) {
+                  extractedText = ocrText;
+                  extractionMethod = 'pdf-ocr';
+                }
+              } catch (ocrErr) {
+                console.warn('AI OCR fallback failed for scanned PDF:', ocrErr);
+              }
+            }
+          }
+
           if (!extractedText) {
             return res.status(422).json({
               error:
-                'Could not extract text from this PDF. The file may contain no selectable text, or may be scanned/encrypted. Please upload a text-selectable PDF or paste your study text directly.',
+                'Could not extract text from this PDF. The file may contain no selectable text or is unreadable. Please upload a clear text-selectable PDF or images of the pages.',
             });
           }
         } else if (materialType === 'image') {

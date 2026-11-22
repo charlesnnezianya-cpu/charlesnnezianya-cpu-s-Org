@@ -22,7 +22,7 @@ async function startServer() {
       server: {
         middlewareMode: true,
         allowedHosts: true,
-        ws: { server },
+        hmr: { server },
       },
       appType: 'spa',
     });

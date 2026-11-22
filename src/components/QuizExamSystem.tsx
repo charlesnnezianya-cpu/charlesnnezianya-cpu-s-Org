@@ -370,6 +370,7 @@ export function QuizExamSystem({
 
   const handleQuizFileChosen = async (file: File | null) => {
     if (!file) return;
+    if (uploading || extractingUpload) return;
     setUploadFile(file);
     setUploadErrorMsg(null);
     setUploadSuccessMsg(null);
@@ -385,54 +386,79 @@ export function QuizExamSystem({
         throw new Error(`"${file.name}" is empty (0 bytes). Please choose a valid study file.`);
       }
 
+      if (file.size > 25 * 1024 * 1024) {
+        throw new Error(
+          `"${file.name}" exceeds the 25 MB maximum upload limit. Please compress or split the file.`
+        );
+      }
+
       const isLocalOrigin =
         window.location.hostname === 'localhost' ||
         window.location.hostname === '127.0.0.1' ||
         window.location.hostname === '[::1]';
 
       let extractRes: Response;
+      const shouldUseStorageStaging =
+        (user && isConfigured) || (!isLocalOrigin && file.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES);
 
-      if (!isLocalOrigin && file.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES) {
+      if (shouldUseStorageStaging) {
         if (!user || !isConfigured) {
           throw new Error(
-            `Files larger than 3.8 MB require signing in with a Supabase account on cloud-hosted deployments (file is ${(file.size / (1024 * 1024)).toFixed(1)} MB). Please sign in or choose a smaller file.`
+            `Files larger than 3.8 MB require signing in with a Brainstine account on cloud-hosted deployments (file is ${(file.size / (1024 * 1024)).toFixed(1)} MB). Please sign in or choose a smaller file.`
           );
         }
 
-        setUploadProgress(30);
-        const storagePath = await uploadMaterialFileToStorage(user.id, file, {
-          preBuffered: arrayBuffer,
-          onProgress: (pct) => {
-            setUploadProgress(30 + Math.round(pct * 0.35));
-          },
-        });
-        stagedStoragePathRef.current = storagePath;
+        let storagePath = stagedStoragePathRef.current;
+        if (!storagePath) {
+          setUploadProgress(25);
+          storagePath = await uploadMaterialFileToStorage(user.id, file, {
+            preBuffered: arrayBuffer,
+            onProgress: (pct) => {
+              setUploadProgress(25 + Math.round(pct * 0.4));
+            },
+          });
+          stagedStoragePathRef.current = storagePath;
+        }
 
         setUploadProgress(70);
         const signedStorageUrl = await getMaterialSignedUrl(storagePath);
 
         setUploadProgress(85);
-        extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            signedStorageUrl,
-            fileName: file.name,
-            mimeType: file.type,
-            fileSizeBytes: file.size,
-            title: file.name.replace(/\.[^/.]+$/, ''),
-          }),
-        });
+        const extractController = new AbortController();
+        const extractTimer = setTimeout(() => extractController.abort(), 120000);
+        try {
+          extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: extractController.signal,
+            body: JSON.stringify({
+              signedStorageUrl,
+              fileName: file.name,
+              mimeType: file.type,
+              fileSizeBytes: file.size,
+              title: file.name.replace(/\.[^/.]+$/, ''),
+            }),
+          });
+        } finally {
+          clearTimeout(extractTimer);
+        }
       } else {
         const formData = new FormData();
         formData.append('file', file, file.name);
         formData.append('title', file.name.replace(/\.[^/.]+$/, ''));
 
         setUploadProgress(50);
-        extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
-          method: 'POST',
-          body: formData,
-        });
+        const directController = new AbortController();
+        const directTimer = setTimeout(() => directController.abort(), 120000);
+        try {
+          extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
+            method: 'POST',
+            signal: directController.signal,
+            body: formData,
+          });
+        } finally {
+          clearTimeout(directTimer);
+        }
       }
 
       setUploadProgress(95);
@@ -440,11 +466,20 @@ export function QuizExamSystem({
         title: string;
         extractedText: string;
         wordCount: number;
+        materialType?: string;
       }>(extractRes, 'extracting uploaded study material');
+
+      if (!extracted.extractedText || extracted.extractedText.trim().length < 20) {
+        throw new Error(
+          'Could not extract sufficient text from this document. Please ensure the document contains readable academic content or try another file.'
+        );
+      }
 
       setExtractedUploadText(extracted.extractedText);
       setExtractedUploadTitle(extracted.title);
-      setUploadSuccessMsg(`Successfully extracted ${extracted.wordCount.toLocaleString()} words from "${extracted.title}". Ready for quiz generation.`);
+      setUploadSuccessMsg(
+        `Successfully extracted ${extracted.wordCount.toLocaleString()} words from "${extracted.title}". Ready for quiz generation.`
+      );
       setUploadProgress(100);
 
       if (user && isConfigured) {
@@ -452,7 +487,11 @@ export function QuizExamSystem({
           await createStudyMaterialRecord({
             userId: user.id,
             title: extracted.title,
-            materialType: file.type.includes('pdf') ? 'pdf' : file.type.startsWith('image') ? 'image' : 'text',
+            materialType: file.type.includes('pdf')
+              ? 'pdf'
+              : file.type.startsWith('image')
+                ? 'image'
+                : 'text',
             fileName: file.name,
             fileSize: file.size,
             mimeType: file.type,
@@ -471,7 +510,7 @@ export function QuizExamSystem({
         formatClientApiError(
           err,
           'extracting uploaded file',
-          'Failed to process file. Please try a smaller PDF, clear image, or text file.'
+          'Document extraction timed out while waiting for the server. Your file remains selected—please click Retry to try again.'
         )
       );
     } finally {
@@ -1820,6 +1859,7 @@ export function QuizExamSystem({
                               setExtractedUploadTitle('');
                               setUploadSuccessMsg(null);
                               setUploadErrorMsg(null);
+                              stagedStoragePathRef.current = null;
                               if (fileInputRef.current) fileInputRef.current.value = '';
                             }}
                             className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
@@ -2024,7 +2064,7 @@ export function QuizExamSystem({
             <div className="flex items-center justify-end border-t border-slate-200 pt-5 select-none dark:border-slate-800">
               <button
                 type="submit"
-                disabled={generating || !geminiConfigured}
+                disabled={generating || !geminiConfigured || uploading || extractingUpload}
                 className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 sm:w-auto dark:bg-blue-600 dark:hover:bg-blue-500"
               >
                 {generating ? (
