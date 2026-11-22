@@ -213,7 +213,7 @@ export function SummaryDisplay({
         type="button"
         onClick={() => toggleSection(key)}
         aria-expanded={isOpen}
-        className="flex w-full items-center justify-between gap-4 py-4 text-left select-none"
+        className="flex min-h-11 w-full items-center justify-between gap-4 py-3.5 text-left select-none sm:py-4"
       >
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="font-display text-sm font-semibold tracking-wide text-slate-900 dark:text-white">
@@ -266,7 +266,7 @@ export function SummaryDisplay({
             <button
               type="button"
               onClick={toggleAllSections}
-              className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               {allExpanded ? 'Collapse All' : 'Expand All'}
             </button>
@@ -274,7 +274,7 @@ export function SummaryDisplay({
             <button
               type="button"
               onClick={handleCopySummary}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               {copied ? (
                 <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
@@ -287,7 +287,7 @@ export function SummaryDisplay({
             <button
               type="button"
               onClick={() => exportSummaryToPdf(summary)}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               <FileDown className="h-3.5 w-3.5" aria-hidden="true" />
               <span>Export PDF</span>
@@ -298,7 +298,7 @@ export function SummaryDisplay({
                 type="button"
                 onClick={onSave}
                 disabled={isSaving || isSaved}
-                className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                className={`inline-flex min-h-10 items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 sm:min-h-8 ${
                   isSaved
                     ? 'border border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300'
                     : 'bg-[#0F1E3D] text-white hover:bg-[#192F5D] disabled:opacity-60 dark:bg-blue-600 dark:hover:bg-blue-500'
@@ -317,7 +317,7 @@ export function SummaryDisplay({
               <button
                 type="button"
                 onClick={onCreateQuizFromSummary}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-800 transition-colors hover:bg-blue-100 whitespace-nowrap shrink-0 dark:border-blue-900/60 dark:bg-blue-950/50 dark:text-cyan-300 dark:hover:bg-blue-950"
+                className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-800 transition-colors hover:bg-blue-100 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-blue-900/60 dark:bg-blue-950/50 dark:text-cyan-300 dark:hover:bg-blue-950"
               >
                 <ListChecks className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>Test Myself</span>
@@ -444,7 +444,7 @@ export function SummaryDisplay({
                         </h4>
                       </div>
                       <div className="overflow-x-auto">
-                        <table className="w-full border-collapse text-left text-xs sm:text-sm academic-selectable">
+                        <table className="w-full min-w-[360px] border-collapse text-left text-xs sm:text-sm academic-selectable">
                           <thead>
                             <tr className="border-b border-slate-200 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/50">
                               <th className="px-4 py-2.5 font-display text-xs font-semibold text-slate-900 dark:text-white">
@@ -728,7 +728,7 @@ export function SummaryDisplay({
               type="button"
               disabled={followUpLoading}
               onClick={() => runFollowUp('simpler_explanation')}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               <HelpCircle className="h-3.5 w-3.5 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
               <span>Request Simpler Explanation</span>
@@ -737,7 +737,7 @@ export function SummaryDisplay({
               type="button"
               disabled={followUpLoading}
               onClick={() => runFollowUp('examples')}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               <Lightbulb className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" aria-hidden="true" />
               <span>Request Examples</span>
@@ -746,7 +746,7 @@ export function SummaryDisplay({
               type="button"
               disabled={followUpLoading}
               onClick={() => runFollowUp('revision_notes')}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               <Sparkles className="h-3.5 w-3.5 text-blue-700 dark:text-blue-400" aria-hidden="true" />
               <span>Generate Revision Notes</span>
@@ -770,12 +770,12 @@ export function SummaryDisplay({
             value={questionInput}
             onChange={(e) => setQuestionInput(e.target.value)}
             placeholder="Ask a specific question about a concept, term, or step in this summary..."
-            className="flex-1 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+            className="min-h-11 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
           />
           <button
             type="submit"
             disabled={followUpLoading || !questionInput.trim()}
-            className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 whitespace-nowrap shrink-0 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
+            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 whitespace-nowrap shrink-0 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
           >
             {followUpLoading ? (
               <>

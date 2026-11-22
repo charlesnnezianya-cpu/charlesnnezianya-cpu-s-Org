@@ -576,14 +576,14 @@ export function StudySummarizer({
           <div
             role="tablist"
             aria-label="Material input mode"
-            className="inline-flex items-center rounded-xl border border-slate-200 bg-slate-100 p-1 select-none dark:border-slate-800 dark:bg-slate-900"
+            className="flex w-full items-center rounded-xl border border-slate-200 bg-slate-100 p-1 select-none sm:inline-flex sm:w-auto dark:border-slate-800 dark:bg-slate-900"
           >
             <button
               type="button"
               role="tab"
               aria-selected={inputMode === 'file'}
               onClick={() => setInputMode('file')}
-              className={`min-h-9 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              className={`min-h-10 sm:min-h-9 flex-1 sm:flex-initial justify-center rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
                 inputMode === 'file'
                   ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
                   : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
@@ -596,7 +596,7 @@ export function StudySummarizer({
               role="tab"
               aria-selected={inputMode === 'text'}
               onClick={() => setInputMode('text')}
-              className={`min-h-9 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              className={`min-h-10 sm:min-h-9 flex-1 sm:flex-initial justify-center rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
                 inputMode === 'text'
                   ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
                   : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
@@ -660,7 +660,7 @@ export function StudySummarizer({
                     fileInputRef.current?.click();
                   }
                 }}
-                className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors select-none ${
+                className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-4 py-7 text-center transition-colors select-none sm:px-6 sm:py-10 ${
                   isDragging
                     ? 'border-blue-600 bg-blue-50/70 dark:border-cyan-400 dark:bg-blue-950/30'
                     : 'border-slate-300 bg-slate-50/60 hover:border-blue-500 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900/40 dark:hover:border-blue-500'
@@ -700,7 +700,7 @@ export function StudySummarizer({
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                     disabled={extracting}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-800"
+                    className="inline-flex min-h-10 sm:min-h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-800"
                   >
                     <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
                     <span>Replace</span>
@@ -709,7 +709,7 @@ export function StudySummarizer({
                     type="button"
                     onClick={resetAll}
                     disabled={extracting}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-red-400 dark:hover:bg-red-950/30"
+                    className="inline-flex min-h-10 sm:min-h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-red-400 dark:hover:bg-red-950/30"
                   >
                     <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                     <span>Remove</span>
@@ -741,7 +741,7 @@ export function StudySummarizer({
                 type="button"
                 onClick={extractContent}
                 disabled={!selectedFile || extracting}
-                className="inline-flex items-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500"
+                className="inline-flex min-h-11 w-full justify-center sm:w-auto items-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500"
               >
                 {extracting ? (
                   <>
@@ -790,7 +790,7 @@ export function StudySummarizer({
               />
             </div>
 
-            <div className="flex items-center justify-between gap-4 select-none">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between select-none">
               <span className="font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
                 {pastedText.trim() ? pastedText.trim().split(/\s+/).length.toLocaleString() : 0} words
               </span>
@@ -798,7 +798,7 @@ export function StudySummarizer({
                 type="button"
                 onClick={extractContent}
                 disabled={extracting || pastedText.trim().length < 20}
-                className="inline-flex items-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500"
+                className="inline-flex min-h-11 w-full justify-center sm:w-auto items-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500"
               >
                 {extracting ? (
                   <>
@@ -930,7 +930,7 @@ export function StudySummarizer({
                 type="button"
                 onClick={handleGenerateSummary}
                 disabled={generating || !geminiConfigured}
-                className="inline-flex items-center gap-2 rounded-xl bg-[#0F1E3D] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500"
+                className="inline-flex min-h-11 w-full justify-center sm:w-auto items-center gap-2 rounded-xl bg-[#0F1E3D] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500"
               >
                 {generating ? (
                   <>

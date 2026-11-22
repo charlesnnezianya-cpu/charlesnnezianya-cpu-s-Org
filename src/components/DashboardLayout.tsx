@@ -271,7 +271,7 @@ export function DashboardLayout() {
   const sidebarContent = (
     <div className="flex h-full flex-col justify-between px-4 py-5 select-none">
       <div>
-        <div className="px-2 pb-6">
+        <div className="px-2 pb-6 pr-12 lg:pr-2">
           <BrandLogo size="sm" />
         </div>
 
@@ -338,7 +338,7 @@ export function DashboardLayout() {
               type="button"
               onClick={() => setMobileNavOpen(false)}
               aria-label="Close sidebar"
-              className="absolute top-3.5 right-3.5 inline-flex h-10 w-10 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+              className="absolute top-3.5 right-3.5 inline-flex h-11 w-11 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
             >
               <X className="h-5 w-5" />
             </button>
@@ -374,7 +374,7 @@ export function DashboardLayout() {
           </div>
         </header>
 
-        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+        <main className="mx-auto w-full max-w-6xl flex-1 px-3.5 py-5 sm:px-6 lg:px-8 lg:py-8">
           {loadingData ? (
             <div className="space-y-6">
               <div className="h-44 animate-pulse rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0D162B]" />

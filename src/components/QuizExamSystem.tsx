@@ -637,37 +637,37 @@ export function QuizExamSystem({
           </div>
         )}
 
-        <section className="rounded-2xl border border-slate-200 bg-white p-6 sm:p-8 dark:border-slate-800 dark:bg-[#0D162B]">
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-8 dark:border-slate-800 dark:bg-[#0D162B]">
           <p className="text-xs font-semibold tracking-wide text-[#1D4ED8] dark:text-[#38BDF8]">
             {isTimedExam ? 'Timed Exam Instructions' : 'Practice Session Instructions'} ·{' '}
             {activeQuiz.subjectArea}
           </p>
-          <h2 className="mt-1.5 font-display text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
+          <h2 className="mt-1.5 font-display text-xl font-bold tracking-tight text-slate-900 sm:text-2xl dark:text-white">
             {activeQuiz.title}
           </h2>
 
-          <div className="mt-6 grid grid-cols-2 gap-3.5 sm:grid-cols-4">
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+          <div className="mt-5 grid grid-cols-1 gap-3 min-[360px]:grid-cols-2 sm:mt-6 sm:grid-cols-4 sm:gap-3.5">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
               <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Questions</p>
               <p className="mt-1 font-mono text-lg font-bold text-slate-900 tabular-nums dark:text-white">
                 {activeQuiz.questions.length}
               </p>
             </div>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
               <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Total Marks</p>
               <p className="mt-1 font-mono text-lg font-bold text-slate-900 tabular-nums dark:text-white">
                 {totalMarks}
               </p>
             </div>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
               <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Format</p>
-              <p className="mt-1 text-sm font-semibold capitalize text-slate-900 dark:text-white">
+              <p className="mt-1 text-xs font-semibold capitalize text-slate-900 sm:text-sm dark:text-white">
                 {activeQuiz.format} · {activeQuiz.difficulty}
               </p>
             </div>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
               <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Duration</p>
-              <p className="mt-1 font-mono text-sm font-bold text-[#1D4ED8] tabular-nums dark:text-[#38BDF8]">
+              <p className="mt-1 font-mono text-xs font-bold text-[#1D4ED8] tabular-nums sm:text-sm dark:text-[#38BDF8]">
                 {isTimedExam ? `${activeQuiz.timeLimitMinutes} mins` : 'Untimed'}
               </p>
             </div>
@@ -703,21 +703,21 @@ export function QuizExamSystem({
             </ul>
           </div>
 
-          <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 pt-5 dark:border-slate-800">
+          <div className="mt-6 flex flex-col-reverse gap-3 border-t border-slate-200 pt-5 sm:flex-row sm:items-center sm:justify-between dark:border-slate-800">
             <button
               type="button"
               onClick={() => {
                 setActiveQuiz(null);
                 setStage('setup');
               }}
-              className="min-h-11 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              className="min-h-11 w-full rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 sm:w-auto dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               Back to Setup
             </button>
             <button
               type="button"
               onClick={() => startExamSession(activeQuiz)}
-              className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-[#0F1E3D] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] dark:bg-[#1D4ED8] dark:hover:bg-blue-500"
+              className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] sm:w-auto dark:bg-[#1D4ED8] dark:hover:bg-blue-500"
             >
               <Play className="h-4 w-4" aria-hidden="true" />
               <span>Begin Assessment</span>
@@ -744,19 +744,19 @@ export function QuizExamSystem({
     return (
       <div className="space-y-6">
         {/* Examination Top Status Bar */}
-        <section className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-[#0D162B]">
-          <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-[#0D162B]">
+          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center sm:gap-4">
             <div className="min-w-0">
               <p className="text-xs font-semibold tracking-wide text-blue-700 select-none dark:text-cyan-400">
                 Examination Mode · {activeQuiz.format.toUpperCase()} · {activeQuiz.difficulty.toUpperCase()}
               </p>
-              <h2 className="mt-0.5 truncate font-display text-lg font-bold text-slate-900 select-none dark:text-white">
+              <h2 className="mt-0.5 truncate font-display text-base font-bold text-slate-900 select-none sm:text-lg dark:text-white">
                 {activeQuiz.title}
               </h2>
             </div>
 
-            <div className="flex flex-wrap items-center gap-3 shrink-0 select-none">
-              <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 font-mono text-xs font-semibold tabular-nums text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+            <div className="flex flex-wrap items-center gap-2.5 shrink-0 select-none sm:gap-3">
+              <div className="flex min-h-10 items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 font-mono text-xs font-semibold tabular-nums text-slate-800 sm:min-h-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
                 <Clock className="h-3.5 w-3.5 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
                 {remainingSeconds !== null ? (
                   <span className={remainingSeconds <= 60 ? 'text-red-600 dark:text-red-400' : ''}>
@@ -771,7 +771,7 @@ export function QuizExamSystem({
                 type="button"
                 onClick={() => setShowSubmitConfirm(true)}
                 disabled={grading}
-                className="rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-60 whitespace-nowrap shrink-0 dark:bg-blue-600 dark:hover:bg-blue-500"
+                className="inline-flex min-h-10 flex-1 items-center justify-center rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-60 whitespace-nowrap shrink-0 sm:min-h-9 sm:flex-initial dark:bg-blue-600 dark:hover:bg-blue-500"
               >
                 {grading ? 'Grading...' : 'Submit Examination'}
               </button>
@@ -819,8 +819,8 @@ export function QuizExamSystem({
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           {/* Question Stage */}
           <div className="lg:col-span-8">
-            <div className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
-              <div className="flex items-center justify-between gap-3 border-b border-slate-200 pb-4 select-none dark:border-slate-800">
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3.5 select-none sm:gap-3 sm:pb-4 dark:border-slate-800">
                 <span className="font-mono text-xs font-semibold text-slate-500 tabular-nums dark:text-slate-400">
                   Question {currentIdx + 1} ·{' '}
                   {currentQuestion.type === 'objective' ? 'Objective (1 mark)' : `Theory (${currentQuestion.maxMarks} marks)`}
@@ -832,7 +832,7 @@ export function QuizExamSystem({
                 )}
               </div>
 
-              <h3 className="mt-5 font-display text-lg font-semibold leading-snug text-slate-900 academic-selectable dark:text-white">
+              <h3 className="mt-4 font-display text-base font-semibold leading-snug text-slate-900 academic-selectable sm:mt-5 sm:text-lg dark:text-white">
                 {currentQuestion.question}
               </h3>
 
@@ -940,12 +940,12 @@ export function QuizExamSystem({
               )}
 
               {/* Previous / Next Controls */}
-              <div className="mt-6 flex items-center justify-between border-t border-slate-200 pt-5 select-none dark:border-slate-800">
+              <div className="mt-6 flex items-center justify-between gap-3 border-t border-slate-200 pt-5 select-none dark:border-slate-800">
                 <button
                   type="button"
                   onClick={() => setCurrentIdx((i) => Math.max(0, i - 1))}
                   disabled={currentIdx === 0}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                  className="inline-flex min-h-11 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-40 sm:min-h-9 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
                 >
                   <ChevronLeft className="h-4 w-4" aria-hidden="true" />
                   <span>Previous</span>
@@ -955,7 +955,7 @@ export function QuizExamSystem({
                   <button
                     type="button"
                     onClick={() => setCurrentIdx((i) => Math.min(total - 1, i + 1))}
-                    className="inline-flex items-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] dark:bg-blue-600 dark:hover:bg-blue-500"
+                    className="inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-[#0F1E3D] px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] sm:min-h-9 sm:px-4 dark:bg-blue-600 dark:hover:bg-blue-500"
                   >
                     <span>Next</span>
                     <ChevronRight className="h-4 w-4" aria-hidden="true" />
@@ -965,7 +965,7 @@ export function QuizExamSystem({
                     type="button"
                     onClick={() => setShowSubmitConfirm(true)}
                     disabled={grading}
-                    className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 disabled:opacity-60"
+                    className="inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-blue-600 px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 disabled:opacity-60 sm:min-h-9"
                   >
                     <span>Review & Submit</span>
                   </button>
@@ -976,7 +976,7 @@ export function QuizExamSystem({
 
           {/* Question Navigation Panel */}
           <aside className="lg:col-span-4">
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 select-none dark:border-slate-800 dark:bg-[#0D162B]">
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 select-none sm:p-5 dark:border-slate-800 dark:bg-[#0D162B]">
               <h3 className="font-display text-sm font-bold text-slate-900 dark:text-white">
                 Question Navigator
               </h3>
@@ -994,7 +994,7 @@ export function QuizExamSystem({
                       type="button"
                       onClick={() => setCurrentIdx(idx)}
                       aria-label={`Question ${idx + 1}${answered ? ' (answered)' : ' (unanswered)'}`}
-                      className={`h-9 rounded-lg font-mono text-xs font-semibold tabular-nums transition-colors ${
+                      className={`h-10 rounded-lg font-mono text-xs font-semibold tabular-nums transition-colors sm:h-9 ${
                         isCurrent
                           ? 'bg-[#0F1E3D] text-white ring-2 ring-blue-500 ring-offset-1 dark:bg-blue-600 dark:ring-cyan-400 dark:ring-offset-slate-950'
                           : answered
@@ -1042,12 +1042,12 @@ export function QuizExamSystem({
                   </span>
                 )}
               </p>
-              <div className="mt-6 flex items-center justify-end gap-3 select-none">
+              <div className="mt-6 flex flex-col-reverse gap-2.5 select-none sm:flex-row sm:items-center sm:justify-end sm:gap-3">
                 <button
                   type="button"
                   onClick={() => setShowSubmitConfirm(false)}
                   disabled={grading}
-                  className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                  className="min-h-11 w-full rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 sm:min-h-9 sm:w-auto dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
                 >
                   Continue Exam
                 </button>
@@ -1055,7 +1055,7 @@ export function QuizExamSystem({
                   type="button"
                   onClick={() => submitExamination(false)}
                   disabled={grading}
-                  className="inline-flex items-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2 text-xs font-semibold text-white hover:bg-[#192F5D] disabled:opacity-60 dark:bg-blue-600 dark:hover:bg-blue-500"
+                  className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2 text-xs font-semibold text-white hover:bg-[#192F5D] disabled:opacity-60 sm:min-h-9 sm:w-auto dark:bg-blue-600 dark:hover:bg-blue-500"
                 >
                   {grading ? (
                     <>
@@ -1111,7 +1111,7 @@ export function QuizExamSystem({
             <span>{cloudNotice}</span>
           </div>
         )}
-        <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
           <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-5 sm:flex-row sm:items-center dark:border-slate-800">
             <div>
               <p className="text-xs font-semibold tracking-wide text-blue-700 select-none dark:text-cyan-400">
@@ -1122,7 +1122,7 @@ export function QuizExamSystem({
                   ? ` · ${new Date(resultMeta.createdAt).toLocaleString()}`
                   : ''}
               </p>
-              <h2 className="mt-1 font-display text-2xl font-bold text-slate-900 select-text dark:text-white">
+              <h2 className="mt-1 font-display text-xl font-bold text-slate-900 select-text sm:text-2xl dark:text-white">
                 {resultMeta.title}
               </h2>
             </div>
@@ -1132,7 +1132,7 @@ export function QuizExamSystem({
                 <button
                   type="button"
                   onClick={() => startExamSession(activeQuiz)}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                  className="inline-flex min-h-11 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 sm:min-h-10 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
                 >
                   <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
                   <span>Retake Assessment</span>
@@ -1141,7 +1141,7 @@ export function QuizExamSystem({
               <button
                 type="button"
                 onClick={() => setStage('setup')}
-                className="inline-flex min-h-10 items-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white hover:bg-[#192F5D] dark:bg-blue-600 dark:hover:bg-blue-500"
+                className="inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white hover:bg-[#192F5D] sm:min-h-10 dark:bg-blue-600 dark:hover:bg-blue-500"
               >
                 <span>New Quiz or History</span>
               </button>
@@ -1158,60 +1158,60 @@ export function QuizExamSystem({
           />
 
           {/* Metrics Grid */}
-          <div className="mt-6 grid grid-cols-2 gap-3.5 sm:grid-cols-4 lg:grid-cols-7">
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+          <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-3.5 lg:grid-cols-7">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
               <p className="text-[11px] font-medium text-slate-500 select-none dark:text-slate-400">
                 Percentage
               </p>
-              <p className="mt-1 font-mono text-xl font-bold text-blue-700 tabular-nums dark:text-cyan-400">
+              <p className="mt-1 font-mono text-lg font-bold text-blue-700 tabular-nums sm:text-xl dark:text-cyan-400">
                 {gradingResult.percentage}%
               </p>
             </div>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
               <p className="text-[11px] font-medium text-slate-500 select-none dark:text-slate-400">
                 Total Score
               </p>
-              <p className="mt-1 font-mono text-xl font-bold text-slate-900 tabular-nums dark:text-white">
+              <p className="mt-1 font-mono text-lg font-bold text-slate-900 tabular-nums sm:text-xl dark:text-white">
                 {gradingResult.earnedMarks}/{gradingResult.maxMarks}
               </p>
             </div>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
               <p className="text-[11px] font-medium text-slate-500 select-none dark:text-slate-400">
                 Total Questions
               </p>
-              <p className="mt-1 font-mono text-xl font-bold text-slate-900 tabular-nums dark:text-white">
+              <p className="mt-1 font-mono text-lg font-bold text-slate-900 tabular-nums sm:text-xl dark:text-white">
                 {gradingResult.totalQuestions}
               </p>
             </div>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
               <p className="text-[11px] font-medium text-emerald-700 select-none dark:text-emerald-400">
                 Correct
               </p>
-              <p className="mt-1 font-mono text-xl font-bold text-emerald-700 tabular-nums dark:text-emerald-400">
+              <p className="mt-1 font-mono text-lg font-bold text-emerald-700 tabular-nums sm:text-xl dark:text-emerald-400">
                 {gradingResult.correctCount}
               </p>
             </div>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
               <p className="text-[11px] font-medium text-red-700 select-none dark:text-red-400">
                 Incorrect
               </p>
-              <p className="mt-1 font-mono text-xl font-bold text-red-700 tabular-nums dark:text-red-400">
+              <p className="mt-1 font-mono text-lg font-bold text-red-700 tabular-nums sm:text-xl dark:text-red-400">
                 {gradingResult.incorrectCount}
               </p>
             </div>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
               <p className="text-[11px] font-medium text-slate-500 select-none dark:text-slate-400">
                 Unanswered
               </p>
-              <p className="mt-1 font-mono text-xl font-bold text-slate-700 tabular-nums dark:text-slate-300">
+              <p className="mt-1 font-mono text-lg font-bold text-slate-700 tabular-nums sm:text-xl dark:text-slate-300">
                 {gradingResult.unansweredCount}
               </p>
             </div>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+            <div className="col-span-2 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:col-span-1 sm:p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
               <p className="text-[11px] font-medium text-slate-500 select-none dark:text-slate-400">
                 Time Taken
               </p>
-              <p className="mt-1 font-mono text-xl font-bold text-slate-900 tabular-nums dark:text-white">
+              <p className="mt-1 font-mono text-lg font-bold text-slate-900 tabular-nums sm:text-xl dark:text-white">
                 {formatSeconds(gradingResult.timeTakenSeconds)}
               </p>
             </div>
@@ -1288,7 +1288,7 @@ export function QuizExamSystem({
         </section>
 
         {/* Question-by-Question Review */}
-        <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
           <h3 className="font-display text-lg font-bold text-slate-900 select-none dark:text-white">
             Question-by-Question Review
           </h3>
@@ -1436,14 +1436,14 @@ export function QuizExamSystem({
 
           <div
             role="tablist"
-            className="inline-flex items-center rounded-xl border border-slate-200 bg-slate-100 p-1 select-none dark:border-slate-800 dark:bg-slate-900"
+            className="flex w-full items-center rounded-xl border border-slate-200 bg-slate-100 p-1 select-none sm:inline-flex sm:w-auto dark:border-slate-800 dark:bg-slate-900"
           >
             <button
               type="button"
               role="tab"
               aria-selected={setupTab === 'create'}
               onClick={() => setSetupTab('create')}
-              className={`min-h-9 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              className={`min-h-10 flex-1 rounded-lg px-2.5 py-1.5 text-center text-xs font-semibold transition-colors whitespace-nowrap sm:min-h-9 sm:flex-initial sm:px-3 ${
                 setupTab === 'create'
                   ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
                   : 'text-slate-600 hover:text-slate-900 dark:text-slate-400'
@@ -1456,7 +1456,7 @@ export function QuizExamSystem({
               role="tab"
               aria-selected={setupTab === 'saved'}
               onClick={() => setSetupTab('saved')}
-              className={`min-h-9 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              className={`min-h-10 flex-1 rounded-lg px-2.5 py-1.5 text-center text-xs font-semibold transition-colors whitespace-nowrap sm:min-h-9 sm:flex-initial sm:px-3 ${
                 setupTab === 'saved'
                   ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
                   : 'text-slate-600 hover:text-slate-900 dark:text-slate-400'
@@ -1469,7 +1469,7 @@ export function QuizExamSystem({
               role="tab"
               aria-selected={setupTab === 'history'}
               onClick={() => setSetupTab('history')}
-              className={`min-h-9 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              className={`min-h-10 flex-1 rounded-lg px-2.5 py-1.5 text-center text-xs font-semibold transition-colors whitespace-nowrap sm:min-h-9 sm:flex-initial sm:px-3 ${
                 setupTab === 'history'
                   ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
                   : 'text-slate-600 hover:text-slate-900 dark:text-slate-400'
@@ -1505,7 +1505,7 @@ export function QuizExamSystem({
               <p className="mb-2.5 text-xs font-semibold text-slate-700 select-none dark:text-slate-300">
                 1. Assessment Source
               </p>
-              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 select-none">
+              <div className="grid grid-cols-1 gap-2.5 min-[360px]:grid-cols-2 sm:grid-cols-4 select-none">
                 {(
                   [
                     { id: 'material' as QuizSourceMode, label: 'Uploaded Material' },
@@ -1520,7 +1520,7 @@ export function QuizExamSystem({
                       key={item.id}
                       type="button"
                       onClick={() => setSourceMode(item.id)}
-                      className={`rounded-xl border px-3 py-2.5 text-xs font-semibold transition-colors ${
+                      className={`min-h-11 rounded-xl border px-3 py-2.5 text-xs font-semibold transition-colors ${
                         active
                           ? 'border-blue-600 bg-blue-50 text-blue-800 dark:border-cyan-400 dark:bg-blue-950/40 dark:text-cyan-300'
                           : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-300'
@@ -1544,7 +1544,7 @@ export function QuizExamSystem({
                       <select
                         value={selectedMaterialId}
                         onChange={(e) => setSelectedMaterialId(e.target.value)}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                        className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                       >
                         {materials.map((m) => (
                           <option key={m.id} value={m.id}>
@@ -1567,7 +1567,7 @@ export function QuizExamSystem({
                       <select
                         value={selectedSummaryId}
                         onChange={(e) => setSelectedSummaryId(e.target.value)}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                        className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                       >
                         {summaries.map((s) => (
                           <option key={s.id} value={s.id}>
@@ -1586,7 +1586,7 @@ export function QuizExamSystem({
                       value={topicTitle}
                       onChange={(e) => setTopicTitle(e.target.value)}
                       placeholder="Assessment title (optional)"
-                      className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                      className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                     />
                     <textarea
                       rows={5}
@@ -1604,7 +1604,7 @@ export function QuizExamSystem({
                     value={topicTitle}
                     onChange={(e) => setTopicTitle(e.target.value)}
                     placeholder="Enter subject or topic (e.g., Keynesian Macroeconomics, Cellular Mitosis, Thermodynamics)"
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                    className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                   />
                 )}
               </div>
@@ -1668,7 +1668,7 @@ export function QuizExamSystem({
             </div>
 
             {/* Parameters Row */}
-            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4 select-none">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5 lg:grid-cols-4 select-none">
               {/* Format */}
               <div>
                 <label className="mb-2 block text-xs font-semibold text-slate-700 dark:text-slate-300">
@@ -1677,7 +1677,7 @@ export function QuizExamSystem({
                 <select
                   value={format}
                   onChange={(e) => setFormat(e.target.value as QuizFormat)}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                  className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                 >
                   <option value="objective">Objective (MCQ — A/B/C/D)</option>
                   <option value="theory">Theory (Short & Long Answer)</option>
@@ -1693,7 +1693,7 @@ export function QuizExamSystem({
                 <select
                   value={questionCount}
                   onChange={(e) => setQuestionCount(Number(e.target.value) as QuizQuestionCount)}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm font-mono text-slate-900 tabular-nums focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                  className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm font-mono text-slate-900 tabular-nums focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                 >
                   <option value={10}>10 Questions</option>
                   <option value={20}>20 Questions</option>
@@ -1710,7 +1710,7 @@ export function QuizExamSystem({
                 <select
                   value={difficulty}
                   onChange={(e) => setDifficulty(e.target.value as QuizDifficulty)}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                  className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                 >
                   <option value="easy">Easy (Foundational)</option>
                   <option value="intermediate">Intermediate (Conceptual)</option>
@@ -1728,7 +1728,7 @@ export function QuizExamSystem({
                   <select
                     value={timeLimitMinutes}
                     onChange={(e) => setTimeLimitMinutes(Number(e.target.value))}
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                    className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                   >
                     <option value={10}>10 Minutes</option>
                     <option value={20}>20 Minutes</option>
@@ -1737,7 +1737,7 @@ export function QuizExamSystem({
                     <option value={60}>60 Minutes</option>
                   </select>
                 ) : (
-                  <div className="rounded-xl border border-slate-200 bg-slate-100 px-3.5 py-2.5 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-400">
+                  <div className="flex min-h-11 items-center rounded-xl border border-slate-200 bg-slate-100 px-3.5 py-2.5 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-400">
                     Untimed (Practice)
                   </div>
                 )}
@@ -1748,7 +1748,7 @@ export function QuizExamSystem({
               <button
                 type="submit"
                 disabled={generating || !geminiConfigured}
-                className="inline-flex items-center gap-2 rounded-xl bg-[#0F1E3D] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500"
+                className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 sm:w-auto dark:bg-blue-600 dark:hover:bg-blue-500"
               >
                 {generating ? (
                   <>
@@ -1807,7 +1807,7 @@ export function QuizExamSystem({
                             questions: q.questions,
                           })
                         }
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-[#0F1E3D] px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-[#192F5D] dark:bg-blue-600 dark:hover:bg-blue-500"
+                        className="inline-flex min-h-10 items-center gap-1.5 rounded-lg bg-[#0F1E3D] px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-[#192F5D] sm:min-h-8 dark:bg-blue-600 dark:hover:bg-blue-500"
                       >
                         <Play className="h-3.5 w-3.5" aria-hidden="true" />
                         <span>Take Exam</span>
@@ -1816,7 +1816,7 @@ export function QuizExamSystem({
                         type="button"
                         onClick={() => setDeleteTarget({ kind: 'quiz', item: q })}
                         aria-label={`Delete ${q.title}`}
-                        className="inline-flex items-center justify-center rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-red-950/30 dark:hover:text-red-400"
+                        className="inline-flex min-h-10 min-w-10 items-center justify-center rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 sm:min-h-8 sm:min-w-8 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-red-950/30 dark:hover:text-red-400"
                       >
                         <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                       </button>
@@ -1868,7 +1868,7 @@ export function QuizExamSystem({
                         <button
                           type="button"
                           onClick={() => reopenPastAttempt(att)}
-                          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                          className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
                         >
                           <FileCheck2 className="h-3.5 w-3.5" aria-hidden="true" />
                           <span>View Results</span>
@@ -1877,7 +1877,7 @@ export function QuizExamSystem({
                           type="button"
                           onClick={() => setDeleteTarget({ kind: 'attempt', item: att })}
                           aria-label={`Delete attempt ${att.title}`}
-                          className="inline-flex items-center justify-center rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-red-950/30 dark:hover:text-red-400"
+                          className="inline-flex min-h-10 min-w-10 items-center justify-center rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 sm:min-h-8 sm:min-w-8 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-red-950/30 dark:hover:text-red-400"
                         >
                           <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                         </button>

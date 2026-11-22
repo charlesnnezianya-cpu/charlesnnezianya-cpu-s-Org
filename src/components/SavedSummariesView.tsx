@@ -138,7 +138,7 @@ export function SavedSummariesView({
           <button
             type="button"
             onClick={() => setSelectedSummary(null)}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-[#0D162B] dark:text-slate-200 dark:hover:bg-slate-900"
+            className="inline-flex min-h-10 sm:min-h-9 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-[#0D162B] dark:text-slate-200 dark:hover:bg-slate-900"
           >
             <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
             <span>Back to Saved Summaries</span>
@@ -146,7 +146,7 @@ export function SavedSummariesView({
 
           <div className="flex flex-wrap items-center gap-2">
             {renamingId === selectedSummary.id ? (
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <input
                   type="text"
                   value={renameDraft}
@@ -156,14 +156,14 @@ export function SavedSummariesView({
                     if (e.key === 'Escape') cancelRename();
                   }}
                   aria-label="New summary title"
-                  className="rounded-lg border border-blue-500 bg-white px-3 py-1.5 text-xs font-medium text-slate-900 select-text focus:outline-none dark:bg-slate-900 dark:text-white"
+                  className="min-h-10 rounded-lg border border-blue-500 bg-white px-3 py-1.5 text-xs font-medium text-slate-900 select-text focus:outline-none dark:bg-slate-900 dark:text-white"
                 />
                 <button
                   type="button"
                   onClick={() => submitRename(selectedSummary)}
                   disabled={savingRename}
                   aria-label="Save new title"
-                  className="inline-flex items-center gap-1 rounded-lg bg-[#0F1E3D] px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-[#192F5D] disabled:opacity-50 dark:bg-blue-600"
+                  className="inline-flex min-h-10 items-center gap-1 rounded-lg bg-[#0F1E3D] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#192F5D] disabled:opacity-50 dark:bg-blue-600"
                 >
                   <Check className="h-3.5 w-3.5" aria-hidden="true" />
                   <span>Save</span>
@@ -172,7 +172,7 @@ export function SavedSummariesView({
                   type="button"
                   onClick={cancelRename}
                   aria-label="Cancel rename"
-                  className="rounded-lg border border-slate-200 bg-white p-1.5 text-slate-500 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900"
+                  className="inline-flex min-h-10 min-w-10 items-center justify-center rounded-lg border border-slate-200 bg-white p-1.5 text-slate-500 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900"
                 >
                   <X className="h-3.5 w-3.5" aria-hidden="true" />
                 </button>
@@ -181,7 +181,7 @@ export function SavedSummariesView({
               <button
                 type="button"
                 onClick={() => startRename(selectedSummary)}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-[#0D162B] dark:text-slate-200 dark:hover:bg-slate-900"
+                className="inline-flex min-h-10 sm:min-h-9 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-800 dark:bg-[#0D162B] dark:text-slate-200 dark:hover:bg-slate-900"
               >
                 <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>Rename</span>
@@ -192,7 +192,7 @@ export function SavedSummariesView({
               type="button"
               onClick={() => setConfirmTarget(selectedSummary)}
               disabled={deletingId === selectedSummary.id}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-red-700 hover:bg-red-50 dark:border-slate-800 dark:bg-[#0D162B] dark:text-red-400 dark:hover:bg-red-950/30"
+              className="inline-flex min-h-10 sm:min-h-9 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-red-700 hover:bg-red-50 dark:border-slate-800 dark:bg-[#0D162B] dark:text-red-400 dark:hover:bg-red-950/30"
             >
               <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
               <span>Delete</span>
@@ -246,7 +246,7 @@ export function SavedSummariesView({
         <button
           type="button"
           onClick={onOpenSummarizer}
-          className="rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white hover:bg-[#192F5D] whitespace-nowrap shrink-0 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
+          className="min-h-11 sm:min-h-9 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white hover:bg-[#192F5D] whitespace-nowrap shrink-0 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
         >
           New Summary
         </button>
@@ -264,7 +264,7 @@ export function SavedSummariesView({
 
       {/* Filter & Search Bar */}
       <div className="mt-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-        <div className="relative flex-1 max-w-md">
+        <div className="relative flex-1 sm:max-w-md">
           <Search
             className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
             aria-hidden="true"
@@ -274,11 +274,11 @@ export function SavedSummariesView({
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search by title or subject..."
-            className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+            className="min-h-11 sm:min-h-10 w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
           />
         </div>
 
-        <div className="inline-flex flex-wrap items-center rounded-xl border border-slate-200 bg-slate-100 p-1 select-none dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex w-full flex-nowrap items-center gap-1 overflow-x-auto rounded-xl border border-slate-200 bg-slate-100 p-1 select-none sm:inline-flex sm:w-auto sm:flex-wrap sm:overflow-visible dark:border-slate-800 dark:bg-slate-900">
           {(
             [
               { id: 'all', label: 'All' },
@@ -293,7 +293,7 @@ export function SavedSummariesView({
                 key={tab.id}
                 type="button"
                 onClick={() => setLevelFilter(tab.id)}
-                className={`rounded-lg px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                className={`min-h-9 sm:min-h-8 rounded-lg px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
                   active
                     ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
                     : 'text-slate-600 hover:text-slate-900 dark:text-slate-400'
@@ -378,11 +378,11 @@ export function SavedSummariesView({
                   )}
                 </div>
 
-                <div className="flex items-center gap-2 shrink-0 select-none">
+                <div className="flex flex-wrap items-center gap-2 shrink-0 select-none">
                   <button
                     type="button"
                     onClick={() => setSelectedSummary(item)}
-                    className="rounded-lg border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                    className="min-h-10 sm:min-h-8 rounded-lg border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
                   >
                     Open Summary
                   </button>
@@ -391,7 +391,7 @@ export function SavedSummariesView({
                       type="button"
                       onClick={() => startRename(item)}
                       aria-label={`Rename ${item.title}`}
-                      className="rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-slate-50 hover:text-slate-800 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                      className="inline-flex min-h-10 min-w-10 sm:min-h-8 sm:min-w-8 items-center justify-center rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-slate-50 hover:text-slate-800 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
                     >
                       <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
                     </button>
@@ -401,7 +401,7 @@ export function SavedSummariesView({
                     onClick={() => setConfirmTarget(item)}
                     disabled={deletingId === item.id}
                     aria-label={`Delete ${item.title}`}
-                    className="rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-red-950/30 dark:hover:text-red-400"
+                    className="inline-flex min-h-10 min-w-10 sm:min-h-8 sm:min-w-8 items-center justify-center rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-red-950/30 dark:hover:text-red-400"
                   >
                     <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                   </button>

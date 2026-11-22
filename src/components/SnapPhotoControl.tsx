@@ -300,7 +300,7 @@ export function SnapTriggerButtons({
           onClick={() => setCameraOpen(true)}
           title="Snap a photo with camera"
           aria-label="Snap a photo with camera"
-          className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          className="inline-flex h-11 min-w-11 sm:h-10 sm:min-w-0 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
         >
           <Camera className="h-4 w-4 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
           <span className="hidden sm:inline">Snap Photo</span>
@@ -312,7 +312,7 @@ export function SnapTriggerButtons({
           onClick={() => uploadInputRef.current?.click()}
           title="Upload image (JPG, PNG, WEBP)"
           aria-label="Upload image"
-          className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          className="inline-flex h-11 min-w-11 sm:h-10 sm:min-w-0 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
         >
           <ImagePlus className="h-4 w-4 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
           <span className="hidden sm:inline">Upload Image</span>
@@ -354,7 +354,7 @@ export function SnapTriggerButtons({
                 type="button"
                 onClick={() => setCameraOpen(false)}
                 aria-label="Close camera"
-                className="rounded-lg p-1 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+                className="inline-flex h-10 w-10 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -504,7 +504,7 @@ export function SnapAttachmentPreview({
             type="button"
             disabled={disabled}
             onClick={() => replaceInputRef.current?.click()}
-            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            className="inline-flex min-h-9 sm:min-h-7 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
           >
             <RefreshCw className="h-3 w-3" aria-hidden="true" />
             <span>Replace</span>
@@ -513,7 +513,7 @@ export function SnapAttachmentPreview({
             type="button"
             disabled={disabled}
             onClick={onRemove}
-            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-rose-400 dark:hover:bg-rose-950/40"
+            className="inline-flex min-h-9 sm:min-h-7 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-rose-400 dark:hover:bg-rose-950/40"
           >
             <Trash2 className="h-3 w-3" aria-hidden="true" />
             <span>Remove</span>
@@ -529,8 +529,8 @@ export function SnapAttachmentPreview({
       </div>
 
       {/* 7 Dedicated Image Action Buttons */}
-      <div className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-blue-200/70 pt-2.5 select-none dark:border-blue-900/50">
-        <span className="mr-1 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+      <div className="mt-2.5 flex flex-nowrap items-center gap-1.5 overflow-x-auto border-t border-blue-200/70 pt-2.5 pb-1 select-none sm:flex-wrap sm:overflow-visible sm:pb-0 dark:border-blue-900/50">
+        <span className="mr-1 shrink-0 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
           Image Actions:
         </span>
         {IMAGE_ACTIONS.map((action) => (
@@ -545,7 +545,7 @@ export function SnapAttachmentPreview({
                 onQuickAction(action.id, action.defaultPrompt);
               }
             }}
-            className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 transition-colors hover:border-blue-400 hover:bg-blue-50 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-cyan-500 dark:hover:bg-slate-800 dark:hover:text-cyan-300"
+            className="min-h-9 sm:min-h-7 shrink-0 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 whitespace-nowrap transition-colors hover:border-blue-400 hover:bg-blue-50 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-cyan-500 dark:hover:bg-slate-800 dark:hover:text-cyan-300"
           >
             {action.label}
           </button>

@@ -121,7 +121,7 @@ export function ProfileSettingsView() {
               required
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
-              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+              className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none sm:min-h-10 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
             />
           </div>
 
@@ -137,7 +137,7 @@ export function ProfileSettingsView() {
               type="email"
               disabled
               value={user?.email || ''}
-              className="w-full rounded-xl border border-slate-200 bg-slate-100 px-3.5 py-2.5 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-400"
+              className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-100 px-3.5 py-2.5 text-sm text-slate-500 sm:min-h-10 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-400"
             />
           </div>
 
@@ -157,7 +157,7 @@ export function ProfileSettingsView() {
             <button
               type="submit"
               disabled={savingName}
-              className="inline-flex items-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2 text-xs font-semibold text-white hover:bg-[#192F5D] disabled:opacity-60 dark:bg-blue-600 dark:hover:bg-blue-500"
+              className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2 text-xs font-semibold text-white hover:bg-[#192F5D] disabled:opacity-60 sm:min-h-9 sm:w-auto dark:bg-blue-600 dark:hover:bg-blue-500"
             >
               <Save className="h-3.5 w-3.5" aria-hidden="true" />
               <span>{savingName ? 'Saving...' : 'Save Changes'}</span>
@@ -188,7 +188,7 @@ export function ProfileSettingsView() {
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 placeholder="At least 8 characters"
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-sm text-slate-900 select-text focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-sm text-slate-900 select-text focus:border-blue-600 focus:outline-none sm:min-h-10 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
               />
             </div>
             <div>
@@ -206,7 +206,7 @@ export function ProfileSettingsView() {
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 placeholder="Repeat new password"
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-sm text-slate-900 select-text focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-sm text-slate-900 select-text focus:border-blue-600 focus:outline-none sm:min-h-10 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
               />
             </div>
           </div>
@@ -214,7 +214,7 @@ export function ProfileSettingsView() {
             <button
               type="submit"
               disabled={savingPassword}
-              className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              className="min-h-11 w-full rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50 disabled:opacity-60 sm:min-h-9 sm:w-auto dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               {savingPassword ? 'Updating...' : 'Update Password'}
             </button>
@@ -235,7 +235,7 @@ export function ProfileSettingsView() {
         <button
           type="button"
           onClick={() => signOut()}
-          className="inline-flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-xs font-semibold text-red-700 hover:bg-red-100 select-none dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300 dark:hover:bg-red-950"
+          className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-xs font-semibold text-red-700 hover:bg-red-100 select-none sm:min-h-9 sm:w-auto dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300 dark:hover:bg-red-950"
         >
           <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
           <span>Sign Out</span>

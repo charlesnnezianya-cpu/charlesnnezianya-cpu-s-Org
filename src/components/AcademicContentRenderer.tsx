@@ -117,7 +117,7 @@ function renderInlineSegments(text: string, keyPrefix: string): React.ReactNode[
       return (
         <span
           key={key}
-          className="mx-0.5 inline-block rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[0.9em] font-medium text-[#0F1E3D] dark:bg-slate-800/90 dark:text-sky-300"
+          className="mx-0.5 inline-block max-w-full overflow-x-auto align-bottom rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[0.9em] font-medium text-[#0F1E3D] dark:bg-slate-800/90 dark:text-sky-300"
         >
           {renderMathText(token.slice(2, -2), key)}
         </span>
@@ -127,7 +127,7 @@ function renderInlineSegments(text: string, keyPrefix: string): React.ReactNode[
       return (
         <span
           key={key}
-          className="mx-0.5 inline-block rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[0.9em] font-medium text-[#0F1E3D] dark:bg-slate-800/90 dark:text-sky-300"
+          className="mx-0.5 inline-block max-w-full overflow-x-auto align-bottom rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[0.9em] font-medium text-[#0F1E3D] dark:bg-slate-800/90 dark:text-sky-300"
         >
           {renderMathText(token.slice(1, -1), key)}
         </span>
@@ -426,7 +426,7 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
   };
 
   return (
-    <div className={`space-y-2.5 break-words academic-selectable ${className}`}>
+    <div className={`min-w-0 max-w-full space-y-2.5 break-words academic-selectable ${className}`}>
       {segments.map((seg, idx) => {
         if (!seg) return null;
 

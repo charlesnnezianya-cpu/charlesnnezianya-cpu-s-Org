@@ -519,7 +519,7 @@ export function AcademicHistoryView({
           <button
             type="button"
             onClick={() => setSortOrder((prev) => (prev === 'newest' ? 'oldest' : 'newest'))}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 whitespace-nowrap shrink-0 select-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            className="inline-flex min-h-10 sm:min-h-9 items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 whitespace-nowrap shrink-0 select-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
           >
             <ArrowUpDown className="h-3.5 w-3.5" aria-hidden="true" />
             <span>{sortOrder === 'newest' ? 'Newest First' : 'Oldest First'}</span>
@@ -539,7 +539,7 @@ export function AcademicHistoryView({
         {/* Filter Controls */}
         <div className="mt-5 space-y-3">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div className="relative flex-1 max-w-md">
+            <div className="relative w-full flex-1 lg:max-w-md">
               <Search
                 className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
                 aria-hidden="true"
@@ -549,11 +549,11 @@ export function AcademicHistoryView({
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search by title or subject..."
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                className="min-h-11 sm:min-h-10 w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
               />
             </div>
 
-            <div className="inline-flex flex-wrap items-center gap-1 rounded-xl border border-slate-200 bg-slate-100 p-1 select-none dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex w-full flex-nowrap items-center gap-1 overflow-x-auto rounded-xl border border-slate-200 bg-slate-100 p-1 select-none lg:inline-flex lg:w-auto lg:flex-wrap lg:overflow-visible dark:border-slate-800 dark:bg-slate-900">
               {(
                 [
                   { id: 'all', label: 'All Types' },
@@ -569,7 +569,7 @@ export function AcademicHistoryView({
                     key={tab.id}
                     type="button"
                     onClick={() => setTypeFilter(tab.id)}
-                    className={`rounded-lg px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap ${
+                    className={`min-h-9 sm:min-h-8 shrink-0 rounded-lg px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap ${
                       active
                         ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
                         : 'text-slate-600 hover:text-slate-900 dark:text-slate-400'
@@ -600,7 +600,7 @@ export function AcademicHistoryView({
                 key={opt.id}
                 type="button"
                 onClick={() => setDatePreset(opt.id)}
-                className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
+                className={`min-h-9 sm:min-h-7 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
                   datePreset === opt.id
                     ? 'border-blue-600 bg-blue-50 text-blue-800 dark:border-cyan-400 dark:bg-blue-950/40 dark:text-cyan-300'
                     : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300'
@@ -774,7 +774,7 @@ export function AcademicHistoryView({
                       <button
                         type="button"
                         onClick={() => onOpenAttempt(rec.attempt)}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                        className="inline-flex min-h-10 sm:min-h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
                       >
                         <FileCheck2 className="h-3.5 w-3.5" aria-hidden="true" />
                         <span>View Results</span>
@@ -786,7 +786,7 @@ export function AcademicHistoryView({
                         <button
                           type="button"
                           onClick={() => onOpenSummary(rec.summary.id)}
-                          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                          className="inline-flex min-h-10 sm:min-h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
                         >
                           <BookOpen className="h-3.5 w-3.5" aria-hidden="true" />
                           <span>Open Summary</span>
@@ -795,7 +795,7 @@ export function AcademicHistoryView({
                           type="button"
                           onClick={() => startRename(rec.summary)}
                           aria-label={`Rename ${rec.title}`}
-                          className="rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-slate-50 hover:text-slate-800 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-800"
+                          className="inline-flex min-h-10 min-w-10 sm:min-h-8 sm:min-w-8 items-center justify-center rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-slate-50 hover:text-slate-800 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-800"
                         >
                           <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
                         </button>
@@ -806,7 +806,7 @@ export function AcademicHistoryView({
                       <button
                         type="button"
                         onClick={() => onOpenChatSession(rec.session.id)}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                        className="inline-flex min-h-10 sm:min-h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
                       >
                         <MessageSquareText className="h-3.5 w-3.5" aria-hidden="true" />
                         <span>Continue Chat</span>
@@ -817,7 +817,7 @@ export function AcademicHistoryView({
                       <button
                         type="button"
                         onClick={() => onOpenTutorSession(rec.session.id)}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                        className="inline-flex min-h-10 sm:min-h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
                       >
                         <GraduationCap className="h-3.5 w-3.5" aria-hidden="true" />
                         <span>Resume Lesson</span>
@@ -828,7 +828,7 @@ export function AcademicHistoryView({
                       type="button"
                       onClick={() => setDeleteTarget(rec)}
                       aria-label={`Delete ${rec.title}`}
-                      className="rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-red-950/30 dark:hover:text-red-400"
+                      className="inline-flex min-h-10 min-w-10 sm:min-h-8 sm:min-w-8 items-center justify-center rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-red-950/30 dark:hover:text-red-400"
                     >
                       <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                     </button>

@@ -98,7 +98,7 @@ export function DashboardOverview({
   return (
     <div className="space-y-6">
       {/* Executive Welcome Card & Core Metrics */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-6 sm:p-8 dark:border-slate-800 dark:bg-[#0D162B]">
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-8 dark:border-slate-800 dark:bg-[#0D162B]">
         <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-center">
           <div>
             <p className="text-xs font-semibold tracking-wide text-[#1D4ED8] dark:text-[#38BDF8]">
@@ -205,12 +205,12 @@ export function DashboardOverview({
         </div>
 
         {/* Academic Performance Metrics Strip (strictly from Supabase data) */}
-        <div className="mt-6 grid grid-cols-2 gap-3.5 border-t border-slate-200 pt-6 lg:grid-cols-4 select-none dark:border-slate-800">
-          <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-900/40">
+        <div className="mt-6 grid grid-cols-1 gap-3 border-t border-slate-200 pt-5 min-[360px]:grid-cols-2 sm:gap-3.5 sm:pt-6 lg:grid-cols-4 select-none dark:border-slate-800">
+          <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 sm:p-4 dark:border-slate-800 dark:bg-slate-900/40">
             <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
               Saved Summaries
             </p>
-            <p className="mt-1 font-mono text-2xl font-bold text-slate-900 tabular-nums dark:text-white">
+            <p className="mt-1 font-mono text-xl font-bold text-slate-900 tabular-nums sm:text-2xl dark:text-white">
               {summaries.length}
             </p>
             <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
@@ -218,11 +218,11 @@ export function DashboardOverview({
             </p>
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-900/40">
+          <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 sm:p-4 dark:border-slate-800 dark:bg-slate-900/40">
             <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
               Completed Quizzes &amp; Exams
             </p>
-            <p className="mt-1 font-mono text-2xl font-bold text-slate-900 tabular-nums dark:text-white">
+            <p className="mt-1 font-mono text-xl font-bold text-slate-900 tabular-nums sm:text-2xl dark:text-white">
               {attempts.length}
             </p>
             <p className="mt-0.5 font-mono text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
@@ -230,11 +230,11 @@ export function DashboardOverview({
             </p>
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-900/40">
+          <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 sm:p-4 dark:border-slate-800 dark:bg-slate-900/40">
             <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
               Average Quiz / Exam Score
             </p>
-            <p className="mt-1 font-mono text-2xl font-bold text-[#1D4ED8] tabular-nums dark:text-[#38BDF8]">
+            <p className="mt-1 font-mono text-xl font-bold text-[#1D4ED8] tabular-nums sm:text-2xl dark:text-[#38BDF8]">
               {performance.averageScore !== null ? `${performance.averageScore}%` : '—'}
             </p>
             <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
@@ -244,11 +244,11 @@ export function DashboardOverview({
             </p>
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-900/40">
+          <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 sm:p-4 dark:border-slate-800 dark:bg-slate-900/40">
             <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
               AI Study Sessions
             </p>
-            <p className="mt-1 font-mono text-2xl font-bold text-slate-900 tabular-nums dark:text-white">
+            <p className="mt-1 font-mono text-xl font-bold text-slate-900 tabular-nums sm:text-2xl dark:text-white">
               {performance.totalConversations}
             </p>
             <p className="mt-0.5 font-mono text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
@@ -259,7 +259,7 @@ export function DashboardOverview({
       </section>
 
       {/* My Academic History / Records Highlight Band */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
           <div className="flex items-start gap-3.5">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-blue-200 bg-blue-50 text-[#1D4ED8] dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-[#38BDF8]">
@@ -283,7 +283,7 @@ export function DashboardOverview({
           <button
             type="button"
             onClick={() => onNavigate('history')}
-            className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] whitespace-nowrap shrink-0 dark:bg-[#1D4ED8] dark:hover:bg-blue-500"
+            className="inline-flex min-h-11 sm:min-h-10 w-full justify-center sm:w-auto items-center gap-2 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] whitespace-nowrap shrink-0 dark:bg-[#1D4ED8] dark:hover:bg-blue-500"
           >
             <span>Open My Records</span>
             <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
@@ -331,7 +331,7 @@ export function DashboardOverview({
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="space-y-6 lg:col-span-6">
-          <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+          <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
             <div className="flex items-center justify-between gap-4 border-b border-slate-200 pb-4 dark:border-slate-800">
               <h2 className="font-display text-base font-bold text-slate-900 dark:text-white">
                 Completed Quizzes &amp; Exams
@@ -339,7 +339,7 @@ export function DashboardOverview({
               <button
                 type="button"
                 onClick={() => onNavigate('history')}
-                className="inline-flex items-center gap-1 text-xs font-semibold text-[#1D4ED8] hover:underline dark:text-[#38BDF8]"
+                className="inline-flex min-h-9 items-center gap-1 text-xs font-semibold text-[#1D4ED8] hover:underline shrink-0 dark:text-[#38BDF8]"
               >
                 <span>All history</span>
                 <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
@@ -363,7 +363,7 @@ export function DashboardOverview({
                   return (
                     <div
                       key={att.id}
-                      className="flex items-center justify-between gap-3 py-3 first:pt-4 last:pb-0"
+                      className="flex flex-col gap-2.5 py-3 first:pt-4 last:pb-0 min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-between"
                     >
                       <div className="min-w-0">
                         <p className="truncate text-sm font-semibold text-slate-900 dark:text-white">
@@ -377,7 +377,7 @@ export function DashboardOverview({
                       <button
                         type="button"
                         onClick={() => onOpenAttempt(att)}
-                        className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                        className="inline-flex min-h-10 sm:min-h-9 self-start min-[400px]:self-auto items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
                       >
                         <FileCheck2 className="h-3.5 w-3.5" aria-hidden="true" />
                         <span>View Results</span>
@@ -389,7 +389,7 @@ export function DashboardOverview({
             )}
           </section>
 
-          <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+          <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
             <div className="flex items-center justify-between gap-4 border-b border-slate-200 pb-4 dark:border-slate-800">
               <h2 className="font-display text-base font-bold text-slate-900 dark:text-white">
                 Recent Academic Activities
@@ -429,7 +429,7 @@ export function DashboardOverview({
         </div>
 
         <div className="space-y-6 lg:col-span-6">
-          <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+          <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
             <div className="flex items-center justify-between gap-4 border-b border-slate-200 pb-4 dark:border-slate-800">
               <h2 className="font-display text-base font-bold text-slate-900 dark:text-white">
                 Saved Summaries
@@ -437,7 +437,7 @@ export function DashboardOverview({
               <button
                 type="button"
                 onClick={() => onNavigate('summaries')}
-                className="inline-flex items-center gap-1 text-xs font-semibold text-[#1D4ED8] hover:underline dark:text-[#38BDF8]"
+                className="inline-flex min-h-9 items-center gap-1 text-xs font-semibold text-[#1D4ED8] hover:underline shrink-0 dark:text-[#38BDF8]"
               >
                 <span>View all</span>
                 <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
@@ -475,7 +475,7 @@ export function DashboardOverview({
             )}
           </section>
 
-          <section className="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+          <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
             <div className="flex items-center justify-between gap-4 border-b border-slate-200 pb-4 dark:border-slate-800">
               <h2 className="font-display text-base font-bold text-slate-900 dark:text-white">
                 Quick Access to Uploaded Materials
@@ -483,7 +483,7 @@ export function DashboardOverview({
               <button
                 type="button"
                 onClick={() => onNavigate('materials')}
-                className="inline-flex items-center gap-1 text-xs font-semibold text-[#1D4ED8] hover:underline dark:text-[#38BDF8]"
+                className="inline-flex min-h-9 items-center gap-1 text-xs font-semibold text-[#1D4ED8] hover:underline shrink-0 dark:text-[#38BDF8]"
               >
                 <span>Manage</span>
                 <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
@@ -500,7 +500,10 @@ export function DashboardOverview({
             ) : (
               <div className="divide-y divide-slate-100 dark:divide-slate-800/80">
                 {materials.slice(0, 4).map((m) => (
-                  <div key={m.id} className="flex items-center justify-between gap-3 py-3">
+                  <div
+                    key={m.id}
+                    className="flex flex-col gap-2.5 py-3 min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-between"
+                  >
                     <div className="min-w-0">
                       <p className="truncate text-sm font-semibold text-slate-900 dark:text-white">
                         {m.title}
@@ -512,7 +515,7 @@ export function DashboardOverview({
                     <button
                       type="button"
                       onClick={() => onSummarizeMaterial(m)}
-                      className="min-h-9 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                      className="min-h-10 sm:min-h-9 self-start min-[400px]:self-auto rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
                     >
                       Summarize
                     </button>

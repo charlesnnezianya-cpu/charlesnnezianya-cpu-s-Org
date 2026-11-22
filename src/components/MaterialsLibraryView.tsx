@@ -94,7 +94,7 @@ export function MaterialsLibraryView({
         <button
           type="button"
           onClick={onOpenSummarizer}
-          className="min-h-10 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white hover:bg-[#192F5D] whitespace-nowrap shrink-0 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
+          className="min-h-11 sm:min-h-10 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white hover:bg-[#192F5D] whitespace-nowrap shrink-0 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
         >
           Upload Material
         </button>
@@ -152,7 +152,7 @@ export function MaterialsLibraryView({
                     <button
                       type="button"
                       onClick={() => onSummarizeMaterial(mat)}
-                      className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-[#0F1E3D] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#192F5D] dark:bg-blue-600 dark:hover:bg-blue-500"
+                      className="inline-flex min-h-10 sm:min-h-9 items-center gap-1.5 rounded-lg bg-[#0F1E3D] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#192F5D] dark:bg-blue-600 dark:hover:bg-blue-500"
                     >
                       <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
                       <span>Summarize</span>
@@ -161,7 +161,7 @@ export function MaterialsLibraryView({
                     <button
                       type="button"
                       onClick={() => onQuizMaterial(mat)}
-                      className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                      className="inline-flex min-h-10 sm:min-h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
                     >
                       <ListChecks className="h-3.5 w-3.5" aria-hidden="true" />
                       <span>Quiz</span>
@@ -172,7 +172,7 @@ export function MaterialsLibraryView({
                         type="button"
                         onClick={() => handleDownloadOriginal(mat)}
                         disabled={busyId === mat.id}
-                        className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                        className="inline-flex min-h-10 sm:min-h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
                       >
                         <Download className="h-3.5 w-3.5" aria-hidden="true" />
                         <span>File</span>
@@ -184,7 +184,7 @@ export function MaterialsLibraryView({
                       onClick={() => setConfirmTarget(mat)}
                       disabled={busyId === mat.id}
                       aria-label={`Delete ${mat.title}`}
-                      className="min-h-9 min-w-9 inline-flex items-center justify-center rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-red-950/30 dark:hover:text-red-400"
+                      className="min-h-10 min-w-10 sm:min-h-9 sm:min-w-9 inline-flex items-center justify-center rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-red-950/30 dark:hover:text-red-400"
                     >
                       <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                     </button>

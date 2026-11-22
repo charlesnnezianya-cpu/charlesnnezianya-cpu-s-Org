@@ -9,14 +9,23 @@ import {
   Loader2,
   MessageSquarePlus,
   MessageSquareText,
+  Mic,
   Paperclip,
+  Pause,
+  Play,
   Send,
   Sparkles,
+  Square,
   Trash2,
+  Volume2,
   X,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { formatClientApiError } from '../lib/apiClient';
+import {
+  useChatbotSpeechPlayback,
+  useChatbotVoiceInput,
+} from '../lib/chatbotVoice';
 import { postSseStream } from '../lib/sseClient';
 import {
   createAiMessage,
@@ -117,6 +126,24 @@ export function AiChatWorkspace({
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const inFlightRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  const handleVoiceError = useCallback((msg: string) => {
+    setError(msg);
+  }, []);
+
+  const {
+    isListening,
+    interimTranscript,
+    startListening,
+    stopListening,
+    cancelListening,
+  } = useChatbotVoiceInput({
+    currentInput: inputText,
+    onInputChange: setInputText,
+    onError: handleVoiceError,
+  });
+
+  const speechPlayback = useChatbotSpeechPlayback(handleVoiceError);
 
   useEffect(() => {
     return () => {
@@ -235,6 +262,8 @@ export function AiChatWorkspace({
 
   const handleSelectSession = useCallback(async (session: AiSessionRecord) => {
     abortControllerRef.current?.abort();
+    if (isListening) cancelListening();
+    speechPlayback.stop();
     inFlightRef.current = false;
     setSending(false);
     setStreamingContent('');
@@ -266,7 +295,7 @@ export function AiChatWorkspace({
     } finally {
       setLoadingMessages(false);
     }
-  }, [user]);
+  }, [user, isListening, cancelListening, speechPlayback]);
 
   useEffect(() => {
     if (!initialSessionId || loadingSessions) return;
@@ -279,6 +308,8 @@ export function AiChatWorkspace({
 
   const handleNewChat = () => {
     abortControllerRef.current?.abort();
+    if (isListening) cancelListening();
+    speechPlayback.stop();
     inFlightRef.current = false;
     setSending(false);
     setStreamingContent('');
@@ -350,6 +381,9 @@ export function AiChatWorkspace({
     explanationStyle?: 'default' | 'shorter' | 'simpler' | 'detailed';
   }) => {
     if (inFlightRef.current) return;
+    if (isListening) {
+      stopListening();
+    }
 
     const cleanText = (options?.overrideText ?? inputText).trim();
     const imageToSend = pendingImage || activeSessionImage;
@@ -616,7 +650,7 @@ export function AiChatWorkspace({
           <button
             type="button"
             onClick={handleNewChat}
-            className="inline-flex items-center gap-1 rounded-lg bg-[#0F1E3D] px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-[#192F5D] dark:bg-blue-600 dark:hover:bg-blue-500"
+            className="inline-flex min-h-10 items-center gap-1 rounded-lg bg-[#0F1E3D] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#192F5D] sm:min-h-8 sm:px-2.5 dark:bg-blue-600 dark:hover:bg-blue-500"
           >
             <MessageSquarePlus className="h-3.5 w-3.5" aria-hidden="true" />
             <span>New Chat</span>
@@ -673,7 +707,7 @@ export function AiChatWorkspace({
                       type="button"
                       onClick={(e) => requestDeleteSession(e, session)}
                       aria-label={`Delete ${session.title}`}
-                      className="rounded-md p-1 text-slate-400 opacity-70 transition-opacity hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100 dark:hover:bg-rose-950/40 dark:hover:text-rose-400"
+                      className="inline-flex min-h-9 min-w-9 shrink-0 items-center justify-center rounded-md p-1 text-slate-400 opacity-75 transition-opacity hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100 sm:min-h-0 sm:min-w-0 dark:hover:bg-rose-950/40 dark:hover:text-rose-400"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
@@ -686,15 +720,15 @@ export function AiChatWorkspace({
       </aside>
 
       {/* Main Conversational Panel */}
-      <section className="flex min-h-[540px] min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0D162B]">
+      <section className="flex min-h-[480px] sm:min-h-[540px] min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0D162B]">
         {/* Top Chat Workspace Bar */}
-        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-3.5 select-none dark:border-slate-800">
-          <div className="min-w-0">
+        <header className="flex flex-wrap items-center justify-between gap-2.5 border-b border-slate-200 px-3.5 py-3 select-none sm:gap-3 sm:px-5 sm:py-3.5 dark:border-slate-800">
+          <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => setHistorySidebarOpen((prev) => !prev)}
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-semibold text-slate-700 lg:hidden dark:border-slate-700 dark:text-slate-200"
+                className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 lg:hidden dark:border-slate-700 dark:text-slate-200"
               >
                 <History className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>History</span>
@@ -711,21 +745,24 @@ export function AiChatWorkspace({
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             {/* Document Context Picker */}
             <div className="relative">
               <button
                 type="button"
                 onClick={() => setContextPickerOpen((prev) => !prev)}
-                className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                className={`inline-flex min-h-10 sm:min-h-9 items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-colors ${
                   activeDocumentContext
                     ? 'border-blue-300 bg-blue-50 text-blue-800 dark:border-cyan-700 dark:bg-cyan-950/40 dark:text-cyan-300'
                     : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800'
                 }`}
               >
                 <Paperclip className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>
+                <span className="hidden min-[380px]:inline">
                   {activeDocumentContext ? 'Study Doc Attached' : 'Attach Study Doc'}
+                </span>
+                <span className="min-[380px]:hidden">
+                  {activeDocumentContext ? 'Attached' : 'Attach Doc'}
                 </span>
               </button>
 
@@ -738,9 +775,10 @@ export function AiChatWorkspace({
                     <button
                       type="button"
                       onClick={() => setContextPickerOpen(false)}
-                      className="rounded p-0.5 text-slate-400 hover:text-slate-600"
+                      aria-label="Close document picker"
+                      className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:text-slate-600"
                     >
-                      <X className="h-3.5 w-3.5" />
+                      <X className="h-4 w-4" />
                     </button>
                   </div>
 
@@ -820,7 +858,7 @@ export function AiChatWorkspace({
             <button
               type="button"
               onClick={handleNewChat}
-              className="inline-flex min-h-9 items-center gap-1 rounded-xl border border-slate-200 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 sm:px-3 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+              className="inline-flex min-h-10 sm:min-h-9 items-center gap-1 rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
               aria-label="New AI chat"
             >
               <MessageSquarePlus className="h-3.5 w-3.5" aria-hidden="true" />
@@ -831,7 +869,7 @@ export function AiChatWorkspace({
 
         {/* Missing API key notice */}
         {!geminiConfigured && (
-          <div className="mx-5 mt-4 flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+          <div className="mx-3.5 sm:mx-5 mt-4 flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
             <div>
               <p className="font-semibold">GEMINI_API_KEY is not configured</p>
@@ -843,7 +881,7 @@ export function AiChatWorkspace({
         )}
 
         {/* Messages Thread */}
-        <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-5">
+        <div className="flex-1 overflow-y-auto px-3.5 py-4 sm:px-5 sm:py-5">
           {loadingMessages ? (
             <div className="flex h-full items-center justify-center py-12">
               <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
@@ -901,16 +939,23 @@ export function AiChatWorkspace({
                   (msg.image_path ? signedImageUrls[msg.image_path] : undefined);
                 const isLatestAssistant = !isUser && idx === messages.length - 1;
 
+                const isSpeakingThisMessage =
+                  speechPlayback.activeMessageId === msg.id &&
+                  speechPlayback.status === 'speaking';
+                const isPausedThisMessage =
+                  speechPlayback.activeMessageId === msg.id &&
+                  speechPlayback.status === 'paused';
+
                 return (
                   <div
                     key={msg.id}
                     className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}
                   >
                     <div
-                      className={`max-w-[90%] rounded-2xl px-4 py-3.5 sm:max-w-[85%] ${
+                      className={`min-w-0 max-w-[92%] rounded-2xl px-3.5 py-3 sm:max-w-[85%] sm:px-4 sm:py-3.5 ${
                         isUser
                           ? 'bg-[#0F1E3D] text-white dark:bg-blue-600'
-                          : 'w-full border border-slate-200 bg-slate-50/70 text-slate-900 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-100'
+                          : 'w-full max-w-full overflow-hidden border border-slate-200 bg-slate-50/70 text-slate-900 sm:max-w-[85%] dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-100'
                       }`}
                     >
                       {imgSrc && (
@@ -933,11 +978,11 @@ export function AiChatWorkspace({
                     </div>
 
                     {!isUser && (
-                      <div className="mt-1.5 flex flex-wrap items-center gap-2 pl-1 select-none">
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5 pl-0.5 select-none">
                         <button
                           type="button"
                           onClick={() => handleCopyMessage(msg.id, msg.content)}
-                          className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                          className="inline-flex min-h-9 sm:min-h-7 items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"
                         >
                           {copiedId === msg.id ? (
                             <>
@@ -952,9 +997,64 @@ export function AiChatWorkspace({
                           )}
                         </button>
 
+                        {/* Spoken AI Response Controls (Text-to-Speech) */}
+                        {isSpeakingThisMessage ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => speechPlayback.pause()}
+                              aria-label="Pause spoken response"
+                              className="inline-flex min-h-9 sm:min-h-7 items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-800 transition-colors hover:bg-blue-100 dark:border-cyan-700 dark:bg-cyan-950/50 dark:text-cyan-300"
+                            >
+                              <Pause className="h-3 w-3" aria-hidden="true" />
+                              <span>Pause</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => speechPlayback.stop()}
+                              aria-label="Stop spoken response"
+                              className="inline-flex min-h-9 sm:min-h-7 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                            >
+                              <Square className="h-2.5 w-2.5 fill-current" aria-hidden="true" />
+                              <span>Stop</span>
+                            </button>
+                          </>
+                        ) : isPausedThisMessage ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => speechPlayback.resume()}
+                              aria-label="Resume spoken response"
+                              className="inline-flex min-h-9 sm:min-h-7 items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-800 transition-colors hover:bg-blue-100 dark:border-cyan-700 dark:bg-cyan-950/50 dark:text-cyan-300"
+                            >
+                              <Play className="h-3 w-3 fill-current" aria-hidden="true" />
+                              <span>Resume</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => speechPlayback.stop()}
+                              aria-label="Stop spoken response"
+                              className="inline-flex min-h-9 sm:min-h-7 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                            >
+                              <Square className="h-2.5 w-2.5 fill-current" aria-hidden="true" />
+                              <span>Stop</span>
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => speechPlayback.playMessage(msg.id, msg.content)}
+                            aria-label="Listen to response aloud"
+                            className="inline-flex min-h-9 sm:min-h-7 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 transition-colors hover:border-blue-300 hover:bg-blue-50 hover:text-blue-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-cyan-600 dark:hover:bg-slate-800 dark:hover:text-cyan-300"
+                          >
+                            <Volume2 className="h-3 w-3" aria-hidden="true" />
+                            <span>Listen</span>
+                          </button>
+                        )}
+
                         {isLatestAssistant && (
                           <>
-                            <span className="text-slate-300 dark:text-slate-700">·</span>
+                            <span className="hidden text-slate-300 sm:inline dark:text-slate-700">·</span>
                             <button
                               type="button"
                               disabled={sending}
@@ -965,7 +1065,7 @@ export function AiChatWorkspace({
                                   explanationStyle: 'shorter',
                                 })
                               }
-                              className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                              className="min-h-9 sm:min-h-7 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
                             >
                               Make Shorter
                             </button>
@@ -979,7 +1079,7 @@ export function AiChatWorkspace({
                                   explanationStyle: 'simpler',
                                 })
                               }
-                              className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                              className="min-h-9 sm:min-h-7 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
                             >
                               Explain Simpler
                             </button>
@@ -993,7 +1093,7 @@ export function AiChatWorkspace({
                                   explanationStyle: 'detailed',
                                 })
                               }
-                              className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                              className="min-h-9 sm:min-h-7 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
                             >
                               More Detailed
                             </button>
@@ -1002,7 +1102,7 @@ export function AiChatWorkspace({
                                 type="button"
                                 disabled={sending}
                                 onClick={() => onSendImageToTutor(activeSessionImage)}
-                                className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-100 dark:border-cyan-800 dark:bg-cyan-950/40 dark:text-cyan-300"
+                                className="inline-flex min-h-9 sm:min-h-7 items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-100 dark:border-cyan-800 dark:bg-cyan-950/40 dark:text-cyan-300"
                               >
                                 <GraduationCap className="h-3 w-3" />
                                 <span>Open in AI Tutor</span>
@@ -1051,11 +1151,19 @@ export function AiChatWorkspace({
         </div>
 
         {/* Bottom Composer */}
-        <div className="border-t border-slate-200 bg-white px-5 py-3.5 dark:border-slate-800 dark:bg-[#0D162B]">
+        <div className="border-t border-slate-200 bg-white px-3.5 py-3 sm:px-5 sm:py-3.5 dark:border-slate-800 dark:bg-[#0D162B]">
           {error && (
-            <div className="mb-3 flex items-center justify-between gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs text-rose-800 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-200">
+            <div
+              role="alert"
+              className="mb-3 flex items-center justify-between gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs text-rose-800 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-200"
+            >
               <span>{error}</span>
-              <button type="button" onClick={() => setError(null)} className="p-0.5">
+              <button
+                type="button"
+                onClick={() => setError(null)}
+                aria-label="Dismiss error"
+                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md hover:bg-rose-100 dark:hover:bg-rose-900/40"
+              >
                 <X className="h-3.5 w-3.5" />
               </button>
             </div>
@@ -1094,15 +1202,105 @@ export function AiChatWorkspace({
             />
           )}
 
-          <div className="flex flex-wrap items-end gap-2">
-            <SnapTriggerButtons
-              disabled={sending}
-              onImageSelected={(att) => {
-                setPendingImage(att);
-                setError(null);
-              }}
-              onError={(msg) => setError(msg)}
-            />
+          {isListening && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="mb-2.5 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-rose-200 bg-rose-50/90 px-3 py-2 text-xs text-rose-950 select-none dark:border-rose-900/60 dark:bg-rose-950/35 dark:text-rose-100"
+            >
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="relative flex h-2.5 w-2.5 shrink-0" aria-hidden="true">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-rose-500 opacity-75" />
+                  <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-rose-600" />
+                </span>
+                <span className="font-semibold">
+                  Listening… Speak your question (you can edit before sending)
+                </span>
+                {interimTranscript && (
+                  <span className="hidden truncate text-[11px] italic text-rose-700 sm:inline dark:text-rose-300">
+                    “{interimTranscript}”
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={stopListening}
+                  className="inline-flex min-h-9 items-center gap-1 rounded-lg bg-rose-600 px-3 py-1 text-[11px] font-semibold text-white transition-colors hover:bg-rose-700"
+                >
+                  <Square className="h-2.5 w-2.5 fill-current" aria-hidden="true" />
+                  <span>Stop</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={cancelListening}
+                  className="inline-flex min-h-9 items-center rounded-lg border border-rose-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-rose-700 transition-colors hover:bg-rose-100 dark:border-rose-800 dark:bg-slate-900 dark:text-rose-300 dark:hover:bg-rose-950/60"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+            <div className="order-2 flex items-center justify-between gap-2 sm:order-1 sm:justify-start">
+              <div className="flex items-center gap-1.5">
+                <SnapTriggerButtons
+                  disabled={sending}
+                  onImageSelected={(att) => {
+                    setPendingImage(att);
+                    setError(null);
+                  }}
+                  onError={(msg) => setError(msg)}
+                />
+
+                <button
+                  type="button"
+                  disabled={sending}
+                  onClick={() => {
+                    setError(null);
+                    if (isListening) {
+                      stopListening();
+                    } else {
+                      startListening();
+                    }
+                  }}
+                  aria-label={isListening ? 'Stop voice input' : 'Start voice input'}
+                  aria-pressed={isListening}
+                  title={isListening ? 'Stop voice recording' : 'Ask a question by voice'}
+                  className={`inline-flex h-11 min-w-11 sm:h-10 sm:min-w-10 items-center justify-center gap-1.5 rounded-xl border px-3 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 select-none ${
+                    isListening
+                      ? 'border-rose-400 bg-rose-50 text-rose-700 hover:bg-rose-100 dark:border-rose-700 dark:bg-rose-950/50 dark:text-rose-300'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  <Mic
+                    className={`h-4 w-4 ${
+                      isListening
+                        ? 'animate-pulse text-rose-600 dark:text-rose-400'
+                        : 'text-blue-600 dark:text-cyan-400'
+                    }`}
+                    aria-hidden="true"
+                  />
+                  <span className="hidden md:inline">{isListening ? 'Stop' : 'Voice'}</span>
+                </button>
+              </div>
+
+              <button
+                type="button"
+                disabled={sending || (!inputText.trim() && !pendingImage)}
+                onClick={() => sendMessage()}
+                className="inline-flex h-11 items-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:cursor-not-allowed disabled:opacity-50 select-none sm:hidden dark:bg-blue-600 dark:hover:bg-blue-500"
+              >
+                {sending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Send className="h-4 w-4" aria-hidden="true" />
+                )}
+                <span>Send</span>
+              </button>
+            </div>
 
             <textarea
               rows={2}
@@ -1113,16 +1311,16 @@ export function AiChatWorkspace({
               placeholder={
                 previewAttachment
                   ? 'Ask a specific question about this photo or click an Image Action above...'
-                  : 'Ask an academic question, paste a problem, or request a step-by-step explanation...'
+                  : 'Ask an academic question, paste a problem, or use the mic to dictate...'
               }
-              className="min-h-11 max-h-36 flex-1 resize-y rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-hidden select-text dark:border-slate-700 dark:bg-slate-900/80 dark:text-white dark:focus:border-cyan-500 dark:focus:bg-slate-900"
+              className="order-1 min-h-11 max-h-36 w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-hidden select-text sm:order-2 sm:flex-1 dark:border-slate-700 dark:bg-slate-900/80 dark:text-white dark:focus:border-cyan-500 dark:focus:bg-slate-900"
             />
 
             <button
               type="button"
               disabled={sending || (!inputText.trim() && !pendingImage)}
               onClick={() => sendMessage()}
-              className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:cursor-not-allowed disabled:opacity-50 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
+              className="hidden sm:order-3 sm:inline-flex h-10 items-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:cursor-not-allowed disabled:opacity-50 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
             >
               {sending ? (
                 <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />

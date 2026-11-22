@@ -38,10 +38,10 @@ export function SubjectVisualBanner({
 
   const heightClasses =
     variant === 'hero'
-      ? 'aspect-video max-h-64 sm:max-h-72'
+      ? 'aspect-video min-h-44 max-h-64 sm:min-h-0 sm:max-h-72'
       : variant === 'compact'
-        ? 'aspect-video max-h-44 sm:max-h-48'
-        : 'aspect-video max-h-56 sm:max-h-64';
+        ? 'aspect-video min-h-36 max-h-44 sm:min-h-0 sm:max-h-48'
+        : 'aspect-video min-h-40 max-h-56 sm:min-h-0 sm:max-h-64';
 
   return (
     <figure
@@ -72,7 +72,7 @@ export function SubjectVisualBanner({
           className="pointer-events-none absolute inset-0 bg-gradient-to-t from-slate-950/85 via-slate-950/25 to-transparent"
         />
 
-        <figcaption className="absolute inset-x-0 bottom-0 p-4 sm:p-5 text-white">
+        <figcaption className="absolute inset-x-0 bottom-0 p-3.5 sm:p-5 text-white">
           <p className="text-[11px] font-semibold tracking-wide text-sky-300">
             {asset.subjectLabel}
           </p>

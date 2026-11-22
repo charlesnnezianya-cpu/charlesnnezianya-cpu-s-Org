@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import http from 'http';
 import express, { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
@@ -14,10 +15,15 @@ const PORT = Number(process.env.PORT) || 3000;
 
 async function startServer() {
   const app = createApiApp();
+  const server = http.createServer(app);
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true, allowedHosts: true },
+      server: {
+        middlewareMode: true,
+        allowedHosts: true,
+        ws: { server },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -31,7 +37,7 @@ async function startServer() {
     }
   }
 
-  const server = app.listen(PORT, '0.0.0.0', () => {
+  server.listen(PORT, '0.0.0.0', () => {
     console.log(`Brainstine server listening on http://0.0.0.0:${PORT}`);
     void ensureResolvedGeminiModel().catch(() => {});
   });

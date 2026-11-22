@@ -793,16 +793,16 @@ export function AiTutorWorkspace({
       </aside>
 
       {/* Main Structured Tutoring Workspace */}
-      <section className="flex min-h-[560px] min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0D162B]">
+      <section className="flex min-h-[480px] sm:min-h-[560px] min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0D162B]">
         {/* Tutor Progress & Mode Header */}
-        <header className="border-b border-slate-200 px-5 py-3.5 select-none dark:border-slate-800">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="min-w-0">
+        <header className="border-b border-slate-200 px-3.5 py-3 sm:px-5 sm:py-3.5 select-none dark:border-slate-800">
+          <div className="flex flex-wrap items-center justify-between gap-2.5 sm:gap-3">
+            <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setHistoryOpen((prev) => !prev)}
-                  className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-semibold text-slate-700 lg:hidden dark:border-slate-700 dark:text-slate-200"
+                  className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 lg:hidden dark:border-slate-700 dark:text-slate-200"
                 >
                   <History className="h-3.5 w-3.5" aria-hidden="true" />
                   <span>Sessions</span>
@@ -823,7 +823,7 @@ export function AiTutorWorkspace({
                 <button
                   type="button"
                   onClick={() => setContextPickerOpen((prev) => !prev)}
-                  className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  className={`inline-flex min-h-10 sm:min-h-9 items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-colors ${
                     activeDocumentContext
                       ? 'border-blue-300 bg-blue-50 text-blue-800 dark:border-cyan-700 dark:bg-cyan-950/40 dark:text-cyan-300'
                       : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800'
@@ -914,7 +914,7 @@ export function AiTutorWorkspace({
                       type="button"
                       title={m.description}
                       onClick={() => handleModeChange(m.id)}
-                      className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                      className={`min-h-9 sm:min-h-7 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-colors ${
                         active
                           ? 'bg-[#0F1E3D] text-white dark:bg-blue-600'
                           : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
@@ -967,7 +967,7 @@ export function AiTutorWorkspace({
         )}
 
         {/* Lesson Thread */}
-        <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-5">
+        <div className="flex-1 overflow-y-auto px-3.5 py-4 sm:px-5 sm:py-5">
           {loadingMessages ? (
             <div className="flex h-full items-center justify-center py-12">
               <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
@@ -1076,10 +1076,10 @@ export function AiTutorWorkspace({
                     className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}
                   >
                     <div
-                      className={`max-w-[90%] rounded-2xl px-4 py-3.5 sm:max-w-[85%] ${
+                      className={`min-w-0 max-w-[92%] rounded-2xl px-3.5 py-3 sm:max-w-[85%] sm:px-4 sm:py-3.5 ${
                         isUser
                           ? 'bg-[#0F1E3D] text-white dark:bg-blue-600'
-                          : 'w-full border border-slate-200 bg-slate-50/70 text-slate-900 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-100'
+                          : 'w-full max-w-full overflow-hidden border border-slate-200 bg-slate-50/70 text-slate-900 sm:max-w-[85%] dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-100'
                       }`}
                     >
                       {!isUser && (
@@ -1111,11 +1111,11 @@ export function AiTutorWorkspace({
                     </div>
 
                     {!isUser && (
-                      <div className="mt-1 pl-1 select-none">
+                      <div className="mt-1.5 pl-1 select-none">
                         <button
                           type="button"
                           onClick={() => handleCopyMessage(msg.id, msg.content)}
-                          className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                          className="inline-flex min-h-9 sm:min-h-7 items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"
                         >
                           {copiedId === msg.id ? (
                             <>
@@ -1170,18 +1170,23 @@ export function AiTutorWorkspace({
         </div>
 
         {/* Bottom Interactive Prompts & Composer */}
-        <div className="border-t border-slate-200 bg-white px-5 py-3.5 dark:border-slate-800 dark:bg-[#0D162B]">
+        <div className="border-t border-slate-200 bg-white px-3.5 py-3 sm:px-5 sm:py-3.5 dark:border-slate-800 dark:bg-[#0D162B]">
           {error && (
             <div className="mb-3 flex items-center justify-between gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs text-rose-800 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-200">
               <span>{error}</span>
-              <button type="button" onClick={() => setError(null)} className="p-0.5">
+              <button
+                type="button"
+                onClick={() => setError(null)}
+                aria-label="Dismiss error"
+                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md hover:bg-rose-100 dark:hover:bg-rose-900/40"
+              >
                 <X className="h-3.5 w-3.5" />
               </button>
             </div>
           )}
 
           {/* 7 Interactive Tutoring Controls */}
-          <div className="mb-2.5 flex flex-wrap items-center gap-1.5 select-none">
+          <div className="mb-2.5 flex flex-nowrap items-center gap-1.5 overflow-x-auto pb-1 select-none sm:flex-wrap sm:overflow-visible sm:pb-0">
             {INTERACTIVE_TUTOR_PROMPTS.map((item) => (
               <button
                 key={item.label}
@@ -1202,7 +1207,7 @@ export function AiTutorWorkspace({
                     overrideMode,
                   });
                 }}
-                className="min-h-8 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 transition-colors hover:border-blue-400 hover:bg-blue-50 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-cyan-500 dark:hover:bg-slate-800 dark:hover:text-cyan-300"
+                className="min-h-9 sm:min-h-8 shrink-0 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 whitespace-nowrap transition-colors hover:border-blue-400 hover:bg-blue-50 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-cyan-500 dark:hover:bg-slate-800 dark:hover:text-cyan-300"
               >
                 {item.label}
               </button>
@@ -1240,15 +1245,31 @@ export function AiTutorWorkspace({
             />
           )}
 
-          <div className="flex flex-wrap items-end gap-2">
-            <SnapTriggerButtons
-              disabled={sending}
-              onImageSelected={(att) => {
-                setPendingImage(att);
-                setError(null);
-              }}
-              onError={(msg) => setError(msg)}
-            />
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+            <div className="order-2 flex items-center justify-between gap-2 sm:order-1 sm:justify-start">
+              <SnapTriggerButtons
+                disabled={sending}
+                onImageSelected={(att) => {
+                  setPendingImage(att);
+                  setError(null);
+                }}
+                onError={(msg) => setError(msg)}
+              />
+
+              <button
+                type="button"
+                disabled={sending || (!inputText.trim() && !pendingImage)}
+                onClick={() => sendTutorTurn()}
+                className="inline-flex h-11 items-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:cursor-not-allowed disabled:opacity-50 select-none sm:hidden dark:bg-blue-600 dark:hover:bg-blue-500"
+              >
+                {sending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Send className="h-4 w-4" aria-hidden="true" />
+                )}
+                <span>{messages.length === 0 ? 'Start Lesson' : 'Reply'}</span>
+              </button>
+            </div>
 
             <textarea
               rows={2}
@@ -1261,14 +1282,14 @@ export function AiTutorWorkspace({
                   ? 'Enter a topic you want to learn, or snap/upload a photo of a page or problem...'
                   : 'Answer the tutor’s check question, ask for clarification, or describe what confused you...'
               }
-              className="min-h-11 max-h-36 flex-1 resize-y rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-hidden select-text dark:border-slate-700 dark:bg-slate-900/80 dark:text-white dark:focus:border-cyan-500 dark:focus:bg-slate-900"
+              className="order-1 min-h-11 max-h-36 w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-hidden select-text sm:order-2 sm:flex-1 dark:border-slate-700 dark:bg-slate-900/80 dark:text-white dark:focus:border-cyan-500 dark:focus:bg-slate-900"
             />
 
             <button
               type="button"
               disabled={sending || (!inputText.trim() && !pendingImage)}
               onClick={() => sendTutorTurn()}
-              className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:cursor-not-allowed disabled:opacity-50 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
+              className="hidden sm:order-3 sm:inline-flex h-10 items-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:cursor-not-allowed disabled:opacity-50 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
             >
               {sending ? (
                 <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />

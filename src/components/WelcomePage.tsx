@@ -93,17 +93,17 @@ export function WelcomePage({ onOpenAuth, onNavigateToPrivacy }: WelcomePageProp
 
         {mobileMenuOpen && (
           <div className="border-t border-slate-200 bg-white px-4 py-4 md:hidden dark:border-slate-800 dark:bg-[#0D162B]">
-            <div className="flex flex-col gap-2 text-sm font-medium text-slate-700 dark:text-slate-200">
-              <a href="#features" onClick={() => setMobileMenuOpen(false)} className="py-2.5">
+            <div className="flex flex-col gap-1 text-sm font-medium text-slate-700 dark:text-slate-200">
+              <a href="#features" onClick={() => setMobileMenuOpen(false)} className="flex min-h-11 items-center rounded-lg px-2 hover:bg-slate-100 dark:hover:bg-slate-800">
                 AI Suite
               </a>
-              <a href="#workflow" onClick={() => setMobileMenuOpen(false)} className="py-2.5">
+              <a href="#workflow" onClick={() => setMobileMenuOpen(false)} className="flex min-h-11 items-center rounded-lg px-2 hover:bg-slate-100 dark:hover:bg-slate-800">
                 Workflow
               </a>
-              <a href="#modes" onClick={() => setMobileMenuOpen(false)} className="py-2.5">
+              <a href="#modes" onClick={() => setMobileMenuOpen(false)} className="flex min-h-11 items-center rounded-lg px-2 hover:bg-slate-100 dark:hover:bg-slate-800">
                 Study Depths
               </a>
-              <a href="#formats" onClick={() => setMobileMenuOpen(false)} className="py-2.5">
+              <a href="#formats" onClick={() => setMobileMenuOpen(false)} className="flex min-h-11 items-center rounded-lg px-2 hover:bg-slate-100 dark:hover:bg-slate-800">
                 Formats
               </a>
               <div className="mt-2 flex items-center gap-3 border-t border-slate-100 pt-3 dark:border-slate-800">
@@ -135,29 +135,29 @@ export function WelcomePage({ onOpenAuth, onNavigateToPrivacy }: WelcomePageProp
 
       <main id="top">
         {/* Hero Section */}
-        <section id="overview" className="mx-auto max-w-6xl px-4 pt-12 pb-16 sm:px-6 lg:px-8 lg:pt-18 lg:pb-24">
-          <div className="grid grid-cols-1 items-stretch gap-10 lg:grid-cols-12 lg:gap-12">
+        <section id="overview" className="mx-auto max-w-6xl px-4 pt-8 pb-12 sm:px-6 sm:pt-12 sm:pb-16 lg:px-8 lg:pt-18 lg:pb-24">
+          <div className="grid grid-cols-1 items-stretch gap-8 sm:gap-10 lg:grid-cols-12 lg:gap-12">
             <div className="flex flex-col justify-center lg:col-span-6">
-              <p className="text-sm font-semibold tracking-wide text-[#1D4ED8] dark:text-[#38BDF8]">
+              <p className="text-xs font-semibold tracking-wide text-[#1D4ED8] sm:text-sm dark:text-[#38BDF8]">
                 Your Personal AI-Powered Academic Companion
               </p>
-              <h1 className="mt-2 font-display text-5xl font-bold tracking-tight text-[#0B1528] sm:text-6xl dark:text-white academic-selectable">
+              <h1 className="mt-2 font-display text-4xl font-bold tracking-tight text-[#0B1528] min-[380px]:text-5xl sm:text-6xl dark:text-white academic-selectable">
                 Brainstine
               </h1>
-              <p className="mt-3 font-display text-2xl font-semibold tracking-tight text-slate-800 text-balance sm:text-3xl dark:text-slate-100">
+              <p className="mt-3 font-display text-xl font-semibold tracking-tight text-slate-800 text-balance sm:text-3xl dark:text-slate-100">
                 Master complex coursework with structured summaries, exams, and guided tutoring.
               </p>
-              <p className="mt-4 max-w-xl text-base leading-relaxed text-slate-600 dark:text-slate-300 academic-selectable">
+              <p className="mt-4 max-w-xl text-sm leading-relaxed text-slate-600 sm:text-base dark:text-slate-300 academic-selectable">
                 Brainstine transforms PDFs, handwritten notebook photos, and lecture audio into
                 diagram-rich summaries, 10–40 question assessments, context-aware academic chat, and
                 step-by-step personal tutoring—saved securely to your account.
               </p>
 
-              <div className="mt-8 flex flex-wrap items-center gap-3.5">
+              <div className="mt-7 flex flex-wrap items-center gap-3 sm:mt-8 sm:gap-3.5">
                 <button
                   type="button"
                   onClick={() => onOpenAuth('signup')}
-                  className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-[#0F1E3D] px-6 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#192F5D] whitespace-nowrap shrink-0 dark:bg-[#1D4ED8] dark:hover:bg-blue-500"
+                  className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-6 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#192F5D] whitespace-nowrap shrink-0 min-[400px]:w-auto dark:bg-[#1D4ED8] dark:hover:bg-blue-500"
                 >
                   <span>Get Started</span>
                   <ArrowRight className="h-4 w-4" aria-hidden="true" />
@@ -165,7 +165,7 @@ export function WelcomePage({ onOpenAuth, onNavigateToPrivacy }: WelcomePageProp
                 <button
                   type="button"
                   onClick={() => onOpenAuth('signin')}
-                  className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-slate-300 bg-white px-6 py-3 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+                  className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-6 py-3 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 min-[400px]:w-auto dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                 >
                   Sign In
                 </button>
@@ -214,7 +214,7 @@ export function WelcomePage({ onOpenAuth, onNavigateToPrivacy }: WelcomePageProp
               <p className="text-xs font-semibold tracking-wide text-[#1D4ED8] dark:text-[#38BDF8]">
                 Four Integrated Learning Engines
               </p>
-              <h2 className="mt-2 font-display text-3xl font-bold tracking-tight text-slate-900 text-balance dark:text-white">
+              <h2 className="mt-2 font-display text-2xl font-bold tracking-tight text-slate-900 text-balance sm:text-3xl dark:text-white">
                 Focused academic tools built to help you actually understand and retain.
               </h2>
             </div>
@@ -302,7 +302,7 @@ export function WelcomePage({ onOpenAuth, onNavigateToPrivacy }: WelcomePageProp
               </div>
 
               <div className="order-1 flex flex-col justify-center lg:order-2 lg:col-span-7">
-                <h2 className="font-display text-3xl font-bold tracking-tight text-slate-900 text-balance dark:text-white">
+                <h2 className="font-display text-2xl font-bold tracking-tight text-slate-900 text-balance sm:text-3xl dark:text-white">
                   Built for real coursework, from raw file to exam mastery.
                 </h2>
                 <p className="mt-3 text-base leading-relaxed text-slate-600 dark:text-slate-300 academic-selectable">
@@ -348,7 +348,7 @@ export function WelcomePage({ onOpenAuth, onNavigateToPrivacy }: WelcomePageProp
         <section id="modes" className="border-t border-slate-200 bg-white py-16 lg:py-24 dark:border-slate-800/80 dark:bg-[#0B1325]">
           <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
             <div className="max-w-2xl">
-              <h2 className="font-display text-3xl font-bold tracking-tight text-slate-900 text-balance dark:text-white">
+              <h2 className="font-display text-2xl font-bold tracking-tight text-slate-900 text-balance sm:text-3xl dark:text-white">
                 Three study depths for every stage of your semester.
               </h2>
               <p className="mt-3 text-base text-slate-600 dark:text-slate-300">
@@ -419,7 +419,7 @@ export function WelcomePage({ onOpenAuth, onNavigateToPrivacy }: WelcomePageProp
               <button
                 type="button"
                 onClick={() => onOpenAuth('signup')}
-                className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] whitespace-nowrap shrink-0 dark:bg-[#1D4ED8] dark:hover:bg-blue-500"
+                className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] whitespace-nowrap shrink-0 sm:w-auto dark:bg-[#1D4ED8] dark:hover:bg-blue-500"
               >
                 Start Studying Free
                 <ArrowRight className="h-4 w-4" aria-hidden="true" />

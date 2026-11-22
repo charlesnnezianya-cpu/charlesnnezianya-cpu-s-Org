@@ -174,12 +174,12 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
       aria-modal="true"
       aria-labelledby="auth-modal-title"
     >
-      <div className="relative max-h-[92vh] w-full max-w-md overflow-y-auto rounded-2xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-800 dark:bg-[#0D162B] sm:p-8">
+      <div className="relative max-h-[92vh] w-full max-w-md overflow-y-auto rounded-2xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-800 dark:bg-[#0D162B] sm:p-8">
         <button
           type="button"
           onClick={handleClose}
           aria-label="Close authentication modal"
-          className="absolute top-4 right-4 inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 select-none dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-white"
+          className="absolute top-3.5 right-3.5 inline-flex h-10 w-10 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 select-none sm:top-4 sm:right-4 sm:h-9 sm:w-9 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-white"
         >
           <X className="h-4 w-4" aria-hidden="true" />
         </button>
@@ -449,7 +449,7 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
                       type="button"
                       onClick={() => setShowPassword((prev) => !prev)}
                       aria-label={showPassword ? 'Hide password' : 'Show password'}
-                      className="absolute top-1/2 right-2.5 -translate-y-1/2 rounded-md p-1 text-slate-400 hover:text-slate-600 select-none dark:hover:text-slate-200"
+                      className="absolute top-1/2 right-1.5 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-md text-slate-400 hover:text-slate-600 select-none dark:hover:text-slate-200"
                     >
                       {showPassword ? (
                         <EyeOff className="h-4 w-4" aria-hidden="true" />
@@ -492,7 +492,7 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
               <button
                 type="submit"
                 disabled={submitting}
-                className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-60 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
+                className="mt-2 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-60 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
               >
                 <span>
                   {submitting
