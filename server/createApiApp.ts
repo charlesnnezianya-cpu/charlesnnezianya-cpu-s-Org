@@ -1817,7 +1817,8 @@ export function createApiApp() {
         sourceMode === 'material' ||
         sourceMode === 'summary' ||
         sourceMode === 'text' ||
-        sourceMode === 'topic'
+        sourceMode === 'topic' ||
+        sourceMode === 'upload'
           ? sourceMode
           : 'topic';
 
@@ -1829,7 +1830,7 @@ export function createApiApp() {
       if (mode !== 'topic' && cleanSource.length < 30) {
         return res.status(400).json({
           error:
-            'Please select a study material, saved summary, or paste at least 30 characters of text.',
+            'Please select a study material, uploaded file, saved summary, or paste at least 30 characters of text.',
         });
       }
 
@@ -1846,11 +1847,9 @@ export function createApiApp() {
           ? difficulty
           : 'intermediate';
 
+      const allowedCounts = new Set([5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70]);
       const totalCount =
-        questionCount === 10 ||
-        questionCount === 20 ||
-        questionCount === 30 ||
-        questionCount === 40
+        typeof questionCount === 'number' && allowedCounts.has(questionCount)
           ? questionCount
           : 10;
 
@@ -2188,6 +2187,12 @@ export function createApiApp() {
       if (allQuestions.length === 0) {
         throw new AiInvalidResponseError(
           'The AI did not return any valid quiz questions for this topic or material. Please try again.'
+        );
+      }
+
+      if (allQuestions.length < totalCount) {
+        throw new AiInvalidResponseError(
+          `The AI generated ${allQuestions.length} out of requested ${totalCount} questions. Please try again or choose a smaller count.`
         );
       }
 

@@ -6,19 +6,24 @@ import {
   ChevronRight,
   Clock,
   FileCheck2,
+  FileText,
   History,
+  Image as ImageIcon,
   KeyRound,
   ListChecks,
   Loader2,
   Play,
+  RefreshCw,
   RotateCcw,
   Trash2,
   TrendingUp,
+  Upload,
   XCircle,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { formatClientApiError, parseApiJsonResponse, resolveApiUrl } from '../lib/apiClient';
 import {
+  createStudyMaterialRecord,
   deleteQuiz,
   deleteQuizAttempt,
   recordStudyActivity,
@@ -100,6 +105,17 @@ export function QuizExamSystem({
   const [selectedSummaryId, setSelectedSummaryId] = useState<string>('');
   const [pastedText, setPastedText] = useState<string>('');
   const [topicTitle, setTopicTitle] = useState<string>('');
+
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState<boolean>(false);
+  const [extractingUpload, setExtractingUpload] = useState<boolean>(false);
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
+  const [uploadSuccessMsg, setUploadSuccessMsg] = useState<string | null>(null);
+  const [uploadErrorMsg, setUploadErrorMsg] = useState<string | null>(null);
+  const [extractedUploadText, setExtractedUploadText] = useState<string>('');
+  const [extractedUploadTitle, setExtractedUploadTitle] = useState<string>('');
+  const [isDragging, setIsDragging] = useState<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [assessmentMode, setAssessmentMode] = useState<QuizAssessmentMode>('practice');
   const [questionCount, setQuestionCount] = useState<QuizQuestionCount>(10);
@@ -320,6 +336,14 @@ export function QuizExamSystem({
         summaryId: null,
       };
     }
+    if (sourceMode === 'upload') {
+      return {
+        text: extractedUploadText,
+        title: extractedUploadTitle || uploadFile?.name || 'Uploaded Assessment Material',
+        materialId: null,
+        summaryId: null,
+      };
+    }
     return {
       text: '',
       title: topicTitle,
@@ -334,7 +358,76 @@ export function QuizExamSystem({
     selectedSummaryId,
     pastedText,
     topicTitle,
+    extractedUploadText,
+    extractedUploadTitle,
+    uploadFile,
   ]);
+
+  const handleQuizFileChosen = async (file: File | null) => {
+    if (!file) return;
+    setUploadFile(file);
+    setUploadErrorMsg(null);
+    setUploadSuccessMsg(null);
+    setExtractedUploadText('');
+    setExtractedUploadTitle('');
+    setUploading(true);
+    setExtractingUpload(true);
+    setUploadProgress(20);
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('title', file.name.replace(/\.[^/.]+$/, ''));
+
+    try {
+      setUploadProgress(50);
+      const res = await fetch(resolveApiUrl('/api/materials/extract'), {
+        method: 'POST',
+        body: formData,
+      });
+      setUploadProgress(85);
+      const extracted = await parseApiJsonResponse<{
+        title: string;
+        extractedText: string;
+        wordCount: number;
+      }>(res, 'extracting uploaded study material');
+
+      setExtractedUploadText(extracted.extractedText);
+      setExtractedUploadTitle(extracted.title);
+      setUploadSuccessMsg(`Successfully extracted ${extracted.wordCount.toLocaleString()} words from "${extracted.title}". Ready for quiz generation.`);
+      setUploadProgress(100);
+
+      if (user && isConfigured) {
+        try {
+          await createStudyMaterialRecord({
+            userId: user.id,
+            title: extracted.title,
+            materialType: file.type.includes('pdf') ? 'pdf' : file.type.startsWith('image') ? 'image' : 'text',
+            fileName: file.name,
+            fileSize: file.size,
+            mimeType: file.type,
+            storagePath: null,
+            extractedText: extracted.extractedText,
+            wordCount: extracted.wordCount,
+            chunkCount: 1,
+          });
+          onDataChanged();
+        } catch (dbErr) {
+          console.warn('Material save notice:', dbErr);
+        }
+      }
+    } catch (err: unknown) {
+      setUploadErrorMsg(
+        formatClientApiError(
+          err,
+          'extracting uploaded file',
+          'Failed to process file. Please try a smaller PDF, clear image, or text file.'
+        )
+      );
+    } finally {
+      setUploading(false);
+      setExtractingUpload(false);
+    }
+  };
 
   const handleGenerateAndStart = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -355,10 +448,12 @@ export function QuizExamSystem({
     if (sourceMode !== 'topic' && resolvedSource.text.trim().length < 30) {
       setErrorMsg(
         sourceMode === 'material'
-          ? 'Please upload a study material first or choose another quiz source.'
-          : sourceMode === 'summary'
-            ? 'Please save a summary first or choose another quiz source.'
-            : 'Please paste at least 30 characters of study material.'
+          ? 'Please select a study material or choose another quiz source.'
+          : sourceMode === 'upload'
+            ? 'Please upload and extract a valid file or choose another quiz source.'
+            : sourceMode === 'summary'
+              ? 'Please save a summary first or choose another quiz source.'
+              : 'Please paste at least 30 characters of study material.'
       );
       return;
     }
@@ -1505,10 +1600,11 @@ export function QuizExamSystem({
               <p className="mb-2.5 text-xs font-semibold text-slate-700 select-none dark:text-slate-300">
                 1. Assessment Source
               </p>
-              <div className="grid grid-cols-1 gap-2.5 min-[360px]:grid-cols-2 sm:grid-cols-4 select-none">
+              <div className="grid grid-cols-1 gap-2.5 min-[360px]:grid-cols-2 sm:grid-cols-5 select-none">
                 {(
                   [
                     { id: 'material' as QuizSourceMode, label: 'Uploaded Material' },
+                    { id: 'upload' as QuizSourceMode, label: 'Upload File' },
                     { id: 'summary' as QuizSourceMode, label: 'Saved Summary' },
                     { id: 'text' as QuizSourceMode, label: 'Paste Text' },
                     { id: 'topic' as QuizSourceMode, label: 'Subject / Topic' },
@@ -1607,6 +1703,126 @@ export function QuizExamSystem({
                     className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                   />
                 )}
+
+                {sourceMode === 'upload' && (
+                  <div className="space-y-4">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.txt,.md"
+                      className="hidden"
+                      onChange={(e) => handleQuizFileChosen(e.target.files?.[0] || null)}
+                    />
+
+                    {!uploadFile ? (
+                      <div
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          setIsDragging(true);
+                        }}
+                        onDragLeave={() => setIsDragging(false)}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          setIsDragging(false);
+                          handleQuizFileChosen(e.dataTransfer.files?.[0] || null);
+                        }}
+                        onClick={() => fileInputRef.current?.click()}
+                        className={`cursor-pointer rounded-2xl border-2 border-dashed p-6 text-center transition-colors sm:p-8 ${
+                          isDragging
+                            ? 'border-blue-600 bg-blue-50/50 dark:border-cyan-400 dark:bg-blue-950/30'
+                            : 'border-slate-300 bg-slate-50/50 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900/40 dark:hover:bg-slate-900'
+                        }`}
+                      >
+                        <Upload className="mx-auto h-8 w-8 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
+                        <p className="mt-3 font-display text-sm font-semibold text-slate-900 dark:text-white">
+                          Click to upload or drag & drop study material
+                        </p>
+                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                          Supports PDF, PNG, JPG, WEBP photos of notes, and TXT files (up to 25 MB)
+                        </p>
+                        <button
+                          type="button"
+                          className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] dark:bg-blue-600 dark:hover:bg-blue-500"
+                        >
+                          <span>Select Study File</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/50">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <FileText className="h-6 w-6 text-blue-600 shrink-0 dark:text-cyan-400" aria-hidden="true" />
+                            <div className="min-w-0">
+                              <p className="truncate font-display text-sm font-semibold text-slate-900 dark:text-white">
+                                {uploadFile.name}
+                              </p>
+                              <p className="font-mono text-xs text-slate-500 dark:text-slate-400">
+                                {(uploadFile.size / (1024 * 1024)).toFixed(2)} MB · {uploadFile.type || 'Document'}
+                              </p>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setUploadFile(null);
+                              setExtractedUploadText('');
+                              setExtractedUploadTitle('');
+                              setUploadSuccessMsg(null);
+                              setUploadErrorMsg(null);
+                              if (fileInputRef.current) fileInputRef.current.value = '';
+                            }}
+                            className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                          >
+                            <Trash2 className="h-3.5 w-3.5 text-red-500" aria-hidden="true" />
+                            <span>Remove</span>
+                          </button>
+                        </div>
+
+                        {(uploading || extractingUpload) && (
+                          <div className="mt-4 space-y-2">
+                            <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
+                              <span className="inline-flex items-center gap-1.5">
+                                <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600 dark:text-cyan-400" aria-hidden="true" />
+                                {uploading ? 'Uploading and extracting study text...' : 'Processing with AI...'}
+                              </span>
+                              <span className="font-mono tabular-nums">{uploadProgress}%</span>
+                            </div>
+                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                              <div
+                                className="h-full rounded-full bg-blue-600 transition-all duration-300 dark:bg-cyan-400"
+                                style={{ width: `${uploadProgress}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {uploadSuccessMsg && (
+                          <div className="mt-3 flex items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-200">
+                            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                            <span>{uploadSuccessMsg}</span>
+                          </div>
+                        )}
+
+                        {uploadErrorMsg && (
+                          <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
+                            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+                            <div className="flex-1">
+                              <span>{uploadErrorMsg}</span>
+                              <button
+                                type="button"
+                                onClick={() => handleQuizFileChosen(uploadFile)}
+                                className="mt-2 inline-flex items-center gap-1 rounded-md bg-red-100 px-2.5 py-1 text-[11px] font-semibold text-red-800 hover:bg-red-200 dark:bg-red-900 dark:text-red-200"
+                              >
+                                <RefreshCw className="h-3 w-3" aria-hidden="true" />
+                                <span>Retry Upload</span>
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1695,10 +1911,20 @@ export function QuizExamSystem({
                   onChange={(e) => setQuestionCount(Number(e.target.value) as QuizQuestionCount)}
                   className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm font-mono text-slate-900 tabular-nums focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                 >
+                  <option value={5}>5 Questions</option>
                   <option value={10}>10 Questions</option>
+                  <option value={15}>15 Questions</option>
                   <option value={20}>20 Questions</option>
+                  <option value={25}>25 Questions</option>
                   <option value={30}>30 Questions</option>
+                  <option value={35}>35 Questions</option>
                   <option value={40}>40 Questions</option>
+                  <option value={45}>45 Questions</option>
+                  <option value={50}>50 Questions</option>
+                  <option value={55}>55 Questions</option>
+                  <option value={60}>60 Questions</option>
+                  <option value={65}>65 Questions</option>
+                  <option value={70}>70 Questions</option>
                 </select>
               </div>
 
