@@ -768,7 +768,7 @@ export function createApiApp() {
       }
 
       const singleProbe = await probeSingleModelQuick(ai, activeModel, 18000);
-      if (!singleProbe.ok) {
+      if (!singleProbe.ok && singleProbe.status !== 503 && singleProbe.status !== 429 && singleProbe.status !== 504) {
         logServerWarn('api.health.probe', 'Configured AI model probe failed', {
           status: singleProbe.status,
           quotaHit: singleProbe.quotaHit,
@@ -1207,7 +1207,10 @@ export function createApiApp() {
                 }
               } catch (ocrErr) {
                 ocrFallbackError = ocrErr;
-                logServerWarn('materials.extract.pdf_ocr', 'AI OCR fallback failed for scanned PDF', ocrErr);
+                const errStatus = (ocrErr as { status?: number })?.status;
+                if (errStatus !== 503 && errStatus !== 429 && errStatus !== 504) {
+                  logServerWarn('materials.extract.pdf_ocr', 'AI OCR fallback failed for scanned PDF', ocrErr);
+                }
               }
             }
           }
