@@ -377,6 +377,8 @@ export function isTransientGeminiError(err: unknown): boolean {
 
 export interface RetryOptions {
   maxRetries?: number;
+  baseDelayMs?: number;
+  maxTotalElapsedMs?: number;
   timeoutMs?: number;
   externalSignal?: AbortSignal;
 }
@@ -388,9 +390,12 @@ export async function withRetry<T>(
   const opts: RetryOptions =
     typeof options === 'number' ? { maxRetries: options } : options;
   const maxRetries = opts.maxRetries ?? 2;
+  const baseDelayMs = opts.baseDelayMs ?? 600;
+  const maxTotalElapsedMs = opts.maxTotalElapsedMs ?? 25000;
   const timeoutMs = opts.timeoutMs;
   const externalSignal = opts.externalSignal;
 
+  const loopStart = Date.now();
   let lastError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (externalSignal?.aborted) {
@@ -426,6 +431,7 @@ export async function withRetry<T>(
     } catch (err: unknown) {
       lastError = err;
       const attemptElapsedMs = Date.now() - attemptStart;
+      const totalElapsedMs = Date.now() - loopStart;
 
       if (externalSignal?.aborted) {
         throw err;
@@ -451,15 +457,16 @@ export async function withRetry<T>(
         });
         const isHardDaily =
           quotaInfo.quotaScope === 'daily' || quotaInfo.quotaScope === 'zero_quota';
+        const waitMs = Math.min(7000, Math.max(1800, (quotaInfo.retryDelaySeconds ?? 2) * 1000));
         const canShortWait =
           !isHardDaily &&
           attempt < maxRetries &&
           attemptElapsedMs <= 15000 &&
+          totalElapsedMs + waitMs <= maxTotalElapsedMs &&
           (quotaInfo.retryDelaySeconds === null || quotaInfo.retryDelaySeconds <= 10);
         if (!canShortWait) {
           throw err;
         }
-        const waitMs = Math.min(7000, Math.max(1800, (quotaInfo.retryDelaySeconds ?? 2) * 1000));
         await new Promise((resolve) => setTimeout(resolve, waitMs));
         continue;
       }
@@ -469,12 +476,18 @@ export async function withRetry<T>(
       }
 
       const isTransient = isTransientGeminiError(err);
+      const jitter = Math.floor(Math.random() * 250);
+      const backoffMs = Math.min(4500, baseDelayMs * Math.pow(2, attempt)) + jitter;
 
-      if (!isTransient || attemptElapsedMs > 18000 || attempt >= maxRetries) {
+      if (
+        !isTransient ||
+        attemptElapsedMs > 18000 ||
+        totalElapsedMs + backoffMs > maxTotalElapsedMs ||
+        attempt >= maxRetries
+      ) {
         throw err;
       }
-      const jitter = Math.floor(Math.random() * 250);
-      await new Promise((resolve) => setTimeout(resolve, 600 * Math.pow(2, attempt) + jitter));
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
     } finally {
       if (timeoutHandle) clearTimeout(timeoutHandle);
       if (externalSignal) {

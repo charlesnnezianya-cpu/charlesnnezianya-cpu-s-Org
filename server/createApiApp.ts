@@ -631,22 +631,38 @@ async function openStreamAndPullFirstChunk<T extends { text?: string }>(
   return withRetry(
     async (signal) => {
       const combined = new AbortController();
-      const abortBoth = () => combined.abort();
-      signal?.addEventListener('abort', abortBoth, { once: true });
-      options.externalSignal.addEventListener('abort', abortBoth, { once: true });
-      return (async () => {
+      const abortFromRetry = () => combined.abort(signal?.reason);
+      const abortFromClient = () => combined.abort(options.externalSignal.reason);
+      signal?.addEventListener('abort', abortFromRetry, { once: true });
+      if (options.externalSignal.aborted) {
+        combined.abort(options.externalSignal.reason);
+      } else {
+        options.externalSignal.addEventListener('abort', abortFromClient, { once: true });
+      }
+      try {
         const stream = await createStream(combined.signal);
         const iterator = stream[Symbol.asyncIterator]();
-        const firstResult = await iterator.next();
+        let firstResult = await iterator.next();
+        while (!firstResult.done && !(firstResult.value?.text ?? '')) {
+          firstResult = await iterator.next();
+        }
+        if (firstResult.done) {
+          throw new AiInvalidResponseError(
+            'The AI returned an empty response. Your message has been preserved—please try again.'
+          );
+        }
         return { iterator, firstResult };
-      })().catch((err) => {
-        signal?.removeEventListener('abort', abortBoth);
-        options.externalSignal.removeEventListener('abort', abortBoth);
+      } catch (err) {
+        options.externalSignal.removeEventListener('abort', abortFromClient);
         throw err;
-      });
+      } finally {
+        signal?.removeEventListener('abort', abortFromRetry);
+      }
     },
     {
-      maxRetries: 2,
+      maxRetries: 3,
+      baseDelayMs: 900,
+      maxTotalElapsedMs: 22000,
       timeoutMs: options.timeoutMs,
       externalSignal: options.externalSignal,
     }
