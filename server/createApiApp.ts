@@ -1,4 +1,5 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import multer from 'multer';
 import path from 'path';
 import { ThinkingLevel, Type } from '@google/genai';
@@ -767,6 +768,14 @@ export function createApiApp() {
       }
 
       const singleProbe = await probeSingleModelQuick(ai, activeModel, 18000);
+      if (!singleProbe.ok) {
+        logServerWarn('api.health.probe', 'Configured AI model probe failed', {
+          status: singleProbe.status,
+          quotaHit: singleProbe.quotaHit,
+          latencyMs: singleProbe.latencyMs,
+          detail: singleProbe.upstreamError,
+        });
+      }
       const probeResults = [
         {
           ok: singleProbe.ok,
@@ -1163,6 +1172,7 @@ export function createApiApp() {
             logServerWarn('materials.extract.pdf_text', 'Primary PDF text extraction failed', pdfErr);
           }
 
+          let ocrFallbackError: unknown = null;
           if (!extractedText || extractedText.length < 60) {
             if (file.buffer.byteLength <= 20 * 1024 * 1024 && isGeminiConfigured()) {
               try {
@@ -1196,12 +1206,22 @@ export function createApiApp() {
                   extractionMethod = 'pdf-ocr';
                 }
               } catch (ocrErr) {
+                ocrFallbackError = ocrErr;
                 logServerWarn('materials.extract.pdf_ocr', 'AI OCR fallback failed for scanned PDF', ocrErr);
               }
             }
           }
 
           if (!extractedText) {
+            if (ocrFallbackError) {
+              const safeOcrErr = buildSafeApiError('materials.extract', ocrFallbackError, { skipLog: true });
+              if (safeOcrErr.status === 503 || safeOcrErr.status === 429 || safeOcrErr.status === 504) {
+                return res.status(safeOcrErr.status).json({
+                  error: safeOcrErr.message,
+                  referenceId: safeOcrErr.referenceId,
+                });
+              }
+            }
             return res.status(422).json({
               error:
                 'Could not extract text from this PDF. The file may contain no selectable text or is unreadable. Please upload a clear text-selectable PDF or images of the pages.',

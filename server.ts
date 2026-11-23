@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import http from 'http';
-import express, { Request, Response } from 'express';
+import express from 'express';
+import type { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
