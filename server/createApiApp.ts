@@ -41,6 +41,13 @@ import {
   logServerWarn,
   sendSafeApiError,
 } from './errorHandler.ts';
+import {
+  isGroqConfigured,
+  callGroqChatCompletionSequence,
+  callGroqChatStreamSequence,
+  runMasterAiGeneration,
+  GROQ_MODEL,
+} from './groqService.ts';
 
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -1393,249 +1400,263 @@ export function createApiApp() {
             ? 'Produce a DETAILED SUMMARY: thorough 2-paragraph topic overview, 5 to 8 main concept headings in document order (with grounded sourcePoints and helpful aiClarification), all key definitions, 8 to 14 key terminology entries, 2 to 4 difficult concept explanations, 5 to 8 important facts, 2 to 4 relevant examples, all relevant formulas/frameworks, 5 to 8 revision notes, and 5 to 7 key takeaways.'
             : 'Produce COMPREHENSIVE STUDY NOTES: rich multi-paragraph topic overview, 7 to 12 deeply structured main concept headings preserving exact progression of the uploaded material (each with exhaustive sourcePoints and dedicated aiClarification), complete important definitions, 12 to 20 key terminology items, 3 to 6 detailed difficult concept explanations, 8 to 12 important facts, 3 to 6 concrete examples, all relevant formulas/frameworks, 8 to 12 exam-ready revision notes, and 6 to 10 key takeaways.';
 
-      const { result: response } = await runWithGeminiModel(
-        (model, signal) =>
-          ai.models.generateContent({
-            model,
-            contents: `Material Title: ${title || 'Academic Study Material'}\nSource Format: ${materialType || 'text'}\n\n${depthInstructions}\n\nUploaded Source Content:\n${synthesisSource}`,
-            config: {
-              systemInstruction:
-                'You are Brainstine, an academic study companion. Prioritize the uploaded material strictly. Never fabricate facts or claim unsupported information came from the source. Clearly separate facts directly extracted from the material (sourcePoints, origin: "source", importantFacts) from helpful AI explanations/elaborations (aiClarification, plainExplanation, origin: "ai_clarification" or "ai_elaboration"). If no formulas or frameworks appear in the material, return an empty array for formulasOrFrameworks. Also generate comparisonTables whenever contrasting 2+ concepts/methods/entities (or empty array if unnecessary), and 1 to 2 visualDiagrams (process_flow, concept_map, scientific_system, or cartesian_plot) when a visual schematic helps students understand relationships, sequences, or systems cleanly.',
-              ...getModelThinkingConfig(
-                level === 'comprehensive' ? ThinkingLevel.LOW : ThinkingLevel.MINIMAL
-              ),
-              abortSignal: signal,
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  title: { type: Type.STRING },
-                  subjectArea: { type: Type.STRING },
-                  topicOverview: { type: Type.STRING },
-                  mainConcepts: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        heading: { type: Type.STRING },
-                        sourcePoints: {
-                          type: Type.ARRAY,
-                          items: { type: Type.STRING },
-                          description: 'Main points drawn directly from the uploaded material.',
-                        },
-                        aiClarification: {
-                          type: Type.STRING,
-                          description:
-                            'Brief AI-authored explanation or bridge clarifying why/how these source points connect.',
-                        },
-                      },
-                      required: ['heading', 'sourcePoints', 'aiClarification'],
-                    },
-                  },
-                  importantDefinitions: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        term: { type: Type.STRING },
-                        definition: { type: Type.STRING },
-                        origin: {
-                          type: Type.STRING,
-                          description:
-                            '"source" if defined in material, or "ai_clarification" if AI supplemented.',
-                        },
-                      },
-                      required: ['term', 'definition', 'origin'],
-                    },
-                  },
-                  keyTerminology: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                  },
-                  difficultConceptExplanations: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        concept: { type: Type.STRING },
-                        sourceContext: {
-                          type: Type.STRING,
-                          description: 'What the uploaded material states about this concept.',
-                        },
-                        plainExplanation: {
-                          type: Type.STRING,
-                          description:
-                            'Clear AI-authored breakdown explaining the difficult concept step by step.',
-                        },
-                      },
-                      required: ['concept', 'sourceContext', 'plainExplanation'],
-                    },
-                  },
-                  importantFacts: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: 'Key verifiable facts extracted directly from the uploaded material.',
-                  },
-                  relevantExamples: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        title: { type: Type.STRING },
-                        example: { type: Type.STRING },
-                        origin: {
-                          type: Type.STRING,
-                          description:
-                            '"source" if present in uploaded material, or "ai_elaboration" if generated to illustrate.',
-                        },
-                      },
-                      required: ['title', 'example', 'origin'],
-                    },
-                  },
-                  formulasOrFrameworks: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        name: { type: Type.STRING },
-                        expressionOrStructure: { type: Type.STRING },
-                        usage: { type: Type.STRING },
-                      },
-                      required: ['name', 'expressionOrStructure', 'usage'],
-                    },
-                  },
-                  comparisonTables: {
-                    type: Type.ARRAY,
-                    description: 'Optional comparison matrices contrasting key concepts/processes.',
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        title: { type: Type.STRING },
-                        headers: {
-                          type: Type.ARRAY,
-                          items: { type: Type.STRING },
-                        },
-                        rows: {
-                          type: Type.ARRAY,
-                          items: {
-                            type: Type.OBJECT,
-                            properties: {
-                              criterion: { type: Type.STRING },
-                              values: {
-                                type: Type.ARRAY,
-                                items: { type: Type.STRING },
-                              },
+      const summarySystemInstruction =
+        'You are Brainstine, an academic study companion. Prioritize the uploaded material strictly. Never fabricate facts or claim unsupported information came from the source. Clearly separate facts directly extracted from the material (sourcePoints, origin: "source", importantFacts) from helpful AI explanations/elaborations (aiClarification, plainExplanation, origin: "ai_clarification" or "ai_elaboration"). If no formulas or frameworks appear in the material, return an empty array for formulasOrFrameworks. Also generate comparisonTables whenever contrasting 2+ concepts/methods/entities (or empty array if unnecessary), and 1 to 2 visualDiagrams (process_flow, concept_map, scientific_system, or cartesian_plot) when a visual schematic helps students understand relationships, sequences, or systems cleanly.';
+      const summaryUserPrompt = `Material Title: ${title || 'Academic Study Material'}\nSource Format: ${materialType || 'text'}\n\n${depthInstructions}\n\nUploaded Source Content:\n${synthesisSource}`;
+
+      const { text: summaryResponseText } = await runMasterAiGeneration({
+        systemInstruction: summarySystemInstruction,
+        userPrompt: summaryUserPrompt,
+        jsonMode: true,
+        maxTokens: 8192,
+        temperature: 0.3,
+        geminiFallback: async () => {
+          const { result: response } = await runWithGeminiModel(
+            (model, signal) =>
+              ai.models.generateContent({
+                model,
+                contents: summaryUserPrompt,
+                config: {
+                  systemInstruction: summarySystemInstruction,
+                  ...getModelThinkingConfig(
+                    level === 'comprehensive' ? ThinkingLevel.LOW : ThinkingLevel.MINIMAL
+                  ),
+                  abortSignal: signal,
+                  responseMimeType: 'application/json',
+                  responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                      title: { type: Type.STRING },
+                      subjectArea: { type: Type.STRING },
+                      topicOverview: { type: Type.STRING },
+                      mainConcepts: {
+                        type: Type.ARRAY,
+                        items: {
+                          type: Type.OBJECT,
+                          properties: {
+                            heading: { type: Type.STRING },
+                            sourcePoints: {
+                              type: Type.ARRAY,
+                              items: { type: Type.STRING },
+                              description: 'Main points drawn directly from the uploaded material.',
                             },
-                            required: ['criterion', 'values'],
+                            aiClarification: {
+                              type: Type.STRING,
+                              description:
+                                'Brief AI-authored explanation or bridge clarifying why/how these source points connect.',
+                            },
                           },
+                          required: ['heading', 'sourcePoints', 'aiClarification'],
                         },
-                        caption: { type: Type.STRING },
                       },
-                      required: ['title', 'headers', 'rows'],
-                    },
-                  },
-                  visualDiagrams: {
-                    type: Type.ARRAY,
-                    description:
-                      '1-2 clear educational schematics/diagrams clarifying stages, concept maps, or quantitative trends.',
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        type: {
-                          type: Type.STRING,
-                          description:
-                            '"process_flow" | "concept_map" | "scientific_system" | "cartesian_plot"',
-                        },
-                        title: { type: Type.STRING },
-                        subject: { type: Type.STRING },
-                        caption: { type: Type.STRING },
-                        nodes: {
-                          type: Type.ARRAY,
-                          items: {
-                            type: Type.OBJECT,
-                            properties: {
-                              id: { type: Type.STRING },
-                              label: { type: Type.STRING },
-                              sublabel: { type: Type.STRING },
-                              detail: { type: Type.STRING },
-                              x: { type: Type.NUMBER },
-                              y: { type: Type.NUMBER },
-                              tone: { type: Type.STRING },
+                      importantDefinitions: {
+                        type: Type.ARRAY,
+                        items: {
+                          type: Type.OBJECT,
+                          properties: {
+                            term: { type: Type.STRING },
+                            definition: { type: Type.STRING },
+                            origin: {
+                              type: Type.STRING,
+                              description:
+                                '"source" if defined in material, or "ai_clarification" if AI supplemented.',
                             },
-                            required: ['id', 'label'],
                           },
+                          required: ['term', 'definition', 'origin'],
                         },
-                        edges: {
-                          type: Type.ARRAY,
-                          items: {
-                            type: Type.OBJECT,
-                            properties: {
-                              from: { type: Type.STRING },
-                              to: { type: Type.STRING },
-                              label: { type: Type.STRING },
+                      },
+                      keyTerminology: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                      },
+                      difficultConceptExplanations: {
+                        type: Type.ARRAY,
+                        items: {
+                          type: Type.OBJECT,
+                          properties: {
+                            concept: { type: Type.STRING },
+                            sourceContext: {
+                              type: Type.STRING,
+                              description: 'What the uploaded material states about this concept.',
                             },
-                            required: ['from', 'to'],
+                            plainExplanation: {
+                              type: Type.STRING,
+                              description:
+                                'Clear AI-authored breakdown explaining the difficult concept step by step.',
+                            },
                           },
+                          required: ['concept', 'sourceContext', 'plainExplanation'],
                         },
-                        xAxisLabel: { type: Type.STRING },
-                        yAxisLabel: { type: Type.STRING },
-                        series: {
-                          type: Type.ARRAY,
-                          items: {
-                            type: Type.OBJECT,
-                            properties: {
-                              name: { type: Type.STRING },
-                              color: { type: Type.STRING },
-                              points: {
-                                type: Type.ARRAY,
-                                items: {
-                                  type: Type.OBJECT,
-                                  properties: {
-                                    x: { type: Type.NUMBER },
-                                    y: { type: Type.NUMBER },
-                                    label: { type: Type.STRING },
+                      },
+                      importantFacts: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                        description: 'Key verifiable facts extracted directly from the uploaded material.',
+                      },
+                      relevantExamples: {
+                        type: Type.ARRAY,
+                        items: {
+                          type: Type.OBJECT,
+                          properties: {
+                            title: { type: Type.STRING },
+                            example: { type: Type.STRING },
+                            origin: {
+                              type: Type.STRING,
+                              description:
+                                '"source" if present in uploaded material, or "ai_elaboration" if generated to illustrate.',
+                            },
+                          },
+                          required: ['title', 'example', 'origin'],
+                        },
+                      },
+                      formulasOrFrameworks: {
+                        type: Type.ARRAY,
+                        items: {
+                          type: Type.OBJECT,
+                          properties: {
+                            name: { type: Type.STRING },
+                            expressionOrStructure: { type: Type.STRING },
+                            usage: { type: Type.STRING },
+                          },
+                          required: ['name', 'expressionOrStructure', 'usage'],
+                        },
+                      },
+                      comparisonTables: {
+                        type: Type.ARRAY,
+                        description: 'Optional comparison matrices contrasting key concepts/processes.',
+                        items: {
+                          type: Type.OBJECT,
+                          properties: {
+                            title: { type: Type.STRING },
+                            headers: {
+                              type: Type.ARRAY,
+                              items: { type: Type.STRING },
+                            },
+                            rows: {
+                              type: Type.ARRAY,
+                              items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                  criterion: { type: Type.STRING },
+                                  values: {
+                                    type: Type.ARRAY,
+                                    items: { type: Type.STRING },
                                   },
-                                  required: ['x', 'y'],
                                 },
+                                required: ['criterion', 'values'],
                               },
                             },
-                            required: ['name', 'points'],
+                            caption: { type: Type.STRING },
                           },
+                          required: ['title', 'headers', 'rows'],
                         },
                       },
-                      required: ['type', 'title', 'caption'],
+                      visualDiagrams: {
+                        type: Type.ARRAY,
+                        description:
+                          '1-2 clear educational schematics/diagrams clarifying stages, concept maps, or quantitative trends.',
+                        items: {
+                          type: Type.OBJECT,
+                          properties: {
+                            type: {
+                              type: Type.STRING,
+                              description:
+                                '"process_flow" | "concept_map" | "scientific_system" | "cartesian_plot"',
+                            },
+                            title: { type: Type.STRING },
+                            subject: { type: Type.STRING },
+                            caption: { type: Type.STRING },
+                            nodes: {
+                              type: Type.ARRAY,
+                              items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                  id: { type: Type.STRING },
+                                  label: { type: Type.STRING },
+                                  sublabel: { type: Type.STRING },
+                                  detail: { type: Type.STRING },
+                                  x: { type: Type.NUMBER },
+                                  y: { type: Type.NUMBER },
+                                  tone: { type: Type.STRING },
+                                },
+                                required: ['id', 'label'],
+                              },
+                            },
+                            edges: {
+                              type: Type.ARRAY,
+                              items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                  from: { type: Type.STRING },
+                                  to: { type: Type.STRING },
+                                  label: { type: Type.STRING },
+                                },
+                                required: ['from', 'to'],
+                              },
+                            },
+                            xAxisLabel: { type: Type.STRING },
+                            yAxisLabel: { type: Type.STRING },
+                            series: {
+                              type: Type.ARRAY,
+                              items: {
+                                type: Type.OBJECT,
+                                properties: {
+                                  name: { type: Type.STRING },
+                                  color: { type: Type.STRING },
+                                  points: {
+                                    type: Type.ARRAY,
+                                    items: {
+                                      type: Type.OBJECT,
+                                      properties: {
+                                        x: { type: Type.NUMBER },
+                                        y: { type: Type.NUMBER },
+                                        label: { type: Type.STRING },
+                                      },
+                                      required: ['x', 'y'],
+                                    },
+                                  },
+                                },
+                                required: ['name', 'points'],
+                              },
+                            },
+                          },
+                          required: ['type', 'title', 'caption'],
+                        },
+                      },
+                      revisionNotes: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                      },
+                      keyTakeaways: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                      },
                     },
-                  },
-                  revisionNotes: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                  },
-                  keyTakeaways: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
+                    required: [
+                      'title',
+                      'subjectArea',
+                      'topicOverview',
+                      'mainConcepts',
+                      'importantDefinitions',
+                      'keyTerminology',
+                      'difficultConceptExplanations',
+                      'importantFacts',
+                      'relevantExamples',
+                      'formulasOrFrameworks',
+                      'comparisonTables',
+                      'visualDiagrams',
+                      'revisionNotes',
+                      'keyTakeaways',
+                    ],
                   },
                 },
-                required: [
-                  'title',
-                  'subjectArea',
-                  'topicOverview',
-                  'mainConcepts',
-                  'importantDefinitions',
-                  'keyTerminology',
-                  'difficultConceptExplanations',
-                  'importantFacts',
-                  'relevantExamples',
-                  'formulasOrFrameworks',
-                  'comparisonTables',
-                  'visualDiagrams',
-                  'revisionNotes',
-                  'keyTakeaways',
-                ],
-              },
-            },
-          }),
-        { maxRetries: 1, timeoutMs: 75000 }
-      );
+              }),
+            { maxRetries: 1, timeoutMs: 75000 }
+          );
+          return response.text ?? '';
+        },
+      });
+      const response = { text: summaryResponseText };
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const parsed = parseAiJsonResponse<Record<string, any>>(response.text, 'generating the study summary');
