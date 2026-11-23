@@ -39,8 +39,36 @@ export interface GroqCallOptions {
 }
 
 /**
+ * Normalizes messages for Groq API.
+ * When jsonMode is requested, Groq requires the word 'json' in messages.
+ */
+function normalizeMessagesForGroq(
+  messages: GroqMessage[],
+  jsonMode?: boolean
+): GroqMessage[] {
+  const result = messages.map((m) => ({ ...m }));
+  if (jsonMode) {
+    const hasJsonWord = result.some((m) =>
+      m.content.toLowerCase().includes('json')
+    );
+    if (!hasJsonWord) {
+      const sysIdx = result.findIndex((m) => m.role === 'system');
+      if (sysIdx >= 0) {
+        result[sysIdx].content += '\n\nYou must respond with a valid JSON object.';
+      } else {
+        result.unshift({
+          role: 'system',
+          content: 'You are an academic AI assistant. You must respond with a valid JSON object.',
+        });
+      }
+    }
+  }
+  return result;
+}
+
+/**
  * Executes a chat completion against GroqCloud following the strict priority sequence:
- * GROQ API KEY 1 -> GROQ API KEY 2 -> GROQ API KEY 3 -> Gemini Fallback.
+ * GROQ API KEY 1 -> GROQ API KEY 2 -> GROQ API KEY 3.
  */
 export async function callGroqChatCompletionSequence(
   messages: GroqMessage[],
@@ -57,6 +85,7 @@ export async function callGroqChatCompletionSequence(
     throw new Error('No Groq API keys configured.');
   }
 
+  const effectiveMessages = normalizeMessagesForGroq(messages, options.jsonMode);
   const timeoutMs = options.timeoutMs ?? 60000;
   let lastError: unknown = null;
 
@@ -68,7 +97,7 @@ export async function callGroqChatCompletionSequence(
     try {
       const payload: Record<string, unknown> = {
         model: GROQ_MODEL,
-        messages,
+        messages: effectiveMessages,
         temperature: options.temperature ?? 0.3,
       };
 
@@ -98,33 +127,36 @@ export async function callGroqChatCompletionSequence(
         if (content) {
           return { text: content, provider: keyName };
         }
-        throw new Error('Groq returned an empty completion response.');
+        throw new Error(`Groq on ${keyName} returned an empty completion response.`);
       }
 
       const errBody = await res.text().catch(() => '');
       const status = res.status;
+      console.warn(
+        `[Master AI Sequence] Groq attempt on ${keyName} failed with HTTP ${status}: ${errBody.slice(0, 250)}`
+      );
 
-      // If permanent client error (400, 401, 403), do not retry Groq further
-      if (status === 401 || status === 403 || status === 400) {
-        throw new Error(`Groq non-retryable error (status ${status}): ${errBody.slice(0, 200)}`);
-      }
-
-      // For 429, 503, etc., proceed to next key in sequence
-      lastError = new Error(`Groq error (status ${status}): ${errBody.slice(0, 200)}`);
+      lastError = new Error(`Groq error on ${keyName} (status ${status}): ${errBody.slice(0, 200)}`);
+      // Proceed to the next key in sequence (e.g. key1 -> key2 -> key3)
     } catch (err: unknown) {
       lastError = err;
       const errStr = err instanceof Error ? err.message : String(err);
+      console.warn(`[Master AI Sequence] Groq attempt on ${keyName} caught: ${errStr}`);
       if (errStr.includes('aborted') || err instanceof DOMException) {
-        lastError = new Error('Groq request timed out.');
+        lastError = new Error(`Groq request timed out on ${keyName}.`);
       }
     } finally {
       clearTimeout(timer);
     }
   }
 
-  throw lastError || new Error('All Groq keys failed.');
+  throw lastError || new Error('All configured Groq keys failed.');
 }
 
+/**
+ * Executes a streaming chat completion against GroqCloud following the strict sequence:
+ * GROQ API KEY 1 -> GROQ API KEY 2 -> GROQ API KEY 3.
+ */
 export async function callGroqChatStreamSequence(
   messages: GroqMessage[],
   onChunk: (text: string) => void,
@@ -141,6 +173,7 @@ export async function callGroqChatStreamSequence(
     throw new Error('No Groq API keys configured.');
   }
 
+  const effectiveMessages = normalizeMessagesForGroq(messages, options.jsonMode);
   const timeoutMs = options.timeoutMs ?? 75000;
   let lastError: unknown = null;
 
@@ -148,14 +181,19 @@ export async function callGroqChatStreamSequence(
     const { keyName, keyValue } = attemptItem;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let chunkEmitted = false;
 
     try {
-      const payload = {
+      const payload: Record<string, unknown> = {
         model: GROQ_MODEL,
-        messages,
+        messages: effectiveMessages,
         temperature: options.temperature ?? 0.4,
         stream: true,
       };
+
+      if (options.maxTokens) {
+        payload.max_tokens = options.maxTokens;
+      }
 
       const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
@@ -171,12 +209,15 @@ export async function callGroqChatStreamSequence(
 
       if (!res.ok) {
         const errText = await res.text().catch(() => '');
-        lastError = new Error(`Groq Stream error (status ${res.status}): ${errText.slice(0, 200)}`);
+        console.warn(
+          `[Master AI Sequence] Groq stream on ${keyName} failed with HTTP ${res.status}: ${errText.slice(0, 250)}`
+        );
+        lastError = new Error(`Groq stream error on ${keyName} (status ${res.status}): ${errText.slice(0, 200)}`);
         continue;
       }
 
       if (!res.body) {
-        lastError = new Error('Groq returned a response without a readable body stream.');
+        lastError = new Error(`Groq stream on ${keyName} returned an empty body.`);
         continue;
       }
 
@@ -203,31 +244,37 @@ export async function callGroqChatStreamSequence(
             };
             const delta = parsed.choices?.[0]?.delta?.content ?? '';
             if (delta) {
+              chunkEmitted = true;
               onChunk(delta);
             }
           } catch {
-            // ignore JSON parse errors on malformed chunks
+            // Ignore incomplete streaming frames
           }
         }
       }
 
       return { provider: keyName };
     } catch (err: unknown) {
+      console.warn(`[Master AI Sequence] Groq stream caught error on ${keyName}:`, err);
+      if (chunkEmitted) {
+        // Stream already started delivering to client; rethrow
+        throw err;
+      }
       lastError = err;
     } finally {
       clearTimeout(timer);
     }
   }
 
-  throw lastError || new Error('Groq streaming failed across all keys.');
+  throw lastError || new Error('Groq streaming failed across all configured keys.');
 }
 
 /**
- * Master unified execution helper:
- * Tries Groq Key 1 -> Groq Key 2 -> Groq Key 3 -> Gemini Fallback.
+ * Master unified execution helper for non-streaming calls:
+ * Strict sequence: GROQ KEY 1 -> GROQ KEY 2 -> GROQ KEY 3 -> Gemini Fallback.
  */
 export async function runMasterAiGeneration(params: {
-  systemInstruction: string;
+  systemInstruction?: string;
   userPrompt: string;
   jsonMode?: boolean;
   maxTokens?: number;
@@ -237,10 +284,12 @@ export async function runMasterAiGeneration(params: {
   const cfg = getGroqKeyConfig();
   if (cfg.key1 || cfg.key2 || cfg.key3) {
     try {
-      const messages: GroqMessage[] = [
-        { role: 'system', content: params.systemInstruction },
-        { role: 'user', content: params.userPrompt },
-      ];
+      const messages: GroqMessage[] = [];
+      if (params.systemInstruction) {
+        messages.push({ role: 'system', content: params.systemInstruction });
+      }
+      messages.push({ role: 'user', content: params.userPrompt });
+
       const result = await callGroqChatCompletionSequence(messages, {
         jsonMode: params.jsonMode,
         maxTokens: params.maxTokens,
@@ -248,10 +297,96 @@ export async function runMasterAiGeneration(params: {
       });
       return { text: result.text, provider: result.provider, modelId: GROQ_MODEL };
     } catch (groqSeqErr) {
-      console.warn('[Master AI Sequence] Groq keys exhausted, falling back to Gemini', groqSeqErr);
+      console.warn('[Master AI Sequence] All Groq keys exhausted, falling back to Gemini API:', groqSeqErr);
     }
   }
 
   const geminiText = await params.geminiFallback();
   return { text: geminiText, provider: 'gemini-fallback', modelId: 'gemini-3.1-flash-lite' };
+}
+
+/**
+ * Master unified execution helper for streaming calls:
+ * Strict sequence: GROQ KEY 1 -> GROQ KEY 2 -> GROQ KEY 3 -> Gemini Fallback.
+ */
+export async function runMasterAiStream(params: {
+  systemInstruction?: string;
+  userPrompt?: string;
+  messages?: GroqMessage[];
+  onChunk: (chunk: string) => void;
+  temperature?: number;
+  maxTokens?: number;
+  geminiFallback: () => Promise<void>;
+}): Promise<{ provider: string; modelId: string }> {
+  const cfg = getGroqKeyConfig();
+  if (cfg.key1 || cfg.key2 || cfg.key3) {
+    try {
+      let msgs: GroqMessage[] = [];
+      if (params.messages && params.messages.length > 0) {
+        msgs = params.messages;
+      } else {
+        if (params.systemInstruction) {
+          msgs.push({ role: 'system', content: params.systemInstruction });
+        }
+        if (params.userPrompt) {
+          msgs.push({ role: 'user', content: params.userPrompt });
+        }
+      }
+
+      const res = await callGroqChatStreamSequence(msgs, params.onChunk, {
+        temperature: params.temperature,
+        maxTokens: params.maxTokens,
+      });
+      return { provider: res.provider, modelId: GROQ_MODEL };
+    } catch (groqStreamErr) {
+      console.warn('[Master AI Sequence] Groq streaming failed across all keys, falling back to Gemini stream:', groqStreamErr);
+    }
+  }
+
+  await params.geminiFallback();
+  return { provider: 'gemini-fallback', modelId: 'gemini-3.1-flash-lite' };
+}
+
+/**
+ * Directly probes an individual Groq API key with a 1-token test prompt.
+ * Used for technical audit, diagnostic verification, and health monitoring.
+ */
+export async function probeIndividualGroqKey(
+  keyValue: string,
+  timeoutMs: number = 8000
+): Promise<{ ok: boolean; latencyMs: number; status?: number; error?: string }> {
+  const start = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${keyValue}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'aistudio-build',
+      },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        messages: [{ role: 'user', content: 'Reply with the single word OK.' }],
+        max_tokens: 5,
+        temperature: 0,
+      }),
+      signal: controller.signal,
+    });
+
+    const latencyMs = Date.now() - start;
+    if (res.ok) {
+      return { ok: true, latencyMs, status: res.status };
+    }
+    const errText = await res.text().catch(() => '');
+    return { ok: false, latencyMs, status: res.status, error: errText.slice(0, 150) };
+  } catch (err: unknown) {
+    const latencyMs = Date.now() - start;
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, latencyMs, error: msg.includes('aborted') ? 'Request timed out' : msg };
+  } finally {
+    clearTimeout(timer);
+  }
 }

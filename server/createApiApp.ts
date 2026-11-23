@@ -43,9 +43,12 @@ import {
 } from './errorHandler.ts';
 import {
   isGroqConfigured,
+  getGroqKeyConfig,
   callGroqChatCompletionSequence,
   callGroqChatStreamSequence,
   runMasterAiGeneration,
+  runMasterAiStream,
+  probeIndividualGroqKey,
   GROQ_MODEL,
 } from './groqService.ts';
 
@@ -747,7 +750,11 @@ export function createApiApp() {
   );
 
   app.get('/api/health', async (req: Request, res: Response) => {
+    const groqKeyConfig = getGroqKeyConfig();
+    const groqConfigured = Boolean(groqKeyConfig.key1 || groqKeyConfig.key2 || groqKeyConfig.key3);
     const geminiConfigured = isGeminiConfigured();
+    const aiConfigured = groqConfigured || geminiConfigured;
+
     const supabaseUrl = (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '').trim();
     const supabaseAnonKey = (process.env.VITE_SUPABASE_ANON_KEY || '').trim();
     const supabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
@@ -760,37 +767,77 @@ export function createApiApp() {
     const resolvedState = getResolvedModelState();
     const activeModel = getGeminiModel();
 
-    if (req.query.probe === '1' && geminiConfigured) {
-      const ai = getGeminiClient();
-      let listedCount = 0;
-
-      try {
-        const pager = await ai.models.list({ config: { pageSize: 50 } });
-        for await (const m of pager) {
-          if (m.name) listedCount++;
-          if (listedCount >= 60) break;
+    if (req.query.probe === '1') {
+      let groqProbe: { ok: boolean; provider?: string; error?: string; latencyMs: number } | null = null;
+      if (groqConfigured) {
+        const groqStart = Date.now();
+        try {
+          const groqRes = await callGroqChatCompletionSequence([
+            { role: 'user', content: 'Reply with the single word OK.' }
+          ], { timeoutMs: 15000 });
+          groqProbe = {
+            ok: Boolean(groqRes.text),
+            provider: groqRes.provider,
+            latencyMs: Date.now() - groqStart,
+          };
+        } catch (err: unknown) {
+          groqProbe = {
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+            latencyMs: Date.now() - groqStart,
+          };
         }
-      } catch (err: unknown) {
-        logServerWarn('api.health.probe', 'Model list probe encountered an error', err);
       }
 
-      const singleProbe = await probeSingleModelQuick(ai, activeModel, 18000);
-      if (!singleProbe.ok && singleProbe.status !== 503 && singleProbe.status !== 429 && singleProbe.status !== 504) {
-        logServerWarn('api.health.probe', 'Configured AI model probe failed', {
-          status: singleProbe.status,
-          quotaHit: singleProbe.quotaHit,
-          latencyMs: singleProbe.latencyMs,
-          detail: singleProbe.upstreamError,
-        });
+      const individualKeyProbes: {
+        key1?: { ok: boolean; latencyMs: number; status?: number; error?: string };
+        key2?: { ok: boolean; latencyMs: number; status?: number; error?: string };
+        key3?: { ok: boolean; latencyMs: number; status?: number; error?: string };
+      } = {};
+
+      if (groqKeyConfig.key1) {
+        individualKeyProbes.key1 = await probeIndividualGroqKey(groqKeyConfig.key1);
       }
-      const probeResults = [
-        {
-          ok: singleProbe.ok,
-          latencyMs: singleProbe.latencyMs,
-          status: singleProbe.status,
-          quotaHit: singleProbe.quotaHit,
-        },
-      ];
+      if (groqKeyConfig.key2) {
+        individualKeyProbes.key2 = await probeIndividualGroqKey(groqKeyConfig.key2);
+      }
+      if (groqKeyConfig.key3) {
+        individualKeyProbes.key3 = await probeIndividualGroqKey(groqKeyConfig.key3);
+      }
+
+      let listedCount = 0;
+      let probeResults: Array<{ ok: boolean; latencyMs: number; status?: number; quotaHit?: boolean }> = [];
+
+      if (geminiConfigured) {
+        const ai = getGeminiClient();
+        try {
+          const pager = await ai.models.list({ config: { pageSize: 50 } });
+          for await (const m of pager) {
+            if (m.name) listedCount++;
+            if (listedCount >= 60) break;
+          }
+        } catch (err: unknown) {
+          logServerWarn('api.health.probe', 'Model list probe encountered an error', err);
+        }
+
+        const singleProbe = await probeSingleModelQuick(ai, activeModel, 18000);
+        if (!singleProbe.ok && singleProbe.status !== 503 && singleProbe.status !== 429 && singleProbe.status !== 504) {
+          logServerWarn('api.health.probe', 'Configured AI model probe failed', {
+            status: singleProbe.status,
+            quotaHit: singleProbe.quotaHit,
+            latencyMs: singleProbe.latencyMs,
+            detail: singleProbe.upstreamError,
+          });
+        }
+        probeResults = [
+          {
+            ok: singleProbe.ok,
+            latencyMs: singleProbe.latencyMs,
+            status: singleProbe.status,
+            quotaHit: singleProbe.quotaHit,
+          },
+        ];
+      }
 
       let supabaseHealthy: boolean | null = null;
       if (supabaseConfigured) {
@@ -806,7 +853,16 @@ export function createApiApp() {
 
       return res.json({
         ok: true,
-        geminiConfigured,
+        aiConfigured,
+        geminiConfigured: aiConfigured,
+        groqConfigured,
+        groqKeys: {
+          key1: Boolean(groqKeyConfig.key1),
+          key2: Boolean(groqKeyConfig.key2),
+          key3: Boolean(groqKeyConfig.key3),
+        },
+        groqProbe,
+        groqIndividualProbes: individualKeyProbes,
         supabaseConfigured,
         supabaseHealthy,
         listedCount,
@@ -816,10 +872,17 @@ export function createApiApp() {
 
     res.json({
       ok: true,
-      geminiConfigured,
+      aiConfigured,
+      geminiConfigured: aiConfigured,
+      groqConfigured,
+      groqKeys: {
+        key1: Boolean(groqKeyConfig.key1),
+        key2: Boolean(groqKeyConfig.key2),
+        key3: Boolean(groqKeyConfig.key3),
+      },
       supabaseConfigured,
       configuredModel: configuredEnvModel ? 'locked' : 'default',
-      activeModel: resolvedState ? 'ready' : activeModel ? 'ready' : 'unavailable',
+      activeModel: groqConfigured ? GROQ_MODEL : (resolvedState ? 'ready' : activeModel ? 'ready' : 'unavailable'),
     });
   });
 
@@ -1368,27 +1431,36 @@ export function createApiApp() {
 
       if (chunks.length > 2) {
         const chunkNotes = await mapWithConcurrency(chunks, 3, async (chunkTextItem, i) => {
-          const { result: partRes } = await runWithGeminiModel(
-            (model, signal) =>
-              ai.models.generateContent({
-                model,
-                contents: `Extract all essential academic concepts, facts, definitions, formulas/frameworks, and examples strictly from Section ${i + 1} of ${chunks.length} of "${title || 'Study Material'}". Preserve exact order and accuracy without inventing external claims.\n\n---\n${chunkTextItem}`,
-                config: {
-                  systemInstruction:
-                    'You are a rigorous academic research assistant. Distill each document section faithfully from the provided text without inventing facts.',
-                  ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-                  abortSignal: signal,
-                },
-              }),
-            { maxRetries: 1, timeoutMs: 50000 }
-          );
-          const textPart = (partRes.text ?? '').trim();
-          if (!textPart) {
+          const chunkPrompt = `Extract all essential academic concepts, facts, definitions, formulas/frameworks, and examples strictly from Section ${i + 1} of ${chunks.length} of "${title || 'Study Material'}". Preserve exact order and accuracy without inventing external claims.\n\n---\n${chunkTextItem}`;
+          const { text: textPart } = await runMasterAiGeneration({
+            systemInstruction:
+              'You are a rigorous academic research assistant. Distill each document section faithfully from the provided text without inventing facts.',
+            userPrompt: chunkPrompt,
+            geminiFallback: async () => {
+              const { result: partRes } = await runWithGeminiModel(
+                (model, signal) =>
+                  ai.models.generateContent({
+                    model,
+                    contents: chunkPrompt,
+                    config: {
+                      systemInstruction:
+                        'You are a rigorous academic research assistant. Distill each document section faithfully from the provided text without inventing facts.',
+                      ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+                      abortSignal: signal,
+                    },
+                  }),
+                { maxRetries: 1, timeoutMs: 50000 }
+              );
+              return partRes.text ?? '';
+            },
+          });
+          const trimmedPart = textPart.trim();
+          if (!trimmedPart) {
             throw new AiInvalidResponseError(
               `The AI returned an empty response while processing section ${i + 1}. Please try again.`
             );
           }
-          return `[Section ${i + 1}]\n${textPart}`;
+          return `[Section ${i + 1}]\n${trimmedPart}`;
         });
         synthesisSource = chunkNotes.join('\n\n');
       }
@@ -1401,8 +1473,69 @@ export function createApiApp() {
             : 'Produce COMPREHENSIVE STUDY NOTES: rich multi-paragraph topic overview, 7 to 12 deeply structured main concept headings preserving exact progression of the uploaded material (each with exhaustive sourcePoints and dedicated aiClarification), complete important definitions, 12 to 20 key terminology items, 3 to 6 detailed difficult concept explanations, 8 to 12 important facts, 3 to 6 concrete examples, all relevant formulas/frameworks, 8 to 12 exam-ready revision notes, and 6 to 10 key takeaways.';
 
       const summarySystemInstruction =
-        'You are Brainstine, an academic study companion. Prioritize the uploaded material strictly. Never fabricate facts or claim unsupported information came from the source. Clearly separate facts directly extracted from the material (sourcePoints, origin: "source", importantFacts) from helpful AI explanations/elaborations (aiClarification, plainExplanation, origin: "ai_clarification" or "ai_elaboration"). If no formulas or frameworks appear in the material, return an empty array for formulasOrFrameworks. Also generate comparisonTables whenever contrasting 2+ concepts/methods/entities (or empty array if unnecessary), and 1 to 2 visualDiagrams (process_flow, concept_map, scientific_system, or cartesian_plot) when a visual schematic helps students understand relationships, sequences, or systems cleanly.';
-      const summaryUserPrompt = `Material Title: ${title || 'Academic Study Material'}\nSource Format: ${materialType || 'text'}\n\n${depthInstructions}\n\nUploaded Source Content:\n${synthesisSource}`;
+        `You are Brainstine, an academic study companion. Prioritize the uploaded material strictly. Never fabricate facts or claim unsupported information came from the source. Clearly separate facts directly extracted from the material (sourcePoints, origin: "source", importantFacts) from helpful AI explanations/elaborations (aiClarification, plainExplanation, origin: "ai_clarification" or "ai_elaboration"). If no formulas or frameworks appear in the material, return an empty array for formulasOrFrameworks. Also generate comparisonTables whenever contrasting 2+ concepts/methods/entities (or empty array if unnecessary), and 1 to 2 visualDiagrams (process_flow, concept_map, scientific_system, or cartesian_plot) when a visual schematic helps students understand relationships, sequences, or systems cleanly.
+
+CRITICAL JSON FORMAT REQUIREMENT:
+You must respond strictly with a valid JSON object matching this schema:
+{
+  "title": "string",
+  "subjectArea": "string",
+  "topicOverview": "string",
+  "mainConcepts": [
+    {
+      "heading": "string",
+      "sourcePoints": ["string"],
+      "aiClarification": "string"
+    }
+  ],
+  "importantDefinitions": [
+    {
+      "term": "string",
+      "definition": "string",
+      "origin": "source"
+    }
+  ],
+  "keyTerminology": ["string"],
+  "difficultConceptExplanations": [
+    {
+      "concept": "string",
+      "sourceContext": "string",
+      "plainExplanation": "string"
+    }
+  ],
+  "importantFacts": ["string"],
+  "relevantExamples": [
+    {
+      "title": "string",
+      "example": "string",
+      "origin": "source"
+    }
+  ],
+  "formulasOrFrameworks": [
+    {
+      "name": "string",
+      "expressionOrStructure": "string",
+      "usage": "string"
+    }
+  ],
+  "comparisonTables": [
+    {
+      "title": "string",
+      "headers": ["string"],
+      "rows": [
+        {
+          "criterion": "string",
+          "values": ["string"]
+        }
+      ],
+      "caption": "string"
+    }
+  ],
+  "visualDiagrams": [],
+  "revisionNotes": ["string"],
+  "keyTakeaways": ["string"]
+}`;
+      const summaryUserPrompt = `Material Title: ${title || 'Academic Study Material'}\nSource Format: ${materialType || 'text'}\n\n${depthInstructions}\n\nUploaded Source Content:\n${synthesisSource}\n\nRespond with a valid JSON object matching the requested schema.`;
 
       const { text: summaryResponseText } = await runMasterAiGeneration({
         systemInstruction: summarySystemInstruction,
@@ -1778,40 +1911,52 @@ export function createApiApp() {
         ? sourceText.slice(0, 18000)
         : (summary.markdown || '').slice(0, 12000);
 
-      const { result: response } = await runWithGeminiModel(
-        (model, signal) =>
-          ai.models.generateContent({
-            model,
-            contents: `Study Summary Title: ${summary.title}\nSubject: ${summary.subjectArea}\n\nSummary Content:\n${summary.markdown || ''}\n\nUploaded Source Excerpt:\n${contextSnippet}\n\nStudent Request: ${promptTask}`,
-            config: {
-              systemInstruction:
-                'You are Brainstine answering a scoped follow-up request on a specific study summary. Strictly separate what is explicitly stated in the uploaded source material ("fromSource") from any supplemental AI explanation, analogy, or examples ("aiExplanation"). Never claim AI-generated examples or clarifications came from the source text if they did not.',
-              ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-              abortSignal: signal,
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  fromSource: {
-                    type: Type.STRING,
-                    description:
-                      'Facts, statements, or context drawn directly from the uploaded material/summary (or "Not explicitly stated in the source material" if the question asks for outside elaboration).',
-                  },
-                  aiExplanation: {
-                    type: Type.STRING,
-                    description:
-                      'Clear, helpful AI-authored explanation, simplification, examples, or revision notes addressing the student request.',
+      const followUpSystemInstruction =
+        'You are Brainstine answering a scoped follow-up request on a specific study summary. You must respond with a valid JSON object strictly matching this schema: {"fromSource": "string", "aiExplanation": "string"}. Strictly separate what is explicitly stated in the uploaded source material ("fromSource") from any supplemental AI explanation, analogy, or examples ("aiExplanation"). Never claim AI-generated examples or clarifications came from the source text if they did not.';
+      const followUpUserPrompt = `Study Summary Title: ${summary.title}\nSubject: ${summary.subjectArea}\n\nSummary Content:\n${summary.markdown || ''}\n\nUploaded Source Excerpt:\n${contextSnippet}\n\nStudent Request: ${promptTask}\n\nRespond with a valid JSON object matching the requested schema.`;
+
+      const { text: followUpResponseText } = await runMasterAiGeneration({
+        systemInstruction: followUpSystemInstruction,
+        userPrompt: followUpUserPrompt,
+        jsonMode: true,
+        maxTokens: 2048,
+        geminiFallback: async () => {
+          const { result: response } = await runWithGeminiModel(
+            (model, signal) =>
+              ai.models.generateContent({
+                model,
+                contents: followUpUserPrompt,
+                config: {
+                  systemInstruction: followUpSystemInstruction,
+                  ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+                  abortSignal: signal,
+                  responseMimeType: 'application/json',
+                  responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                      fromSource: {
+                        type: Type.STRING,
+                        description:
+                          'Facts, statements, or context drawn directly from the uploaded material/summary (or "Not explicitly stated in the source material" if the question asks for outside elaboration).',
+                      },
+                      aiExplanation: {
+                        type: Type.STRING,
+                        description:
+                          'Clear, helpful AI-authored explanation, simplification, examples, or revision notes addressing the student request.',
+                      },
+                    },
+                    required: ['fromSource', 'aiExplanation'],
                   },
                 },
-                required: ['fromSource', 'aiExplanation'],
-              },
-            },
-          }),
-        { maxRetries: 2, timeoutMs: 45000 }
-      );
+              }),
+            { maxRetries: 2, timeoutMs: 45000 }
+          );
+          return response.text ?? '';
+        },
+      });
 
       const parsed = parseAiJsonResponse<{ fromSource?: string; aiExplanation?: string }>(
-        response.text,
+        followUpResponseText,
         'answering the summary follow-up'
       );
       if (!parsed.aiExplanation && !parsed.fromSource) {
@@ -2088,25 +2233,61 @@ export function createApiApp() {
             ? ' Optionally attach a visualAid diagram ONLY to 1 question per batch where a process diagram, quantitative plot, or labeled system genuinely helps test understanding.'
             : ' Do NOT include visualAid objects on bulk 25+ question exams so every question remains crisp and fast to generate.';
 
-        const { result: response } = await runWithGeminiModel(
-          (model, signal) =>
-            ai.models.generateContent({
-              model,
-              contents: `${sourceContext}\n\nDifficulty: ${difficultyGuide}\nFormat Requirements: ${buildFormatGuide(batchCount)}${batchScopeHint}${avoidDuplicatesClause}`,
-              config: {
-                systemInstruction: `You are Brainstine Assessment Engine, an academic professor creating rigorous, unambiguous university-grade examinations. Base questions strictly on the supplied study material (or established academic canon when generating from a topic). Every objective question must have exactly ONE defensible correct answer among four plausible options. Never fabricate false facts.${diagramGuidance}`,
-                ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-                abortSignal: signal,
-                responseMimeType: 'application/json',
-                responseSchema: quizResponseSchema,
-              },
-            }),
-          { maxRetries: 2, timeoutMs: 40000 }
-        );
+        const quizSystemInstruction = `You are Brainstine Assessment Engine, an academic professor creating rigorous, unambiguous university-grade examinations. Base questions strictly on the supplied study material (or established academic canon when generating from a topic). Every objective question must have exactly ONE defensible correct answer among four plausible options. Never fabricate false facts.${diagramGuidance}
+
+CRITICAL JSON FORMAT REQUIREMENT:
+You must respond with a valid JSON object strictly matching this schema:
+{
+  "title": "string",
+  "subjectArea": "string",
+  "questions": [
+    {
+      "id": "q1",
+      "number": 1,
+      "type": "objective",
+      "question": "string",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "correctOptionIndex": 0,
+      "expectedAnswer": "Option A",
+      "explanation": "string",
+      "maxMarks": 1,
+      "markingCriteria": ["string"]
+    }
+  ]
+}
+For objective questions, type="objective", exactly 4 options, correctOptionIndex (0-3), expectedAnswer matches correct option, and maxMarks=1.
+For theory questions, type="theory", options=[], maxMarks=5, and 2-4 concrete markingCriteria points.`;
+
+        const quizUserPrompt = `${sourceContext}\n\nDifficulty: ${difficultyGuide}\nFormat Requirements: ${buildFormatGuide(batchCount)}${batchScopeHint}${avoidDuplicatesClause}\n\nRespond with a valid JSON object matching the requested schema.`;
+
+        const { text: batchText } = await runMasterAiGeneration({
+          systemInstruction: quizSystemInstruction,
+          userPrompt: quizUserPrompt,
+          jsonMode: true,
+          maxTokens: 8192,
+          geminiFallback: async () => {
+            const { result: response } = await runWithGeminiModel(
+              (model, signal) =>
+                ai.models.generateContent({
+                  model,
+                  contents: quizUserPrompt,
+                  config: {
+                    systemInstruction: `You are Brainstine Assessment Engine, an academic professor creating rigorous, unambiguous university-grade examinations. Base questions strictly on the supplied study material (or established academic canon when generating from a topic). Every objective question must have exactly ONE defensible correct answer among four plausible options. Never fabricate false facts.${diagramGuidance}`,
+                    ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+                    abortSignal: signal,
+                    responseMimeType: 'application/json',
+                    responseSchema: quizResponseSchema,
+                  },
+                }),
+              { maxRetries: 2, timeoutMs: 40000 }
+            );
+            return response.text ?? '';
+          },
+        });
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return parseAiJsonResponse<Record<string, any>>(
-          response.text,
+          batchText,
           'generating quiz questions'
         );
       };
@@ -2395,43 +2576,56 @@ export function createApiApp() {
             studentResponse: item.responseText,
           }));
 
-          const { result: evalRes } = await runWithGeminiModel(
-            (model, signal) =>
-              ai.models.generateContent({
-                model,
-                contents: `Examination Title: ${quizTitle || 'Academic Assessment'}\n\nEvaluate each student theory response fairly and strictly against the expectedAnswer and markingCriteria:\n${JSON.stringify(batchPayload, null, 2)}`,
-                config: {
-                  systemInstruction:
-                    'You are an objective academic examiner evaluating student theory answers. Award marks from 0 up to maxMarks based strictly on how accurately and completely the student addressed the marking criteria. Provide concise, constructive feedback and list any important missing points.',
-                  ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-                  abortSignal: signal,
-                  responseMimeType: 'application/json',
-                  responseSchema: {
-                    type: Type.OBJECT,
-                    properties: {
-                      evaluations: {
-                        type: Type.ARRAY,
-                        items: {
-                          type: Type.OBJECT,
-                          properties: {
-                            questionId: { type: Type.STRING },
-                            marksAwarded: { type: Type.NUMBER },
-                            feedback: { type: Type.STRING },
-                            missingPoints: {
-                              type: Type.ARRAY,
-                              items: { type: Type.STRING },
+          const gradeSystemInstruction =
+            'You are an objective academic examiner evaluating student theory answers. Award marks from 0 up to maxMarks based strictly on how accurately and completely the student addressed the marking criteria. Provide concise, constructive feedback and list any important missing points.\n\nCRITICAL JSON FORMAT REQUIREMENT:\nYou must respond strictly with a valid JSON object matching this schema: {"evaluations": [{"questionId": "string", "marksAwarded": number, "feedback": "string", "missingPoints": ["string"]}]}';
+          const gradeUserPrompt = `Examination Title: ${quizTitle || 'Academic Assessment'}\n\nEvaluate each student theory response fairly and strictly against the expectedAnswer and markingCriteria:\n${JSON.stringify(batchPayload, null, 2)}\n\nRespond with a valid JSON object containing the "evaluations" array.`;
+
+          const { text: gradeResponseText } = await runMasterAiGeneration({
+            systemInstruction: gradeSystemInstruction,
+            userPrompt: gradeUserPrompt,
+            jsonMode: true,
+            maxTokens: 4096,
+            geminiFallback: async () => {
+              const { result: evalRes } = await runWithGeminiModel(
+                (model, signal) =>
+                  ai.models.generateContent({
+                    model,
+                    contents: gradeUserPrompt,
+                    config: {
+                      systemInstruction:
+                        'You are an objective academic examiner evaluating student theory answers. Award marks from 0 up to maxMarks based strictly on how accurately and completely the student addressed the marking criteria. Provide concise, constructive feedback and list any important missing points.',
+                      ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+                      abortSignal: signal,
+                      responseMimeType: 'application/json',
+                      responseSchema: {
+                        type: Type.OBJECT,
+                        properties: {
+                          evaluations: {
+                            type: Type.ARRAY,
+                            items: {
+                              type: Type.OBJECT,
+                              properties: {
+                                questionId: { type: Type.STRING },
+                                marksAwarded: { type: Type.NUMBER },
+                                feedback: { type: Type.STRING },
+                                missingPoints: {
+                                  type: Type.ARRAY,
+                                  items: { type: Type.STRING },
+                                },
+                              },
+                              required: ['questionId', 'marksAwarded', 'feedback', 'missingPoints'],
                             },
                           },
-                          required: ['questionId', 'marksAwarded', 'feedback', 'missingPoints'],
                         },
+                        required: ['evaluations'],
                       },
                     },
-                    required: ['evaluations'],
-                  },
-                },
-              }),
-            { maxRetries: 1, timeoutMs: 60000 }
-          );
+                  }),
+                { maxRetries: 1, timeoutMs: 60000 }
+              );
+              return evalRes.text ?? '';
+            },
+          });
 
           const parsedEval = parseAiJsonResponse<{
             evaluations?: Array<{
@@ -2440,7 +2634,7 @@ export function createApiApp() {
               feedback?: string;
               missingPoints?: unknown[];
             }>;
-          }>(evalRes.text, 'grading theory answers');
+          }>(gradeResponseText, 'grading theory answers');
 
           for (const ev of parsedEval.evaluations || []) {
             evalMap.set(String(ev.questionId), {
@@ -2520,46 +2714,103 @@ export function createApiApp() {
     try {
       const { parts, systemInstruction, needsTitle } = buildAiChatParts(req.body || {});
       const ai = getGeminiClient();
+      const hasImage = parts.some((p) => 'inlineData' in p);
+      const textPrompt = parts
+        .map((p) => ('text' in p ? p.text : ''))
+        .filter(Boolean)
+        .join('\n\n');
 
       if (needsTitle) {
-        const { result: response } = await runWithGeminiModel(
-          (model, signal) =>
-            ai.models.generateContent({
-              model,
-              contents: { parts },
-              config: {
-                systemInstruction,
-                ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-                abortSignal: signal,
-                responseMimeType: 'application/json',
-                responseSchema: {
-                  type: Type.OBJECT,
-                  properties: {
-                    suggestedTitle: {
-                      type: Type.STRING,
-                      description: 'Concise 3-6 word academic title for this conversation.',
+        const chatSystemInstruction = `${systemInstruction}\n\nCRITICAL JSON FORMAT REQUIREMENT:\nYou must respond strictly with a valid JSON object matching this schema: {"suggestedTitle": "3 to 6 word academic title", "subjectArea": "Academic discipline", "reply": "Full Markdown-formatted academic answer"}`;
+        const chatUserPrompt = `${textPrompt}\n\nRespond with a valid JSON object containing "suggestedTitle", "subjectArea", and "reply".`;
+
+        let chatJsonText = '';
+        if (!hasImage) {
+          const resAI = await runMasterAiGeneration({
+            systemInstruction: chatSystemInstruction,
+            userPrompt: chatUserPrompt,
+            jsonMode: true,
+            maxTokens: 4096,
+            geminiFallback: async () => {
+              const { result: response } = await runWithGeminiModel(
+                (model, signal) =>
+                  ai.models.generateContent({
+                    model,
+                    contents: { parts },
+                    config: {
+                      systemInstruction,
+                      ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+                      abortSignal: signal,
+                      responseMimeType: 'application/json',
+                      responseSchema: {
+                        type: Type.OBJECT,
+                        properties: {
+                          suggestedTitle: {
+                            type: Type.STRING,
+                            description: 'Concise 3-6 word academic title for this conversation.',
+                          },
+                          subjectArea: {
+                            type: Type.STRING,
+                            description:
+                              'Academic discipline (e.g., Organic Chemistry, Calculus, Anatomy).',
+                          },
+                          reply: {
+                            type: Type.STRING,
+                            description: 'Full Markdown-formatted academic answer.',
+                          },
+                        },
+                        required: ['suggestedTitle', 'subjectArea', 'reply'],
+                      },
                     },
-                    subjectArea: {
-                      type: Type.STRING,
-                      description:
-                        'Academic discipline (e.g., Organic Chemistry, Calculus, Anatomy).',
+                  }),
+                { maxRetries: 2, timeoutMs: 55000 }
+              );
+              return response.text ?? '';
+            },
+          });
+          chatJsonText = resAI.text;
+        } else {
+          const { result: response } = await runWithGeminiModel(
+            (model, signal) =>
+              ai.models.generateContent({
+                model,
+                contents: { parts },
+                config: {
+                  systemInstruction,
+                  ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+                  abortSignal: signal,
+                  responseMimeType: 'application/json',
+                  responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                      suggestedTitle: {
+                        type: Type.STRING,
+                        description: 'Concise 3-6 word academic title for this conversation.',
+                      },
+                      subjectArea: {
+                        type: Type.STRING,
+                        description:
+                          'Academic discipline (e.g., Organic Chemistry, Calculus, Anatomy).',
+                      },
+                      reply: {
+                        type: Type.STRING,
+                        description: 'Full Markdown-formatted academic answer.',
+                      },
                     },
-                    reply: {
-                      type: Type.STRING,
-                      description: 'Full Markdown-formatted academic answer.',
-                    },
+                    required: ['suggestedTitle', 'subjectArea', 'reply'],
                   },
-                  required: ['suggestedTitle', 'subjectArea', 'reply'],
                 },
-              },
-            }),
-          { maxRetries: 2, timeoutMs: 55000 }
-        );
+              }),
+            { maxRetries: 2, timeoutMs: 55000 }
+          );
+          chatJsonText = response.text ?? '';
+        }
+
         const parsed = parseAiJsonResponse<{
           reply?: string;
           suggestedTitle?: string;
           subjectArea?: string;
-        }>(response.text, 'generating the chat reply');
+        }>(chatJsonText, 'generating the chat reply');
         const reply = String(parsed.reply || '').trim();
         if (!reply) {
           throw new AiInvalidResponseError(
@@ -2573,21 +2824,47 @@ export function createApiApp() {
         });
       }
 
-      const { result: response } = await runWithGeminiModel(
-        (model, signal) =>
-          ai.models.generateContent({
-            model,
-            contents: { parts },
-            config: {
-              systemInstruction,
-              ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-              abortSignal: signal,
-            },
-          }),
-        { maxRetries: 2, timeoutMs: 55000 }
-      );
+      let reply = '';
+      if (!hasImage) {
+        const resAI = await runMasterAiGeneration({
+          systemInstruction,
+          userPrompt: textPrompt,
+          maxTokens: 4096,
+          geminiFallback: async () => {
+            const { result: response } = await runWithGeminiModel(
+              (model, signal) =>
+                ai.models.generateContent({
+                  model,
+                  contents: { parts },
+                  config: {
+                    systemInstruction,
+                    ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+                    abortSignal: signal,
+                  },
+                }),
+              { maxRetries: 2, timeoutMs: 55000 }
+            );
+            return response.text ?? '';
+          },
+        });
+        reply = resAI.text.trim();
+      } else {
+        const { result: response } = await runWithGeminiModel(
+          (model, signal) =>
+            ai.models.generateContent({
+              model,
+              contents: { parts },
+              config: {
+                systemInstruction,
+                ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+                abortSignal: signal,
+              },
+            }),
+          { maxRetries: 2, timeoutMs: 55000 }
+        );
+        reply = (response.text ?? '').trim();
+      }
 
-      const reply = (response.text ?? '').trim();
       if (!reply) {
         throw new AiInvalidResponseError(
           'The AI returned an empty response. Your message has been preserved—please try again.'
@@ -2627,6 +2904,11 @@ export function createApiApp() {
     try {
       const { parts, systemInstruction, needsTitle } = buildAiChatParts(req.body || {});
       const ai = getGeminiClient();
+      const hasImage = parts.some((p) => 'inlineData' in p);
+      const textPrompt = parts
+        .map((p) => ('text' in p ? p.text : ''))
+        .filter(Boolean)
+        .join('\n\n');
 
       const streamInstruction = needsTitle
         ? `${systemInstruction}\n\nOUTPUT FORMAT REQUIREMENT:\nWrite your full Markdown answer directly first. Then on a brand-new final line at the very end, append exactly one metadata marker in this exact format (single-line valid JSON, no code fences):\n[[CHAT_META:{"suggestedTitle":"3 to 6 word title","subjectArea":"Academic Discipline"}]]`
@@ -2651,44 +2933,80 @@ export function createApiApp() {
       const onStallAbort = () => attemptController.abort(streamReadController.signal.reason);
       streamReadController.signal.addEventListener('abort', onStallAbort, { once: true });
 
-      try {
-        resetStallTimer(60000);
-        const { iterator, firstResult } = await openStreamAndPullFirstChunk(
-          (signal) =>
-            ai.models.generateContentStream({
-              model,
-              contents: { parts },
-              config: {
-                systemInstruction: streamInstruction,
-                ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-                abortSignal: signal,
-              },
-            }),
-          {
-            timeoutMs: 45000,
-            externalSignal: attemptController.signal,
+      const onChunkCallback = (delta: string) => {
+        if (clientClosed) return;
+        resetStallTimer(45000);
+        fullText += delta;
+        if (needsTitle) {
+          const safeLimit = getSafeStreamEnd(fullText, META_PREFIX);
+          if (safeLimit > emittedLength) {
+            writeSseEvent(res, 'chunk', { delta: fullText.slice(emittedLength, safeLimit) });
+            emittedLength = safeLimit;
           }
-        );
+        } else {
+          writeSseEvent(res, 'chunk', { delta });
+          emittedLength = fullText.length;
+        }
+      };
 
-        let step = firstResult;
-        while (!step.done) {
-          if (clientClosed) break;
-          resetStallTimer(45000);
-          const delta = step.value.text ?? '';
-          if (delta) {
-            fullText += delta;
-            if (needsTitle) {
-              const safeLimit = getSafeStreamEnd(fullText, META_PREFIX);
-              if (safeLimit > emittedLength) {
-                writeSseEvent(res, 'chunk', { delta: fullText.slice(emittedLength, safeLimit) });
-                emittedLength = safeLimit;
+      try {
+        if (!hasImage && isGroqConfigured()) {
+          resetStallTimer(60000);
+          await runMasterAiStream({
+            systemInstruction: streamInstruction,
+            userPrompt: textPrompt,
+            onChunk: onChunkCallback,
+            geminiFallback: async () => {
+              const { iterator, firstResult } = await openStreamAndPullFirstChunk(
+                (signal) =>
+                  ai.models.generateContentStream({
+                    model,
+                    contents: { parts },
+                    config: {
+                      systemInstruction: streamInstruction,
+                      ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+                      abortSignal: signal,
+                    },
+                  }),
+                {
+                  timeoutMs: 45000,
+                  externalSignal: attemptController.signal,
+                }
+              );
+
+              let step = firstResult;
+              while (!step.done) {
+                if (clientClosed) break;
+                onChunkCallback(step.value.text ?? '');
+                step = await iterator.next();
               }
-            } else {
-              writeSseEvent(res, 'chunk', { delta });
-              emittedLength = fullText.length;
+            },
+          });
+        } else {
+          resetStallTimer(60000);
+          const { iterator, firstResult } = await openStreamAndPullFirstChunk(
+            (signal) =>
+              ai.models.generateContentStream({
+                model,
+                contents: { parts },
+                config: {
+                  systemInstruction: streamInstruction,
+                  ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+                  abortSignal: signal,
+                },
+              }),
+            {
+              timeoutMs: 45000,
+              externalSignal: attemptController.signal,
             }
+          );
+
+          let step = firstResult;
+          while (!step.done) {
+            if (clientClosed) break;
+            onChunkCallback(step.value.text ?? '');
+            step = await iterator.next();
           }
-          step = await iterator.next();
         }
       } finally {
         clientDisconnectController.signal.removeEventListener('abort', abortOnDisconnect);
@@ -2751,55 +3069,126 @@ export function createApiApp() {
     try {
       const { parts, systemInstruction, currentTopic } = buildAiTutorParts(req.body || {});
       const ai = getGeminiClient();
+      const hasImage = parts.some((p) => 'inlineData' in p);
+      const textPrompt = parts
+        .map((p) => ('text' in p ? p.text : ''))
+        .filter(Boolean)
+        .join('\n\n');
 
-      const { result: response } = await runWithGeminiModel(
-        (model, signal) =>
-          ai.models.generateContent({
-            model,
-            contents: { parts },
-            config: {
-              systemInstruction,
-              ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-              abortSignal: signal,
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  reply: {
-                    type: Type.STRING,
-                    description: 'Well-formatted Markdown tutoring response.',
+      const tutorSystemInstruction = `${systemInstruction}\n\nCRITICAL JSON FORMAT REQUIREMENT:\nYou must respond strictly with a valid JSON object matching this schema: {"reply": "Markdown tutoring lesson", "topicTitle": "3 to 6 word topic title", "subjectArea": "Academic subject", "currentStageLabel": "Stage label", "advanceStep": true}`;
+      const tutorUserPrompt = `${textPrompt}\n\nRespond with a valid JSON object containing "reply", "topicTitle", "subjectArea", "currentStageLabel", and "advanceStep".`;
+
+      let tutorJsonText = '';
+      if (!hasImage) {
+        const resAI = await runMasterAiGeneration({
+          systemInstruction: tutorSystemInstruction,
+          userPrompt: tutorUserPrompt,
+          jsonMode: true,
+          maxTokens: 4096,
+          geminiFallback: async () => {
+            const { result: response } = await runWithGeminiModel(
+              (model, signal) =>
+                ai.models.generateContent({
+                  model,
+                  contents: { parts },
+                  config: {
+                    systemInstruction,
+                    ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+                    abortSignal: signal,
+                    responseMimeType: 'application/json',
+                    responseSchema: {
+                      type: Type.OBJECT,
+                      properties: {
+                        reply: {
+                          type: Type.STRING,
+                          description: 'Well-formatted Markdown tutoring response.',
+                        },
+                        topicTitle: {
+                          type: Type.STRING,
+                          description: 'Short clear title for this tutoring topic (3-6 words).',
+                        },
+                        subjectArea: {
+                          type: Type.STRING,
+                          description: 'Academic subject area.',
+                        },
+                        currentStageLabel: {
+                          type: Type.STRING,
+                          description:
+                            'Short label of the current learning stage (e.g., "Foundations & Core Principle", "Worked Example", "Applied Practice").',
+                        },
+                        advanceStep: {
+                          type: Type.BOOLEAN,
+                          description:
+                            'True if the session progressed to a new conceptual step, false if clarifying/repeating current step.',
+                        },
+                      },
+                      required: [
+                        'reply',
+                        'topicTitle',
+                        'subjectArea',
+                        'currentStageLabel',
+                        'advanceStep',
+                      ],
+                    },
                   },
-                  topicTitle: {
-                    type: Type.STRING,
-                    description: 'Short clear title for this tutoring topic (3-6 words).',
+                }),
+              { maxRetries: 2, timeoutMs: 55000 }
+            );
+            return response.text ?? '';
+          },
+        });
+        tutorJsonText = resAI.text;
+      } else {
+        const { result: response } = await runWithGeminiModel(
+          (model, signal) =>
+            ai.models.generateContent({
+              model,
+              contents: { parts },
+              config: {
+                systemInstruction,
+                ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+                abortSignal: signal,
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    reply: {
+                      type: Type.STRING,
+                      description: 'Well-formatted Markdown tutoring response.',
+                    },
+                    topicTitle: {
+                      type: Type.STRING,
+                      description: 'Short clear title for this tutoring topic (3-6 words).',
+                    },
+                    subjectArea: {
+                      type: Type.STRING,
+                      description: 'Academic subject area.',
+                    },
+                    currentStageLabel: {
+                      type: Type.STRING,
+                      description:
+                        'Short label of the current learning stage (e.g., "Foundations & Core Principle", "Worked Example", "Applied Practice").',
+                    },
+                    advanceStep: {
+                      type: Type.BOOLEAN,
+                      description:
+                        'True if the session progressed to a new conceptual step, false if clarifying/repeating current step.',
+                    },
                   },
-                  subjectArea: {
-                    type: Type.STRING,
-                    description: 'Academic subject area.',
-                  },
-                  currentStageLabel: {
-                    type: Type.STRING,
-                    description:
-                      'Short label of the current learning stage (e.g., "Foundations & Core Principle", "Worked Example", "Applied Practice").',
-                  },
-                  advanceStep: {
-                    type: Type.BOOLEAN,
-                    description:
-                      'True if the session progressed to a new conceptual step, false if clarifying/repeating current step.',
-                  },
+                  required: [
+                    'reply',
+                    'topicTitle',
+                    'subjectArea',
+                    'currentStageLabel',
+                    'advanceStep',
+                  ],
                 },
-                required: [
-                  'reply',
-                  'topicTitle',
-                  'subjectArea',
-                  'currentStageLabel',
-                  'advanceStep',
-                ],
               },
-            },
-          }),
-        { maxRetries: 2, timeoutMs: 55000 }
-      );
+            }),
+          { maxRetries: 2, timeoutMs: 55000 }
+        );
+        tutorJsonText = response.text ?? '';
+      }
 
       const parsed = parseAiJsonResponse<{
         reply?: string;
@@ -2807,7 +3196,7 @@ export function createApiApp() {
         subjectArea?: string;
         currentStageLabel?: string;
         advanceStep?: boolean;
-      }>(response.text, 'generating the tutoring lesson');
+      }>(tutorJsonText, 'generating the tutoring lesson');
       const reply = String(parsed.reply || '').trim();
       if (!reply) {
         throw new AiInvalidResponseError(
@@ -2856,6 +3245,11 @@ export function createApiApp() {
     try {
       const { parts, systemInstruction, currentTopic } = buildAiTutorParts(req.body || {});
       const ai = getGeminiClient();
+      const hasImage = parts.some((p) => 'inlineData' in p);
+      const textPrompt = parts
+        .map((p) => ('text' in p ? p.text : ''))
+        .filter(Boolean)
+        .join('\n\n');
 
       const streamInstruction = `${systemInstruction}\n\nOUTPUT FORMAT REQUIREMENT:\nWrite your full Markdown tutoring response directly first. Then on a brand-new final line at the very end, append exactly one metadata marker in this exact format (single-line valid JSON, no code fences):\n[[TUTOR_META:{"topicTitle":"3 to 6 word topic title","subjectArea":"Academic Discipline","currentStageLabel":"Current Stage Label","advanceStep":true}]]`;
 
@@ -2878,39 +3272,75 @@ export function createApiApp() {
       const onStallAbort = () => attemptController.abort(streamReadController.signal.reason);
       streamReadController.signal.addEventListener('abort', onStallAbort, { once: true });
 
-      try {
-        resetStallTimer(60000);
-        const { iterator, firstResult } = await openStreamAndPullFirstChunk(
-          (signal) =>
-            ai.models.generateContentStream({
-              model,
-              contents: { parts },
-              config: {
-                systemInstruction: streamInstruction,
-                ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-                abortSignal: signal,
-              },
-            }),
-          {
-            timeoutMs: 45000,
-            externalSignal: attemptController.signal,
-          }
-        );
+      const onChunkCallback = (delta: string) => {
+        if (clientClosed) return;
+        resetStallTimer(45000);
+        fullText += delta;
+        const safeLimit = getSafeStreamEnd(fullText, META_PREFIX);
+        if (safeLimit > emittedLength) {
+          writeSseEvent(res, 'chunk', { delta: fullText.slice(emittedLength, safeLimit) });
+          emittedLength = safeLimit;
+        }
+      };
 
-        let step = firstResult;
-        while (!step.done) {
-          if (clientClosed) break;
-          resetStallTimer(45000);
-          const delta = step.value.text ?? '';
-          if (delta) {
-            fullText += delta;
-            const safeLimit = getSafeStreamEnd(fullText, META_PREFIX);
-            if (safeLimit > emittedLength) {
-              writeSseEvent(res, 'chunk', { delta: fullText.slice(emittedLength, safeLimit) });
-              emittedLength = safeLimit;
+      try {
+        if (!hasImage && isGroqConfigured()) {
+          resetStallTimer(60000);
+          await runMasterAiStream({
+            systemInstruction: streamInstruction,
+            userPrompt: textPrompt,
+            onChunk: onChunkCallback,
+            geminiFallback: async () => {
+              const { iterator, firstResult } = await openStreamAndPullFirstChunk(
+                (signal) =>
+                  ai.models.generateContentStream({
+                    model,
+                    contents: { parts },
+                    config: {
+                      systemInstruction: streamInstruction,
+                      ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+                      abortSignal: signal,
+                    },
+                  }),
+                {
+                  timeoutMs: 45000,
+                  externalSignal: attemptController.signal,
+                }
+              );
+
+              let step = firstResult;
+              while (!step.done) {
+                if (clientClosed) break;
+                onChunkCallback(step.value.text ?? '');
+                step = await iterator.next();
+              }
+            },
+          });
+        } else {
+          resetStallTimer(60000);
+          const { iterator, firstResult } = await openStreamAndPullFirstChunk(
+            (signal) =>
+              ai.models.generateContentStream({
+                model,
+                contents: { parts },
+                config: {
+                  systemInstruction: streamInstruction,
+                  ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
+                  abortSignal: signal,
+                },
+              }),
+            {
+              timeoutMs: 45000,
+              externalSignal: attemptController.signal,
             }
+          );
+
+          let step = firstResult;
+          while (!step.done) {
+            if (clientClosed) break;
+            onChunkCallback(step.value.text ?? '');
+            step = await iterator.next();
           }
-          step = await iterator.next();
         }
       } finally {
         clientDisconnectController.signal.removeEventListener('abort', abortOnDisconnect);
