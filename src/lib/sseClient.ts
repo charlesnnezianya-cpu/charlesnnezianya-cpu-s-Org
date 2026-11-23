@@ -3,6 +3,7 @@ import {
   formatClientApiError,
   parseApiJsonResponse,
   resolveApiUrl,
+  sanitizeUserErrorMessage,
 } from './apiClient';
 
 export interface SseStreamOptions<TDone> {
@@ -178,10 +179,15 @@ export async function postSseStream<TDone>({
         donePayload = parsed as unknown as TDone;
       } else if (eventName === 'error') {
         cancelScheduledFlush();
-        const msg =
+        const refId =
+          typeof parsed.referenceId === 'string' ? parsed.referenceId : undefined;
+        const msg = sanitizeUserErrorMessage(
           typeof parsed.error === 'string' && parsed.error
             ? parsed.error
-            : fallbackErrorMessage;
+            : fallbackErrorMessage,
+          contextAction,
+          refId
+        );
         throw new Error(msg);
       }
     };
@@ -215,7 +221,7 @@ export async function postSseStream<TDone>({
         return { reply: latestAccumulated.trim() } as unknown as TDone;
       }
       throw new Error(
-        `The AI stream ended before returning a response while ${contextAction}. Your message has been preserved—please try again.`
+        'We did not receive a complete response. Your message has been preserved—please try again.'
       );
     }
 
@@ -223,7 +229,7 @@ export async function postSseStream<TDone>({
   } catch (err: unknown) {
     if (timedOut) {
       throw new Error(
-        `The AI response timed out without streaming data while ${contextAction}. Your message has been preserved—please try again.`
+        'This request took too long to complete. Your message has been preserved—please try again.'
       );
     }
     if (signal?.aborted) {

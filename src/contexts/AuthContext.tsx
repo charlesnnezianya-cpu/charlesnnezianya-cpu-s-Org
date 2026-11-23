@@ -7,6 +7,7 @@ import {
   supabase,
   upsertUserProfile,
 } from '../lib/supabase';
+import { sanitizeUserErrorMessage } from '../lib/apiClient';
 import type { UserProfile } from '../types/brainstine';
 
 interface AuthContextValue {
@@ -35,6 +36,27 @@ interface AuthContextValue {
   refreshProfile: () => Promise<void>;
 }
 
+function formatFriendlyAuthError(rawMessage: string, fallback: string): string {
+  const lower = rawMessage.toLowerCase();
+  if (lower.includes('invalid login credentials') || lower.includes('invalid_credentials')) {
+    return 'Incorrect email or password. Please check your details and try again.';
+  }
+  if (lower.includes('email not confirmed')) {
+    return 'Please verify your email address from your inbox before signing in.';
+  }
+  if (lower.includes('already registered') || lower.includes('already exists')) {
+    return 'An account with this email already exists. Please sign in instead.';
+  }
+  if (lower.includes('password') && lower.includes('at least')) {
+    return rawMessage;
+  }
+  if (lower.includes('rate limit') || lower.includes('too many requests')) {
+    return 'Too many sign-in attempts. Please wait a moment and try again.';
+  }
+  const safe = sanitizeUserErrorMessage(rawMessage, 'sign in');
+  return safe === 'Something went wrong. Please try again.' ? fallback : safe;
+}
+
 function formatReadableOAuthError(
   errorCode: string,
   errorSubCode: string,
@@ -42,26 +64,30 @@ function formatReadableOAuthError(
 ): string {
   const combined = `${errorCode} ${errorSubCode} ${errorDescription}`.toLowerCase();
 
-  if (combined.includes('redirect_uri_mismatch')) {
-    return 'Google Sign-In could not start because the Authorized Redirect URI in Google Cloud Console does not match Supabase’s OAuth callback URL. Please use Email & Password meanwhile, or register the Supabase callback URL in Google Cloud.';
-  }
-  if (combined.includes('org_internal')) {
-    return 'Google Sign-In is restricted to an internal organization (403). Please ask the administrator to set the Google OAuth consent screen to External, or sign in with Email & Password.';
+  if (
+    combined.includes('redirect_uri_mismatch') ||
+    combined.includes('deleted_client') ||
+    combined.includes('invalid_client') ||
+    combined.includes('org_internal')
+  ) {
+    return 'Google Sign-In is temporarily unavailable. Please sign in with your email and password or try again shortly.';
   }
   if (combined.includes('access_denied') || combined.includes('403')) {
-    return 'Google Sign-In access was denied (403). This happens if sign-in was cancelled, or if the Google OAuth app is in Testing mode and your Google account has not been added as an authorized test user. You can try again or use Email & Password.';
+    return 'Google Sign-In was cancelled or could not be completed. Please try again or use your email and password.';
   }
-  if (combined.includes('deleted_client') || combined.includes('invalid_client')) {
-    return 'Google Sign-In failed because the Google OAuth Client ID or Secret in Supabase is invalid or missing. Please sign in with Email & Password meanwhile.';
-  }
-  if (combined.includes('unable to exchange external code') || combined.includes('server_error')) {
-    return 'Google Sign-In could not complete verification with Supabase. Please verify the Google Client Secret in Supabase or sign in with Email & Password.';
-  }
-  if (combined.includes('bad_oauth_state') || combined.includes('invalid_request')) {
-    return 'Google Sign-In session expired or could not be verified. Please click Continue with Google again or sign in with Email & Password.';
+  if (
+    combined.includes('unable to exchange external code') ||
+    combined.includes('server_error') ||
+    combined.includes('bad_oauth_state') ||
+    combined.includes('invalid_request')
+  ) {
+    return 'Your Google Sign-In session could not be verified. Please try again or use your email and password.';
   }
   const cleanDesc = errorDescription.replace(/\+/g, ' ').trim();
-  return cleanDesc || 'Google Sign-In could not be completed. Please try again or use Email & Password.';
+  if (cleanDesc) {
+    return sanitizeUserErrorMessage(cleanDesc, 'sign in');
+  }
+  return 'Google Sign-In could not be completed. Please try again or use your email and password.';
 }
 
 function consumeUrlOAuthError(): string | null {
@@ -233,10 +259,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
 
     if (error) {
-      throw new Error(error.message);
+      throw new Error(
+        formatFriendlyAuthError(error.message, 'We could not create your account right now. Please try again.')
+      );
     }
 
-    // Supabase returns a user with empty identities if already registered in some configs
+    // Account with empty identities indicates existing registration
     if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
       throw new Error('An account with this email already exists. Please sign in instead.');
     }
@@ -262,7 +290,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       password,
     });
     if (error) {
-      throw new Error(error.message);
+      throw new Error(
+        formatFriendlyAuthError(error.message, 'We could not sign you in right now. Please try again.')
+      );
     }
     if (data.user) {
       await loadOrCreateProfile(data.user);
@@ -290,14 +320,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           googleErrorType?: string | null;
         };
 
-        if (status.supabaseConfigured && !status.googleEnabled) {
+        if (status.supabaseConfigured && (!status.googleEnabled || !status.hasClientId)) {
           throw new Error(
-            'Google Sign-In is not currently enabled in Supabase Authentication. Please sign in with your email and password.'
-          );
-        }
-        if (status.googleEnabled && !status.hasClientId) {
-          throw new Error(
-            'Google Sign-In is enabled in Supabase, but the Google OAuth Client ID is missing. Please sign in with your email and password meanwhile.'
+            'Google Sign-In is temporarily unavailable. Please sign in with your email and password.'
           );
         }
         if (status.googleErrorType) {
@@ -308,8 +333,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (
         preflightErr instanceof Error &&
         preflightErr.name !== 'AbortError' &&
-        (preflightErr.message.includes('Google Sign-In') ||
-          preflightErr.message.includes('OAuth'))
+        preflightErr.message.includes('Google Sign-In')
       ) {
         throw preflightErr;
       }
@@ -333,12 +357,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       },
     });
     if (error) {
-      throw new Error(error.message);
+      throw new Error(
+        formatFriendlyAuthError(
+          error.message,
+          'Google Sign-In could not be started right now. Please try again or use your email and password.'
+        )
+      );
     }
 
     if (data?.url && data.url.includes('google.com/url')) {
       throw new Error(
-        'OAuth redirect URL is wrapped in a Google Redirect Notice link. Please update Supabase Authentication URL Configuration to use clean Brainstine URLs.'
+        'Google Sign-In is temporarily unavailable. Please sign in with your email and password.'
       );
     }
 
@@ -347,7 +376,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setPendingOauthUrl(data.url);
       } else {
         throw new Error(
-          'Unable to start Google Sign-In inside the embedded preview. Please open Brainstine in a full browser tab or use Email & Password.'
+          'Google Sign-In could not open inside this embedded window. Please open Brainstine in a full browser tab or sign in with your email and password.'
         );
       }
     }
@@ -359,7 +388,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       redirectTo: window.location.origin,
     });
     if (error) {
-      throw new Error(error.message);
+      throw new Error(
+        formatFriendlyAuthError(error.message, 'We could not send the password reset email. Please try again.')
+      );
     }
   };
 
@@ -367,7 +398,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const client = requireSupabase();
     const { error } = await client.auth.updateUser({ password: newPassword });
     if (error) {
-      throw new Error(error.message);
+      throw new Error(
+        formatFriendlyAuthError(error.message, 'We could not update your password right now. Please try again.')
+      );
     }
     setIsPasswordRecovery(false);
   };
@@ -381,7 +414,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const { error: authErr } = await client.auth.updateUser({
       data: { display_name: trimmed },
     });
-    if (authErr) throw new Error(authErr.message);
+    if (authErr) {
+      throw new Error(
+        formatFriendlyAuthError(authErr.message, 'We could not update your profile right now. Please try again.')
+      );
+    }
 
     const updated = await upsertUserProfile({
       id: user.id,
@@ -395,7 +432,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const client = requireSupabase();
     const { error } = await client.auth.signOut();
     if (error) {
-      throw new Error(error.message);
+      throw new Error(
+        formatFriendlyAuthError(error.message, 'We could not sign you out right now. Please try again.')
+      );
     }
     setSession(null);
     setUser(null);

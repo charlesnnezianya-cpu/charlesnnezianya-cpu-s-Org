@@ -21,7 +21,12 @@ import {
   XCircle,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { formatClientApiError, parseApiJsonResponse, resolveApiUrl } from '../lib/apiClient';
+import {
+  formatClientApiError,
+  parseApiJsonResponse,
+  resolveApiUrl,
+  sanitizeUserErrorMessage,
+} from '../lib/apiClient';
 import {
   createStudyMaterialRecord,
   deleteQuiz,
@@ -34,6 +39,7 @@ import {
 } from '../lib/supabase';
 import type {
   GeneratedQuizPayload,
+  MaterialSourceType,
   QuizAssessmentMode,
   QuizAttemptRecord,
   QuizDifficulty,
@@ -54,6 +60,7 @@ import {
 } from '../lib/educationalVisuals';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 import { EducationalDiagramRenderer } from './EducationalDiagramRenderer';
+import { compressImageFile } from './SnapPhotoControl';
 import { SubjectVisualBanner } from './SubjectVisualBanner';
 
 interface QuizExamSystemProps {
@@ -81,6 +88,52 @@ function formatSeconds(totalSec: number): string {
   const mins = Math.floor(totalSec / 60);
   const secs = totalSec % 60;
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+function inferQuizUploadMimeType(fileName: string, rawType?: string | null): string {
+  const cleaned = (rawType || '').split(';')[0].trim().toLowerCase();
+  if (cleaned && cleaned !== 'application/octet-stream') {
+    return cleaned === 'image/jpg' ? 'image/jpeg' : cleaned;
+  }
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith('.pdf')) return 'application/pdf';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.heic')) return 'image/heic';
+  if (lower.endsWith('.heif')) return 'image/heif';
+  if (lower.endsWith('.md')) return 'text/markdown';
+  if (lower.endsWith('.txt')) return 'text/plain';
+  return 'application/octet-stream';
+}
+
+function validateQuizUploadFile(file: File): {
+  valid: boolean;
+  type?: MaterialSourceType;
+  error?: string;
+} {
+  if (file.size > 25 * 1024 * 1024) {
+    return {
+      valid: false,
+      error: `"${file.name}" exceeds the 25 MB maximum upload limit. Please compress or split the file.`,
+    };
+  }
+  const lowerName = file.name.toLowerCase();
+  const lowerMime = (file.type || '').toLowerCase();
+  if (lowerMime === 'application/pdf' || lowerName.endsWith('.pdf')) {
+    return { valid: true, type: 'pdf' };
+  }
+  if (lowerMime.startsWith('image/') || /\.(png|jpe?g|webp|gif|heic|heif)$/.test(lowerName)) {
+    return { valid: true, type: 'image' };
+  }
+  if (lowerMime === 'text/plain' || lowerMime === 'text/markdown' || /\.(txt|md)$/.test(lowerName)) {
+    return { valid: true, type: 'text' };
+  }
+  return {
+    valid: false,
+    error: `Unsupported file type for "${file.name}". Please upload a PDF, PNG/JPG/WEBP image, or TXT/MD file.`,
+  };
 }
 
 export function QuizExamSystem({
@@ -116,6 +169,7 @@ export function QuizExamSystem({
   const [uploadErrorMsg, setUploadErrorMsg] = useState<string | null>(null);
   const [extractedUploadText, setExtractedUploadText] = useState<string>('');
   const [extractedUploadTitle, setExtractedUploadTitle] = useState<string>('');
+  const [uploadedMaterialId, setUploadedMaterialId] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -342,7 +396,7 @@ export function QuizExamSystem({
       return {
         text: extractedUploadText,
         title: extractedUploadTitle || uploadFile?.name || 'Uploaded Assessment Material',
-        materialId: null,
+        materialId: uploadedMaterialId,
         summaryId: null,
       };
     }
@@ -362,6 +416,7 @@ export function QuizExamSystem({
     topicTitle,
     extractedUploadText,
     extractedUploadTitle,
+    uploadedMaterialId,
     uploadFile,
   ]);
 
@@ -371,25 +426,48 @@ export function QuizExamSystem({
   const handleQuizFileChosen = async (file: File | null) => {
     if (!file) return;
     if (uploading || extractingUpload) return;
+
+    const isSameRetryFile = Boolean(uploadFile && file === uploadFile);
+    if (!isSameRetryFile) {
+      stagedStoragePathRef.current = null;
+    }
+
     setUploadFile(file);
     setUploadErrorMsg(null);
     setUploadSuccessMsg(null);
     setExtractedUploadText('');
     setExtractedUploadTitle('');
+    setUploadedMaterialId(null);
+
+    const validation = validateQuizUploadFile(file);
+    if (!validation.valid) {
+      setUploadErrorMsg(validation.error || 'Unsupported file.');
+      return;
+    }
+
     setUploading(true);
     setExtractingUpload(true);
     setUploadProgress(15);
 
     try {
-      const arrayBuffer = await file.arrayBuffer();
+      let preparedFile = file;
+      const inferredMime = inferQuizUploadMimeType(file.name, file.type);
+
+      if (validation.type === 'image' && inferredMime !== 'image/gif') {
+        preparedFile = await compressImageFile(file);
+      }
+
+      const arrayBuffer = await preparedFile.arrayBuffer();
       if (arrayBuffer.byteLength === 0) {
         throw new Error(`"${file.name}" is empty (0 bytes). Please choose a valid study file.`);
       }
 
-      if (file.size > 25 * 1024 * 1024) {
-        throw new Error(
-          `"${file.name}" exceeds the 25 MB maximum upload limit. Please compress or split the file.`
-        );
+      const finalMime = inferQuizUploadMimeType(preparedFile.name, preparedFile.type || inferredMime);
+      if (preparedFile.type !== finalMime) {
+        preparedFile = new File([arrayBuffer], preparedFile.name, {
+          type: finalMime,
+          lastModified: preparedFile.lastModified || Date.now(),
+        });
       }
 
       const isLocalOrigin =
@@ -399,19 +477,19 @@ export function QuizExamSystem({
 
       let extractRes: Response;
       const shouldUseStorageStaging =
-        (user && isConfigured) || (!isLocalOrigin && file.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES);
+        (user && isConfigured) || (!isLocalOrigin && preparedFile.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES);
 
       if (shouldUseStorageStaging) {
         if (!user || !isConfigured) {
           throw new Error(
-            `Files larger than 3.8 MB require signing in with a Brainstine account on cloud-hosted deployments (file is ${(file.size / (1024 * 1024)).toFixed(1)} MB). Please sign in or choose a smaller file.`
+            `Files larger than 3.8 MB require signing in with your Brainstine account (file is ${(preparedFile.size / (1024 * 1024)).toFixed(1)} MB). Please sign in or choose a smaller file.`
           );
         }
 
         let storagePath = stagedStoragePathRef.current;
         if (!storagePath) {
           setUploadProgress(25);
-          storagePath = await uploadMaterialFileToStorage(user.id, file, {
+          storagePath = await uploadMaterialFileToStorage(user.id, preparedFile, {
             preBuffered: arrayBuffer,
             onProgress: (pct) => {
               setUploadProgress(25 + Math.round(pct * 0.4));
@@ -430,12 +508,13 @@ export function QuizExamSystem({
           extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            cache: 'no-store',
             signal: extractController.signal,
             body: JSON.stringify({
               signedStorageUrl,
-              fileName: file.name,
-              mimeType: file.type,
-              fileSizeBytes: file.size,
+              fileName: preparedFile.name,
+              mimeType: finalMime,
+              fileSizeBytes: preparedFile.size,
               title: file.name.replace(/\.[^/.]+$/, ''),
             }),
           });
@@ -444,7 +523,7 @@ export function QuizExamSystem({
         }
       } else {
         const formData = new FormData();
-        formData.append('file', file, file.name);
+        formData.append('file', preparedFile, preparedFile.name);
         formData.append('title', file.name.replace(/\.[^/.]+$/, ''));
 
         setUploadProgress(50);
@@ -466,7 +545,8 @@ export function QuizExamSystem({
         title: string;
         extractedText: string;
         wordCount: number;
-        materialType?: string;
+        materialType?: MaterialSourceType;
+        mimeType?: string;
       }>(extractRes, 'extracting uploaded study material');
 
       if (!extracted.extractedText || extracted.extractedText.trim().length < 20) {
@@ -484,28 +564,26 @@ export function QuizExamSystem({
 
       if (user && isConfigured) {
         try {
-          await createStudyMaterialRecord({
+          const savedMat = await createStudyMaterialRecord({
             userId: user.id,
             title: extracted.title,
-            materialType: file.type.includes('pdf')
-              ? 'pdf'
-              : file.type.startsWith('image')
-                ? 'image'
-                : 'text',
-            fileName: file.name,
-            fileSize: file.size,
-            mimeType: file.type,
+            materialType: extracted.materialType || validation.type || 'text',
+            fileName: preparedFile.name,
+            fileSize: preparedFile.size,
+            mimeType: extracted.mimeType || finalMime,
             storagePath: stagedStoragePathRef.current,
             extractedText: extracted.extractedText,
             wordCount: extracted.wordCount,
             chunkCount: 1,
           });
+          setUploadedMaterialId(savedMat.id);
           onDataChanged();
         } catch (dbErr) {
           console.warn('Material save notice:', dbErr);
         }
       }
     } catch (err: unknown) {
+      stagedStoragePathRef.current = null;
       setUploadErrorMsg(
         formatClientApiError(
           err,
@@ -525,9 +603,7 @@ export function QuizExamSystem({
     setErrorMsg(null);
 
     if (!geminiConfigured) {
-      setErrorMsg(
-        'GEMINI_API_KEY is missing. Configure GEMINI_API_KEY in Secrets to generate quizzes.'
-      );
+      setErrorMsg('Brainstine is temporarily unavailable. Please try again shortly.');
       return;
     }
 
@@ -579,11 +655,18 @@ export function QuizExamSystem({
 
       if (user && isConfigured) {
         try {
+          // Ensure compatibility with existing Supabase quizzes.source_mode CHECK constraint
+          const persistedSourceMode: QuizSourceMode =
+            sourceMode === 'upload'
+              ? resolvedSource.materialId
+                ? 'material'
+                : 'text'
+              : sourceMode;
           const saved = await saveQuizRecord({
             userId: user.id,
             title: generated.title,
             subjectArea: generated.subjectArea,
-            sourceMode,
+            sourceMode: persistedSourceMode,
             materialId: resolvedSource.materialId,
             summaryId: resolvedSource.summaryId,
             format: generated.format,
@@ -595,11 +678,10 @@ export function QuizExamSystem({
           savedQuizId = saved.id;
           onDataChanged();
         } catch (saveErr) {
-          console.warn('Quiz save warning:', saveErr);
-          syncWarning =
-            saveErr instanceof Error
-              ? `Quiz generated, but template could not be saved to Supabase: ${saveErr.message}`
-              : 'Quiz generated, but template could not be saved to cloud history.';
+          syncWarning = `Quiz generated, but it could not be saved to your history right now: ${sanitizeUserErrorMessage(
+            saveErr,
+            'saving your quiz'
+          )}`;
         }
       }
 
@@ -748,11 +830,11 @@ export function QuizExamSystem({
           });
           onDataChanged();
         } catch (saveErr) {
-          console.warn('Attempt persistence warning:', saveErr);
           setCloudNotice(
-            saveErr instanceof Error
-              ? `Your score was graded, but could not be saved to Supabase Academic History: ${saveErr.message}`
-              : 'Your score was graded, but could not be saved to Supabase Academic History.'
+            `Your score was graded, but could not be saved to your Academic History right now: ${sanitizeUserErrorMessage(
+              saveErr,
+              'saving your quiz results'
+            )}`
           );
         }
       }
@@ -797,7 +879,7 @@ export function QuizExamSystem({
       setDeleteTarget(null);
       onDataChanged();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Could not delete record.');
+      setErrorMsg(sanitizeUserErrorMessage(err, 'deleting your record'));
     } finally {
       setDeletingRecord(false);
     }
@@ -1595,12 +1677,11 @@ export function QuizExamSystem({
             <KeyRound className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
             <div>
               <h3 className="font-display font-semibold select-none">
-                AI Provider Configuration Required
+                Quiz &amp; Exam Generation Temporarily Unavailable
               </h3>
               <p className="mt-1 text-xs leading-relaxed">
-                Configure <code className="font-mono font-semibold">GEMINI_API_KEY</code> in Secrets
-                to generate new quizzes and grade theory responses. You can still review past
-                examination results in your history below.
+                Brainstine AI assessment tools are temporarily unavailable right now. Please try
+                again shortly. You can still review past examination results in your history below.
               </p>
             </div>
           </div>
@@ -1857,6 +1938,7 @@ export function QuizExamSystem({
                               setUploadFile(null);
                               setExtractedUploadText('');
                               setExtractedUploadTitle('');
+                              setUploadedMaterialId(null);
                               setUploadSuccessMsg(null);
                               setUploadErrorMsg(null);
                               stagedStoragePathRef.current = null;

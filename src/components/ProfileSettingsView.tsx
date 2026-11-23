@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { AlertCircle, CheckCircle2, LogOut, Save } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
+import { sanitizeUserErrorMessage } from '../lib/apiClient';
 import { upsertUserProfile } from '../lib/supabase';
 import { ThemeSelector } from './ThemeSelector';
 
@@ -44,7 +45,7 @@ export function ProfileSettingsView() {
     } catch (err: unknown) {
       setFeedback({
         type: 'error',
-        text: err instanceof Error ? err.message : 'Unable to update profile.',
+        text: sanitizeUserErrorMessage(err, 'updating your profile'),
       });
     } finally {
       setSavingName(false);
@@ -71,7 +72,7 @@ export function ProfileSettingsView() {
     } catch (err: unknown) {
       setFeedback({
         type: 'error',
-        text: err instanceof Error ? err.message : 'Could not update password.',
+        text: sanitizeUserErrorMessage(err, 'updating your password'),
       });
     } finally {
       setSavingPassword(false);

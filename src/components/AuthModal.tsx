@@ -12,6 +12,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { sanitizeUserErrorMessage } from '../lib/apiClient';
 import { BrandLogo } from './BrandLogo';
 
 export type AuthModalMode = 'signin' | 'signup' | 'forgot' | 'recovery';
@@ -74,7 +75,7 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
 
     if (!isConfigured) {
       setErrorMsg(
-        'Supabase authentication is not configured. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your environment Secrets.'
+        'Account sign-in is temporarily unavailable. Please try again shortly.'
       );
       return;
     }
@@ -129,7 +130,7 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
         setRecoveryComplete(true);
       }
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Authentication request failed.');
+      setErrorMsg(sanitizeUserErrorMessage(err, 'sign in'));
     } finally {
       setSubmitting(false);
     }
@@ -139,20 +140,14 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
     setErrorMsg(null);
     clearOauthError();
     if (!isConfigured) {
-      setErrorMsg(
-        'Google sign-in requires Supabase configuration (VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY) with Google OAuth enabled in your Supabase dashboard.'
-      );
+      setErrorMsg('Google Sign-In is temporarily unavailable. Please try again shortly.');
       return;
     }
     setSubmitting(true);
     try {
       await signInWithGoogle();
     } catch (err: unknown) {
-      setErrorMsg(
-        err instanceof Error
-          ? err.message
-          : 'Google sign-in is not available. Verify your Supabase Google OAuth provider configuration.'
-      );
+      setErrorMsg(sanitizeUserErrorMessage(err, 'sign in'));
     } finally {
       setSubmitting(false);
     }
@@ -208,11 +203,10 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
             <div className="flex items-start gap-2.5">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
               <div className="space-y-1">
-                <p className="font-semibold select-none">Supabase credentials required</p>
+                <p className="font-semibold select-none">Sign-In Temporarily Unavailable</p>
                 <p className="leading-relaxed">
-                  Configure <code className="font-mono">VITE_SUPABASE_URL</code> and{' '}
-                  <code className="font-mono">VITE_SUPABASE_ANON_KEY</code> in Secrets and run{' '}
-                  <code className="font-mono">supabase/schema.sql</code> to enable live accounts and storage.
+                  Account sign-in and cloud library sync are temporarily unavailable right now.
+                  Please try again shortly.
                 </p>
               </div>
             </div>
@@ -343,7 +337,7 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
                   <span>Continue with Google</span>
                 </button>
                 <p className="mt-2 text-center text-[11px] text-slate-500 select-none dark:text-slate-400">
-                  Secured by Brainstine authentication via Google &amp; Supabase
+                  Secured by Brainstine authentication
                 </p>
 
                 <div className="my-5 flex items-center gap-3 select-none">

@@ -17,7 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { formatClientApiError } from '../lib/apiClient';
+import { formatClientApiError, sanitizeUserErrorMessage } from '../lib/apiClient';
 import { postSseStream } from '../lib/sseClient';
 import {
   createAiMessage,
@@ -346,7 +346,7 @@ export function AiTutorWorkspace({
         setActiveSessionImage(restoredImage);
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Unable to load tutoring session.');
+      setError(sanitizeUserErrorMessage(err, 'loading your tutoring session'));
     } finally {
       setLoadingMessages(false);
     }
@@ -382,7 +382,7 @@ export function AiTutorWorkspace({
       setDeleteTarget(null);
       onActivityRecorded();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to delete session.');
+      setError(sanitizeUserErrorMessage(err, 'deleting your tutoring session'));
     } finally {
       setDeletingSession(false);
     }
@@ -647,9 +647,10 @@ export function AiTutorWorkspace({
           };
           setMessages((prev) => [...prev, localAssistantMsg]);
           setError(
-            persistErr instanceof Error
-              ? `Lesson step generated, but could not save to cloud history: ${persistErr.message}`
-              : 'Lesson step generated, but could not save to cloud history.'
+            `Lesson step generated, but could not save to your history right now: ${sanitizeUserErrorMessage(
+              persistErr,
+              'saving your tutoring progress'
+            )}`
           );
         }
       } else {
@@ -733,7 +734,7 @@ export function AiTutorWorkspace({
         <div className="max-h-64 flex-1 overflow-y-auto p-2.5 lg:max-h-none">
           {!isSupabaseConfigured ? (
             <p className="p-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-              Active locally. Configure Supabase to save tutoring progress and reopen past lessons.
+              Active locally. Sign in when cloud sync is enabled to save tutoring progress and reopen past lessons.
             </p>
           ) : loadingSessions ? (
             <div className="space-y-2 p-2">
@@ -958,9 +959,10 @@ export function AiTutorWorkspace({
           <div className="mx-5 mt-4 flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
             <div>
-              <p className="font-semibold">GEMINI_API_KEY is not configured</p>
+              <p className="font-semibold">Personal AI Tutor Temporarily Unavailable</p>
               <p className="mt-0.5">
-                Add <code className="font-mono">GEMINI_API_KEY</code> in Secrets to start live guided tutoring sessions.
+                Live guided tutoring sessions are temporarily unavailable right now. Please try
+                again shortly.
               </p>
             </div>
           </div>

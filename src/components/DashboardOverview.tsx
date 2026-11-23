@@ -137,7 +137,7 @@ export function DashboardOverview({
             {
               section: 'quizzes' as DashboardSection,
               title: 'AI Quiz & Exam Maker',
-              desc: 'Generate 10–40 questions in Practice or timed Exam mode with graded explanations.',
+              desc: 'Generate 5–70 questions in Practice or timed Exam mode with graded explanations.',
               icon: <ListChecks className="h-4 w-4" aria-hidden="true" />,
               iconBg: 'bg-sky-600',
               visual: EDUCATIONAL_VISUALS.quiz,

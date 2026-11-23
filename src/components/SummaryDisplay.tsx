@@ -138,7 +138,7 @@ export function SummaryDisplay({
     setFollowUpError(null);
     if (!geminiConfigured) {
       setFollowUpError(
-        'AI follow-up requires GEMINI_API_KEY to be configured in your Secrets panel.'
+        'Brainstine is temporarily unavailable. Please try again shortly.'
       );
       return;
     }

@@ -18,6 +18,7 @@ import {
   formatClientApiError,
   parseApiJsonResponse,
   resolveApiUrl,
+  sanitizeUserErrorMessage,
 } from '../lib/apiClient';
 import {
   createStudyMaterialRecord,
@@ -326,9 +327,7 @@ export function StudySummarizer({
               resolve(json as ExtractionResult);
             } catch {
               reject(
-                new Error(
-                  'The server returned an invalid or non-JSON response while extracting the file. Verify the Brainstine /api backend is active.'
-                )
+                new Error("We couldn't process your study material. Please try again.")
               );
             }
           } else {
@@ -351,7 +350,7 @@ export function StudySummarizer({
           reject(
             Object.assign(
               new Error(
-                'Network connection error while uploading file. Check your internet connection and verify the Brainstine server is running.'
+                'Network connection error. Please check your internet connection and try again.'
               ),
               { isTransportError: true }
             )
@@ -359,7 +358,7 @@ export function StudySummarizer({
         xhr.ontimeout = () =>
           reject(
             new Error(
-              'Content extraction timed out while processing the file. Try a smaller file or split long documents.'
+              'Processing your study material took too long. Please try a smaller file or split long documents.'
             )
           );
         xhr.send(buildFormData());
@@ -449,12 +448,12 @@ export function StudySummarizer({
         if (!isLocalOrigin && uploadFile.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES) {
           if (!user || !isConfigured) {
             throw new Error(
-              `This file (${formatBytes(uploadFile.size)}) exceeds the 3.8 MB direct upload limit. Please sign in to upload files up to 25 MB, or compress/split the file under 3.8 MB.`
+              `Files larger than 3.8 MB require signing in to your Brainstine account (file is ${formatBytes(uploadFile.size)}). Please sign in to upload files up to 25 MB, or choose a smaller file.`
             );
           }
 
           if (!preUploadedStoragePath) {
-            setExtractionStatus('Uploading large file to cloud storage...');
+            setExtractionStatus('Uploading large file for processing...');
             setUploadProgress(15);
             preUploadedStoragePath = await uploadMaterialFileToStorage(user.id, uploadFile, {
               preBuffered: uploadBuffer,
@@ -493,13 +492,8 @@ export function StudySummarizer({
               'extracting study content from your file'
             );
           } catch (extractErr) {
-            // Reset staged path if storage URL fetch failed so retry re-uploads cleanly
-            if (
-              extractErr instanceof Error &&
-              extractErr.message.includes('staged study file from cloud storage')
-            ) {
-              stagedStoragePathRef.current = null;
-            }
+            // Reset staged path on failure so a subsequent retry can re-upload cleanly
+            stagedStoragePathRef.current = null;
             throw extractErr;
           } finally {
             clearTimeout(timer);
@@ -542,7 +536,7 @@ export function StudySummarizer({
 
       if (user && isConfigured) {
         try {
-          setExtractionStatus('Saving material to your Supabase library...');
+          setExtractionStatus('Saving material to your study library...');
           let storagePath: string | null = preUploadedStoragePath;
           if (!storagePath && inputMode === 'file' && selectedFile) {
             storagePath = await uploadMaterialFileToStorage(user.id, selectedFile, {
@@ -575,11 +569,11 @@ export function StudySummarizer({
           });
           onActivityRecorded?.();
         } catch (storageErr) {
-          console.warn('Material cloud sync notice:', storageErr);
           setNoticeMsg(
-            `Content extracted, but cloud library sync encountered an issue: ${
-              storageErr instanceof Error ? storageErr.message : 'Check Supabase schema/bucket.'
-            }`
+            `Content extracted, but your study library could not sync right now: ${sanitizeUserErrorMessage(
+              storageErr,
+              'saving your study material'
+            )}`
           );
         }
       }
@@ -608,7 +602,7 @@ export function StudySummarizer({
 
     if (!geminiConfigured) {
       setErrorMsg(
-        'GEMINI_API_KEY is missing. Configure GEMINI_API_KEY in Secrets before generating AI summaries.'
+        'Brainstine is temporarily unavailable. Please try again shortly.'
       );
       return;
     }
@@ -712,7 +706,7 @@ export function StudySummarizer({
       setNoticeMsg('Summary saved to your library.');
       onActivityRecorded?.();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Could not save summary.');
+      setErrorMsg(sanitizeUserErrorMessage(err, 'saving your summary'));
     } finally {
       setSavingSummary(false);
     }
@@ -728,15 +722,12 @@ export function StudySummarizer({
             <KeyRound className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
             <div>
               <h3 className="font-display font-semibold select-none">
-                AI Provider Configuration Required
+                AI Summarization Temporarily Unavailable
               </h3>
               <p className="mt-1 text-xs leading-relaxed">
-                The server environment variable <code className="font-mono font-semibold">GEMINI_API_KEY</code> is
-                currently missing. Configure <code className="font-mono">GEMINI_API_KEY</code> in{' '}
-                <strong>Secrets</strong> and restart the server to enable image OCR, audio
-                transcription, and AI summarization.
-                Non-AI features such as saving raw text materials, browsing your library, and theme
-                settings remain fully usable.
+                Brainstine AI summarization, image reading, and audio transcription are temporarily
+                unavailable right now. Please try again shortly. You can still paste or save text
+                notes, browse your library, and adjust theme settings.
               </p>
             </div>
           </div>

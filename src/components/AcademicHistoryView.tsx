@@ -18,6 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { sanitizeUserErrorMessage } from '../lib/apiClient';
 import {
   deleteAiSession,
   deleteQuizAttempt,
@@ -341,7 +342,7 @@ export function AcademicHistoryView({
       setRenameDraft('');
       onRefresh();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Unable to rename summary.');
+      setErrorMsg(sanitizeUserErrorMessage(err, 'renaming your summary'));
     } finally {
       setSavingRename(false);
     }
@@ -362,7 +363,7 @@ export function AcademicHistoryView({
       setDeleteTarget(null);
       onRefresh();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Unable to delete academic record.');
+      setErrorMsg(sanitizeUserErrorMessage(err, 'deleting your academic record'));
     } finally {
       setDeleting(false);
     }
@@ -844,7 +845,7 @@ export function AcademicHistoryView({
         isOpen={Boolean(deleteTarget)}
         title="Delete academic record?"
         itemName={deleteTarget?.title}
-        description="This permanently removes this record from your Supabase Academic History. This action cannot be undone."
+        description="This permanently removes this record from your Academic History. This action cannot be undone."
         busy={deleting}
         onConfirm={handleConfirmDelete}
         onCancel={() => setDeleteTarget(null)}

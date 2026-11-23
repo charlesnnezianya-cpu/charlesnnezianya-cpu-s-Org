@@ -11,6 +11,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { sanitizeUserErrorMessage } from '../lib/apiClient';
 import { deleteStudyMaterial, getMaterialSignedUrl } from '../lib/supabase';
 import type { StudyMaterialRecord } from '../types/brainstine';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
@@ -57,7 +58,7 @@ export function MaterialsLibraryView({
       anchor.click();
       anchor.remove();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Unable to download file.');
+      setErrorMsg(sanitizeUserErrorMessage(err, 'downloading your file'));
     } finally {
       setBusyId(null);
     }
@@ -73,7 +74,7 @@ export function MaterialsLibraryView({
       setConfirmTarget(null);
       onRefresh();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Could not delete material.');
+      setErrorMsg(sanitizeUserErrorMessage(err, 'deleting your material'));
     } finally {
       setBusyId(null);
     }

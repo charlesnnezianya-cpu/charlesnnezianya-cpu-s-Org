@@ -167,7 +167,7 @@ create table if not exists public.quizzes (
   user_id uuid not null references auth.users (id) on delete cascade,
   title text not null,
   subject_area text not null default 'General Studies',
-  source_mode text not null check (source_mode in ('material', 'summary', 'text', 'topic')),
+  source_mode text not null check (source_mode in ('material', 'summary', 'upload', 'text', 'topic')),
   material_id uuid references public.study_materials (id) on delete set null,
   summary_id uuid references public.study_summaries (id) on delete set null,
   format text not null check (format in ('objective', 'theory', 'mixed')),
@@ -177,6 +177,16 @@ create table if not exists public.quizzes (
   questions jsonb not null,
   created_at timestamptz not null default now()
 );
+
+do $$
+begin
+  alter table public.quizzes drop constraint if exists quizzes_source_mode_check;
+  alter table public.quizzes
+    add constraint quizzes_source_mode_check
+    check (source_mode in ('material', 'summary', 'upload', 'text', 'topic'));
+exception
+  when undefined_table then null;
+end $$;
 
 create index if not exists quizzes_user_id_idx
   on public.quizzes (user_id, created_at desc);

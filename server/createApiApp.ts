@@ -23,7 +23,6 @@ import {
   AUTHORIZED_GEMINI_MODEL,
   AiInvalidResponseError,
   ensureResolvedGeminiModel,
-  formatGeminiError,
   getConfiguredGeminiModel,
   getGeminiClient,
   getGeminiModel,
@@ -35,6 +34,12 @@ import {
   runWithGeminiModel,
   withRetry,
 } from './geminiService.ts';
+import {
+  buildSafeApiError,
+  logServerError,
+  logServerWarn,
+  sendSafeApiError,
+} from './errorHandler.ts';
 
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -688,14 +693,18 @@ export function createApiApp() {
   });
 
   app.use(express.json({ limit: '20mb' }));
-  app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+  app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
     if (err instanceof SyntaxError && 'body' in (err as object)) {
-      return res.status(400).json({ error: 'Invalid JSON request payload.' });
+      return sendSafeApiError(res, 'api.unhandled', new Error('Invalid request data.'), {
+        explicitStatus: 400,
+        meta: { method: req.method, path: req.path, reason: 'json_syntax' },
+      });
     }
     const errObj = err as { type?: string; status?: number };
     if (errObj?.type === 'entity.too.large' || errObj?.status === 413) {
-      return res.status(413).json({
-        error: 'Request payload exceeds the 20 MB limit. Please upload a smaller image or document.',
+      return sendSafeApiError(res, 'api.unhandled', err, {
+        explicitStatus: 413,
+        meta: { method: req.method, path: req.path },
       });
     }
     next(err);
@@ -729,23 +738,27 @@ export function createApiApp() {
 
     if (req.query.probe === '1' && geminiConfigured) {
       const ai = getGeminiClient();
-      const listedModels: string[] = [];
-      let listError: string | null = null;
+      let listedCount = 0;
 
       try {
         const pager = await ai.models.list({ config: { pageSize: 50 } });
         for await (const m of pager) {
-          if (m.name) {
-            listedModels.push(m.name.replace(/^models\//, ''));
-          }
-          if (listedModels.length >= 60) break;
+          if (m.name) listedCount++;
+          if (listedCount >= 60) break;
         }
       } catch (err: unknown) {
-        listError = err instanceof Error ? err.message : String(err);
+        logServerWarn('api.health.probe', 'Model list probe encountered an error', err);
       }
 
       const singleProbe = await probeSingleModelQuick(ai, activeModel, 18000);
-      const probeResults = [{ model: activeModel, ...singleProbe }];
+      const probeResults = [
+        {
+          ok: singleProbe.ok,
+          latencyMs: singleProbe.latencyMs,
+          status: singleProbe.status,
+          quotaHit: singleProbe.quotaHit,
+        },
+      ];
 
       let supabaseHealthy: boolean | null = null;
       if (supabaseConfigured) {
@@ -762,17 +775,9 @@ export function createApiApp() {
       return res.json({
         ok: true,
         geminiConfigured,
-        configuredModel: configuredEnvModel || AUTHORIZED_GEMINI_MODEL,
-        activeModel,
-        authorizedModel: AUTHORIZED_GEMINI_MODEL,
-        autoModelSwitching: false,
-        modelFallbackUsed: false,
-        modelNote: resolvedState?.reason || null,
-        requiredAiEnvVar: 'GEMINI_API_KEY',
         supabaseConfigured,
         supabaseHealthy,
-        listedModels,
-        listError,
+        listedCount,
         probeResults,
       });
     }
@@ -780,14 +785,9 @@ export function createApiApp() {
     res.json({
       ok: true,
       geminiConfigured,
-      configuredModel: configuredEnvModel || AUTHORIZED_GEMINI_MODEL,
-      activeModel,
-      authorizedModel: AUTHORIZED_GEMINI_MODEL,
-      autoModelSwitching: false,
-      modelFallbackUsed: false,
-      modelNote: resolvedState?.reason || null,
-      requiredAiEnvVar: 'GEMINI_API_KEY',
       supabaseConfigured,
+      configuredModel: configuredEnvModel ? 'locked' : 'default',
+      activeModel: resolvedState ? 'ready' : activeModel ? 'ready' : 'unavailable',
     });
   });
 
@@ -800,7 +800,6 @@ export function createApiApp() {
       return res.json({
         supabaseConfigured: false,
         googleEnabled: false,
-        reason: 'Supabase environment variables are not configured.',
       });
     }
 
@@ -827,37 +826,31 @@ export function createApiApp() {
       );
 
       const location = authRes.headers.get('location') || '';
-      let supabaseErrorBody: string | null = null;
       if (!location && !authRes.ok) {
-        supabaseErrorBody = await authRes.text().catch(() => null);
+        const rawErr = await authRes.text().catch(() => '');
+        logServerWarn('auth.oauth_status', 'OAuth authorize probe failed', {
+          status: authRes.status,
+          body: rawErr.slice(0, 300),
+        });
       }
 
-      let targetHost: string | null = null;
       let hasClientId = false;
       let callbackMatchesSupabase = false;
-      let scopeList: string[] = [];
-      let googleEndpointStatus: number | null = null;
-      let googleRedirectLocation: string | null = null;
       let googleErrorType: string | null = null;
-      let googleErrorDetail: string | null = null;
 
       if (location) {
         try {
           const parsedLoc = new URL(location);
-          targetHost = parsedLoc.host;
           const clientIdParam = parsedLoc.searchParams.get('client_id') || '';
           hasClientId = Boolean(clientIdParam.trim());
           const cbUri = parsedLoc.searchParams.get('redirect_uri') || '';
           callbackMatchesSupabase = cbUri === `${supabaseUrl}/auth/v1/callback`;
-          scopeList = (parsedLoc.searchParams.get('scope') || '').split(/\s+/).filter(Boolean);
 
           const gRes = await fetch(location, { redirect: 'manual' });
-          googleEndpointStatus = gRes.status;
           const gLoc = gRes.headers.get('location');
           if (gLoc) {
             try {
               const gLocUrl = new URL(gLoc, 'https://accounts.google.com');
-              googleRedirectLocation = `${gLocUrl.origin}${gLocUrl.pathname}`;
               const explicitErr =
                 gLocUrl.searchParams.get('error') || gLocUrl.searchParams.get('errorCode') || '';
               const authErrorB64 = gLocUrl.searchParams.get('authError') || '';
@@ -870,6 +863,7 @@ export function createApiApp() {
                 }
               }
 
+              let googleErrorDetail = '';
               if (gLocUrl.pathname.includes('/signin/oauth/error')) {
                 const errPageRes = await fetch(gLocUrl.toString(), {
                   headers: { 'Accept-Language': 'en-US,en;q=0.9' },
@@ -884,12 +878,10 @@ export function createApiApp() {
                 const match = cleaned.match(
                   /(Access blocked[^.]{0,220}|Error\s+40\d[^.]{0,220})/i
                 );
-                googleErrorDetail = (
-                  match ? match[0] : 'Google OAuth returned an error page.'
-                ).trim();
+                googleErrorDetail = (match ? match[0] : '').trim();
               }
 
-              const combinedHint = `${explicitErr} ${decodedAuthError} ${googleErrorDetail || ''}`.toLowerCase();
+              const combinedHint = `${explicitErr} ${decodedAuthError} ${googleErrorDetail}`.toLowerCase();
               if (combinedHint.includes('redirect_uri_mismatch')) {
                 googleErrorType = 'redirect_uri_mismatch';
               } else if (combinedHint.includes('org_internal')) {
@@ -906,7 +898,7 @@ export function createApiApp() {
                 googleErrorType = 'oauth_configuration_error';
               }
             } catch {
-              googleRedirectLocation = gLoc.split('?')[0];
+              // ignore malformed redirect URL
             }
           }
         } catch {
@@ -914,45 +906,20 @@ export function createApiApp() {
         }
       }
 
-      let siteUrlRedirectNotice = false;
-      let configuredSiteUrlBase: string | null = null;
-      try {
-        const cbProbe = await fetch(`${supabaseUrl}/auth/v1/callback?error=probe&state=probe`, {
-          redirect: 'manual',
-        });
-        const cbLoc = cbProbe.headers.get('location') || '';
-        if (cbLoc) {
-          const parsedCbLoc = new URL(cbLoc);
-          configuredSiteUrlBase = `${parsedCbLoc.origin}${parsedCbLoc.pathname}`;
-          if (parsedCbLoc.hostname.includes('google.com') && parsedCbLoc.pathname === '/url') {
-            siteUrlRedirectNotice = true;
-          }
-        }
-      } catch {
-        // ignore probe failures
-      }
-
       return res.json({
         supabaseConfigured: true,
         googleEnabled,
-        authorizeStatus: authRes.status,
-        supabaseErrorBody,
-        targetHost,
         hasClientId,
         callbackMatchesSupabase,
-        scopeCount: scopeList.length,
-        googleEndpointStatus,
-        googleRedirectLocation,
         googleErrorType,
-        googleErrorDetail,
-        siteUrlRedirectNotice,
-        configuredSiteUrlBase,
       });
     } catch (err: unknown) {
+      const refId = logServerError('auth.oauth_status', err);
       return res.status(500).json({
         supabaseConfigured: true,
         googleEnabled: false,
-        reason: err instanceof Error ? err.message : 'Unable to inspect Supabase OAuth status.',
+        error: 'Unable to check sign-in availability right now.',
+        referenceId: refId,
       });
     }
   });
@@ -963,14 +930,17 @@ export function createApiApp() {
       upload.single('file')(req, res, (err: unknown) => {
         if (err instanceof multer.MulterError) {
           if (err.code === 'LIMIT_FILE_SIZE') {
-            return res.status(400).json({
-              error: 'File exceeds the 25 MB maximum upload limit. Please compress or split the file.',
-            });
+            return sendSafeApiError(res, 'materials.extract', err, { explicitStatus: 400 });
           }
-          return res.status(400).json({ error: `Upload error: ${err.message}` });
+          return sendSafeApiError(
+            res,
+            'materials.extract',
+            err,
+            { explicitStatus: 400, meta: { multerCode: err.code } }
+          );
         }
         if (err) {
-          return res.status(400).json({ error: 'Unable to process the uploaded file.' });
+          return sendSafeApiError(res, 'materials.extract', err, { explicitStatus: 400 });
         }
         next();
       });
@@ -1013,8 +983,13 @@ export function createApiApp() {
           let parsedSignedUrl: URL;
           try {
             parsedSignedUrl = new URL(signedStorageUrl);
-          } catch {
-            return res.status(400).json({ error: 'Invalid signed storage URL provided.' });
+          } catch (urlErr: unknown) {
+            return sendSafeApiError(
+              res,
+              'materials.extract',
+              urlErr,
+              { explicitStatus: 400, meta: { stage: 'parse_staged_url' } }
+            );
           }
 
           const isSupabaseHost =
@@ -1028,9 +1003,12 @@ export function createApiApp() {
             !isSupabaseHost ||
             !parsedSignedUrl.pathname.startsWith('/storage/v1/object/sign/study-materials/')
           ) {
-            return res.status(400).json({
-              error: 'Signed storage URL must originate from your configured Supabase Storage study-materials bucket.',
-            });
+            return sendSafeApiError(
+              res,
+              'materials.extract',
+              new Error('Invalid staged file URL origin or path'),
+              { explicitStatus: 400, meta: { stage: 'validate_staged_url' } }
+            );
           }
 
           const fetchAc = new AbortController();
@@ -1043,9 +1021,12 @@ export function createApiApp() {
               redirect: 'error',
             });
             if (!fileRes.ok) {
-              return res.status(400).json({
-                error: `Unable to fetch staged study file from cloud storage (HTTP ${fileRes.status}). Please retry the upload.`,
-              });
+              return sendSafeApiError(
+                res,
+                'materials.extract',
+                new Error(`Failed to retrieve staged file (status ${fileRes.status})`),
+                { explicitStatus: 400, meta: { stage: 'fetch_staged_file', upstreamStatus: fileRes.status } }
+              );
             }
             const lenHeader = Number(fileRes.headers.get('content-length') || 0);
             if (lenHeader > MAX_FILE_SIZE_BYTES) {
@@ -1163,7 +1144,7 @@ export function createApiApp() {
               .trim();
             extractionMethod = 'pdf-text';
           } catch (pdfErr) {
-            console.warn('Primary PDF text extraction failed:', pdfErr);
+            logServerWarn('materials.extract.pdf_text', 'Primary PDF text extraction failed', pdfErr);
           }
 
           if (!extractedText || extractedText.length < 60) {
@@ -1199,7 +1180,7 @@ export function createApiApp() {
                   extractionMethod = 'pdf-ocr';
                 }
               } catch (ocrErr) {
-                console.warn('AI OCR fallback failed for scanned PDF:', ocrErr);
+                logServerWarn('materials.extract.pdf_ocr', 'AI OCR fallback failed for scanned PDF', ocrErr);
               }
             }
           }
@@ -1308,9 +1289,7 @@ export function createApiApp() {
 
         return res.json(result);
       } catch (err: unknown) {
-        console.error('Material extraction failed:', err);
-        const formatted = formatGeminiError(err);
-        return res.status(formatted.status).json({ error: formatted.message });
+        return sendSafeApiError(res, 'materials.extract', err);
       }
     }
   );
@@ -1698,9 +1677,7 @@ export function createApiApp() {
 
       return res.json(fullSummary);
     } catch (err: unknown) {
-      console.error('Summary generation failed:', err);
-      const formatted = formatGeminiError(err);
-      return res.status(formatted.status).json({ error: formatted.message });
+      return sendSafeApiError(res, 'summaries.generate', err);
     }
   });
 
@@ -1770,7 +1747,7 @@ export function createApiApp() {
               },
             },
           }),
-        { maxRetries: 1, timeoutMs: 45000 }
+        { maxRetries: 2, timeoutMs: 45000 }
       );
 
       const parsed = parseAiJsonResponse<{ fromSource?: string; aiExplanation?: string }>(
@@ -1787,9 +1764,7 @@ export function createApiApp() {
         aiExplanation: parsed.aiExplanation || '',
       });
     } catch (err: unknown) {
-      console.error('Follow-up query failed:', err);
-      const formatted = formatGeminiError(err);
-      return res.status(formatted.status).json({ error: formatted.message });
+      return sendSafeApiError(res, 'summaries.followup', err);
     }
   });
 
@@ -1856,7 +1831,7 @@ export function createApiApp() {
       const ai = getGeminiClient();
 
       const batchSizes: number[] = [];
-      const maxBatchSize = validFormat === 'objective' ? 10 : 8;
+      const maxBatchSize = validFormat === 'objective' ? 12 : 10;
       let remainingCount = totalCount;
       while (remainingCount > 0) {
         const nextSize = Math.min(maxBatchSize, remainingCount);
@@ -2051,7 +2026,7 @@ export function createApiApp() {
         const diagramGuidance =
           totalCount <= 20
             ? ' Optionally attach a visualAid diagram ONLY to 1 question per batch where a process diagram, quantitative plot, or labeled system genuinely helps test understanding.'
-            : ' Do NOT include visualAid objects on bulk 30-40 question exams so every question remains crisp and fast to generate.';
+            : ' Do NOT include visualAid objects on bulk 25+ question exams so every question remains crisp and fast to generate.';
 
         const { result: response } = await runWithGeminiModel(
           (model, signal) =>
@@ -2066,7 +2041,7 @@ export function createApiApp() {
                 responseSchema: quizResponseSchema,
               },
             }),
-          { maxRetries: 1, timeoutMs: 40000 }
+          { maxRetries: 2, timeoutMs: 40000 }
         );
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2076,7 +2051,7 @@ export function createApiApp() {
         );
       };
 
-      const batchResults = await mapWithConcurrency(batchSizes, 2, async (batchCount, b) => {
+      const batchResults = await mapWithConcurrency(batchSizes, 3, async (batchCount, b) => {
         const scopeHint =
           batchSizes.length > 1
             ? `\nBatch ${b + 1} of ${batchSizes.length}: ${batchFocusAngles[b % batchFocusAngles.length]} Do not overlap with other batches.`
@@ -2180,7 +2155,7 @@ export function createApiApp() {
           );
           appendParsedQuestions(topUpParsed, false);
         } catch (topUpErr) {
-          console.warn('Quiz top-up batch warning:', topUpErr);
+          logServerWarn('quizzes.generate.topup', 'Quiz top-up batch warning', topUpErr);
         }
       }
 
@@ -2207,9 +2182,7 @@ export function createApiApp() {
 
       return res.json(payload);
     } catch (err: unknown) {
-      console.error('Quiz generation failed:', err);
-      const formatted = formatGeminiError(err);
-      return res.status(formatted.status).json({ error: formatted.message });
+      return sendSafeApiError(res, 'quizzes.generate', err);
     }
   });
 
@@ -2479,9 +2452,7 @@ export function createApiApp() {
 
       return res.json(responsePayload);
     } catch (err: unknown) {
-      console.error('Quiz grading failed:', err);
-      const formatted = formatGeminiError(err);
-      return res.status(formatted.status).json({ error: formatted.message });
+      return sendSafeApiError(res, 'quizzes.grade', err);
     }
   });
 
@@ -2522,7 +2493,7 @@ export function createApiApp() {
                 },
               },
             }),
-          { maxRetries: 1, timeoutMs: 55000 }
+          { maxRetries: 2, timeoutMs: 55000 }
         );
         const parsed = parseAiJsonResponse<{
           reply?: string;
@@ -2553,7 +2524,7 @@ export function createApiApp() {
               abortSignal: signal,
             },
           }),
-        { maxRetries: 1, timeoutMs: 55000 }
+        { maxRetries: 2, timeoutMs: 55000 }
       );
 
       const reply = (response.text ?? '').trim();
@@ -2565,9 +2536,7 @@ export function createApiApp() {
 
       return res.json({ reply });
     } catch (err: unknown) {
-      console.error('AI Chat failed:', err);
-      const formatted = formatGeminiError(err);
-      return res.status(formatted.status).json({ error: formatted.message });
+      return sendSafeApiError(res, 'ai.chat', err);
     }
   });
 
@@ -2699,19 +2668,17 @@ export function createApiApp() {
         res.end();
       }
     } catch (err: unknown) {
-      const formatted = stallTimedOut
-        ? {
-            status: 504,
-            message:
-              'The AI response timed out due to temporary high demand. Your message has been preserved—please try again in a few moments.',
-          }
-        : formatGeminiError(err);
+      const safe = buildSafeApiError('ai.chat.stream', err, { stallTimedOut });
 
       if (!res.headersSent) {
-        return res.status(formatted.status).json({ error: formatted.message });
+        return res.status(safe.status).json({ error: safe.message, referenceId: safe.referenceId });
       }
       if (!clientClosed) {
-        writeSseEvent(res, 'error', { status: formatted.status, error: formatted.message });
+        writeSseEvent(res, 'error', {
+          status: safe.status,
+          error: safe.message,
+          referenceId: safe.referenceId,
+        });
         res.end();
       }
     } finally {
@@ -2771,7 +2738,7 @@ export function createApiApp() {
               },
             },
           }),
-        { maxRetries: 1, timeoutMs: 55000 }
+        { maxRetries: 2, timeoutMs: 55000 }
       );
 
       const parsed = parseAiJsonResponse<{
@@ -2798,9 +2765,7 @@ export function createApiApp() {
         advanceStep: Boolean(parsed.advanceStep),
       });
     } catch (err: unknown) {
-      console.error('AI Tutor failed:', err);
-      const formatted = formatGeminiError(err);
-      return res.status(formatted.status).json({ error: formatted.message });
+      return sendSafeApiError(res, 'ai.tutor', err);
     }
   });
 
@@ -2922,19 +2887,17 @@ export function createApiApp() {
         res.end();
       }
     } catch (err: unknown) {
-      const formatted = stallTimedOut
-        ? {
-            status: 504,
-            message:
-              'Personal AI Tutor timed out waiting for Gemini to respond. Your message has been preserved—please try again.',
-          }
-        : formatGeminiError(err);
+      const safe = buildSafeApiError('ai.tutor.stream', err, { stallTimedOut });
 
       if (!res.headersSent) {
-        return res.status(formatted.status).json({ error: formatted.message });
+        return res.status(safe.status).json({ error: safe.message, referenceId: safe.referenceId });
       }
       if (!clientClosed) {
-        writeSseEvent(res, 'error', { status: formatted.status, error: formatted.message });
+        writeSseEvent(res, 'error', {
+          status: safe.status,
+          error: safe.message,
+          referenceId: safe.referenceId,
+        });
         res.end();
       }
     } finally {
@@ -2944,9 +2907,9 @@ export function createApiApp() {
   });
 
   // Never let unknown /api/* requests fall through to HTML 404 or index.html
-  app.use('/api', (req: Request, res: Response) => {
+  app.use('/api', (_req: Request, res: Response) => {
     res.status(404).json({
-      error: `API endpoint "${req.originalUrl}" was not found on this server.`,
+      error: 'The requested resource could not be found.',
     });
   });
 
@@ -2956,22 +2919,17 @@ export function createApiApp() {
     const statusCandidate =
       (err as { status?: number })?.status ||
       (err as { statusCode?: number })?.statusCode ||
-      500;
-    const errType = (err as { type?: string })?.type;
-    if (statusCandidate === 413 || errType === 'entity.too.large') {
-      return res.status(413).json({
-        error:
-          'Request payload is too large for the server. Please upload a smaller file or shorter image/text.',
-      });
-    }
+      undefined;
     if (err instanceof SyntaxError && statusCandidate === 400) {
-      return res.status(400).json({
-        error: 'Malformed JSON request body. Please check your input and try again.',
+      return sendSafeApiError(res, 'api.unhandled', new Error('Invalid request data.'), {
+        explicitStatus: 400,
+        meta: { method: req.method, path: req.path, reason: 'json_syntax' },
       });
     }
-    const formatted = formatGeminiError(err);
-    console.error(`[API Unhandled Error] ${req.method} ${req.originalUrl}:`, err);
-    return res.status(formatted.status || 500).json({ error: formatted.message });
+    return sendSafeApiError(res, 'api.unhandled', err, {
+      explicitStatus: statusCandidate,
+      meta: { method: req.method, path: req.path },
+    });
   });
 
   return app;

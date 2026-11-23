@@ -17,6 +17,176 @@ export function looksLikeHtmlOrStaticNotFound(
   );
 }
 
+const CLIENT_TECHNICAL_LEAK_PATTERNS: RegExp[] = [
+  /supabase/i,
+  /gemini/i,
+  /google\s*genai/i,
+  /generative\s*language/i,
+  /vercel/i,
+  /serverless/i,
+  /secrets?\s*panel/i,
+  /gemini_api_key/i,
+  /vite_supabase/i,
+  /service_role/i,
+  /postgrest/i,
+  /pgrst\d*/i,
+  /postgres/i,
+  /row[- ]level security/i,
+  /\brls\b/i,
+  /\bbucket\b/i,
+  /study-materials/i,
+  /signed\s*storage\s*url/i,
+  /staged\s*file|origin\s*or\s*path/i,
+  /cloud\s*storage/i,
+  /\/api\//i,
+  /localhost/i,
+  /127\.0\.0\.1/,
+  /https?:\/\//i,
+  /\bstack\b|\bat\s+[A-Za-z0-9_$.]+\s*\(/i,
+  /econnrefused|enotfound|econnreset|eai_again|etimedout/i,
+  /aiza[0-9a-z_-]{10,}/i,
+  /bearer\s+[a-z0-9._-]+/i,
+  /eyj[a-z0-9_-]{8,}\./i,
+  /resource_exhausted|api_key_invalid/i,
+  /\bhttp\s+[45]\d{2}\b/i,
+];
+
+function hasTechnicalDetails(message: string): boolean {
+  const trimmed = message.trim();
+  if (!trimmed) return true;
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) return true;
+  if (trimmed.length > 320) return true;
+  return CLIENT_TECHNICAL_LEAK_PATTERNS.some((p) => p.test(trimmed));
+}
+
+function getFriendlyFallbackForAction(contextAction?: string): string {
+  const lower = (contextAction || '').toLowerCase();
+  if (lower.includes('upload') || lower.includes('stag')) {
+    return "We couldn't upload your file. Please try again.";
+  }
+  if (lower.includes('extract') || lower.includes('process') || lower.includes('transcrib')) {
+    return "We couldn't process your study material. Please try again.";
+  }
+  if (lower.includes('sign') || lower.includes('auth') || lower.includes('login')) {
+    return "We couldn't sign you in right now. Please try again.";
+  }
+  return 'Something went wrong. Please try again.';
+}
+
+function appendReferenceId(message: string, referenceId?: string): string {
+  if (!referenceId || !/^BRN-[A-Z0-9]{4,12}$/i.test(referenceId.trim())) {
+    return message;
+  }
+  if (message.includes(referenceId.trim())) return message;
+  return `${message} (Ref: ${referenceId.trim()})`;
+}
+
+export function sanitizeUserErrorMessage(
+  rawInput: unknown,
+  contextAction?: string,
+  referenceId?: string
+): string {
+  const raw =
+    rawInput instanceof Error
+      ? rawInput.message.trim()
+      : typeof rawInput === 'string'
+        ? rawInput.trim()
+        : String(rawInput ?? '').trim();
+  const lower = raw.toLowerCase();
+
+  if (
+    lower === 'failed to fetch' ||
+    lower === 'load failed' ||
+    lower.includes('networkerror when attempting to fetch') ||
+    lower.includes('network request failed') ||
+    lower.includes('network connection error') ||
+    lower.includes('internet connection') ||
+    lower.includes('offline') ||
+    lower.includes('econn') ||
+    lower.includes('enotfound')
+  ) {
+    return appendReferenceId(
+      'Network connection error. Please check your internet connection and try again.',
+      referenceId
+    );
+  }
+
+  if (
+    lower.includes('timed out') ||
+    lower.includes('timeout') ||
+    lower.includes('took too long') ||
+    lower.includes('stream idle timeout')
+  ) {
+    return appendReferenceId(
+      'This request took too long to complete. Your input has been preserved—please try again.',
+      referenceId
+    );
+  }
+
+  if (
+    lower.includes('jwt expired') ||
+    lower.includes('refresh_token') ||
+    lower.includes('invalid refresh token') ||
+    lower.includes('session_not_found') ||
+    lower.includes('session has expired')
+  ) {
+    return 'Your session has expired. Please sign in again.';
+  }
+
+  if (
+    lower.includes('row-level security') ||
+    lower.includes('permission denied') ||
+    lower.includes('insufficient_privilege')
+  ) {
+    return "You don't have permission to perform this action. Please sign in again and retry.";
+  }
+
+  if (
+    lower.includes('entity.too.large') ||
+    lower.includes('payload too large') ||
+    lower.includes('object exceeded the maximum allowed size') ||
+    lower.includes('4.5 mb')
+  ) {
+    return 'This file is too large to upload. Please choose a smaller file or compress it and try again.';
+  }
+
+  if (
+    lower.includes('not configured') ||
+    lower.includes('missing gemini_api_key') ||
+    lower.includes('missing on the server') ||
+    lower.includes('vite_supabase') ||
+    lower.includes('service is temporarily unavailable') ||
+    lower.includes('temporarily unavailable')
+  ) {
+    return appendReferenceId(
+      'Brainstine is temporarily unavailable. Please try again shortly.',
+      referenceId
+    );
+  }
+
+  if (
+    lower.includes('resource_exhausted') ||
+    lower.includes('quota') ||
+    lower.includes('rate limit') ||
+    lower.includes('high demand')
+  ) {
+    return appendReferenceId(
+      'Brainstine is experiencing high demand right now. Please wait a moment and try again.',
+      referenceId
+    );
+  }
+
+  if (
+    !raw ||
+    lower === 'request failed' ||
+    hasTechnicalDetails(raw)
+  ) {
+    return appendReferenceId(getFriendlyFallbackForAction(contextAction), referenceId);
+  }
+
+  return appendReferenceId(raw, referenceId);
+}
+
 export function extractErrorFromHttpBody(
   status: number,
   bodyText: string,
@@ -24,10 +194,18 @@ export function extractErrorFromHttpBody(
   contextAction: string
 ): string {
   const trimmed = bodyText.trim();
+  let refId: string | undefined;
 
   if (trimmed && !looksLikeHtmlOrStaticNotFound(trimmed, contentType)) {
     try {
-      const parsed = JSON.parse(trimmed) as { error?: unknown; message?: unknown };
+      const parsed = JSON.parse(trimmed) as {
+        error?: unknown;
+        message?: unknown;
+        referenceId?: unknown;
+      };
+      if (typeof parsed?.referenceId === 'string') {
+        refId = parsed.referenceId.trim();
+      }
       const rawMsg =
         typeof parsed?.error === 'string'
           ? parsed.error.trim()
@@ -35,47 +213,56 @@ export function extractErrorFromHttpBody(
             ? parsed.message.trim()
             : '';
       if (rawMsg && rawMsg.toLowerCase() !== 'request failed') {
-        return rawMsg;
+        return sanitizeUserErrorMessage(rawMsg, contextAction, refId);
       }
     } catch {
-      // Fall through to status/plain-text handling
+      // Fall through to status handling
     }
   }
 
   if (status === 404 || looksLikeHtmlOrStaticNotFound(trimmed, contentType)) {
-    return `The Brainstine AI backend endpoint could not be reached while ${contextAction} (HTTP 404). Make sure the server /api endpoints and GEMINI_API_KEY are deployed and running.`;
+    return appendReferenceId(
+      'Brainstine is temporarily unavailable. Please try again shortly.',
+      refId
+    );
   }
 
   if (status === 401 || status === 403) {
-    return 'The configured GEMINI_API_KEY was rejected or lacks permission. Please verify GEMINI_API_KEY in your Secrets panel.';
+    return appendReferenceId(
+      'Your session may have expired or access was denied. Please sign in and try again.',
+      refId
+    );
   }
 
   if (status === 413) {
-    return 'Your uploaded file or prompt exceeds the request size limit (4.5 MB on cloud serverless hosting / 20 MB local). Please upload a smaller file or shorter text.';
+    return appendReferenceId(
+      'This file or request is too large. Please upload a smaller file or shorter content.',
+      refId
+    );
   }
 
   if (status === 429) {
-    return 'AI rate limit or quota reached. Your input has been preserved—please wait a moment and try again.';
+    return appendReferenceId(
+      'Brainstine is experiencing high demand right now. Please wait a moment and try again.',
+      refId
+    );
   }
 
   if (status === 502 || status === 504) {
-    return `The AI server timed out or returned a temporary gateway error (HTTP ${status}) while ${contextAction}. Your work has been preserved—please try again.`;
+    return appendReferenceId(
+      'Brainstine is temporarily unavailable. Please try again shortly.',
+      refId
+    );
   }
 
   if (status === 503) {
-    return 'The AI service is temporarily unavailable or missing server configuration (GEMINI_API_KEY). Please try again shortly.';
+    return appendReferenceId(
+      'Brainstine is temporarily unavailable. Please try again shortly.',
+      refId
+    );
   }
 
-  if (
-    trimmed &&
-    trimmed.length <= 240 &&
-    !looksLikeHtmlOrStaticNotFound(trimmed, contentType) &&
-    trimmed.toLowerCase() !== 'request failed'
-  ) {
-    return trimmed;
-  }
-
-  return `Unable to complete ${contextAction} (server returned HTTP ${status}). Please try again.`;
+  return sanitizeUserErrorMessage(trimmed, contextAction, refId);
 }
 
 export async function parseApiJsonResponse<T>(
@@ -92,17 +279,13 @@ export async function parseApiJsonResponse<T>(
   }
 
   if (!bodyText.trim() || looksLikeHtmlOrStaticNotFound(bodyText, contentType)) {
-    throw new Error(
-      `The server returned an unexpected non-JSON response while ${contextAction}. Verify that the Brainstine /api backend is active.`
-    );
+    throw new Error('Brainstine is temporarily unavailable. Please try again shortly.');
   }
 
   try {
     return JSON.parse(bodyText) as T;
   } catch {
-    throw new Error(
-      `The server returned malformed JSON while ${contextAction}. Please try again.`
-    );
+    throw new Error(getFriendlyFallbackForAction(contextAction));
   }
 }
 
@@ -114,26 +297,9 @@ export function formatClientApiError(
   if (err && typeof err === 'object' && (err as { name?: string }).name === 'AbortError') {
     return (
       timeoutMessage ||
-      `The request timed out while ${contextAction}. Your input has been preserved—please try again.`
+      'This request took too long to complete. Your input has been preserved—please try again.'
     );
   }
 
-  const raw = err instanceof Error ? err.message.trim() : String(err || '').trim();
-  const lower = raw.toLowerCase();
-
-  if (
-    lower === 'failed to fetch' ||
-    lower === 'load failed' ||
-    lower.includes('networkerror when attempting to fetch') ||
-    lower.includes('network request failed') ||
-    lower.includes('the internet connection appears to be offline')
-  ) {
-    return `Network connection error while ${contextAction}. Please check your internet connection and verify the Brainstine server is running, then try again.`;
-  }
-
-  if (!raw || lower === 'request failed') {
-    return `An error occurred while ${contextAction}. Your work has been preserved—please try again.`;
-  }
-
-  return raw;
+  return sanitizeUserErrorMessage(err, contextAction);
 }

@@ -21,7 +21,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { formatClientApiError } from '../lib/apiClient';
+import { formatClientApiError, sanitizeUserErrorMessage } from '../lib/apiClient';
 import {
   useChatbotSpeechPlayback,
   useChatbotVoiceInput,
@@ -291,7 +291,7 @@ export function AiChatWorkspace({
         setActiveSessionImage(restoredImage);
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Unable to load conversation.');
+      setError(sanitizeUserErrorMessage(err, 'loading your conversation'));
     } finally {
       setLoadingMessages(false);
     }
@@ -343,7 +343,7 @@ export function AiChatWorkspace({
       setDeleteTarget(null);
       onActivityRecorded();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to delete chat session.');
+      setError(sanitizeUserErrorMessage(err, 'deleting your conversation'));
     } finally {
       setDeletingSession(false);
     }
@@ -578,9 +578,10 @@ export function AiChatWorkspace({
           };
           setMessages((prev) => [...prev, localAssistantMsg]);
           setError(
-            persistErr instanceof Error
-              ? `Response generated, but could not save to cloud history: ${persistErr.message}`
-              : 'Response generated, but could not save to cloud history.'
+            `Response generated, but could not save to your history right now: ${sanitizeUserErrorMessage(
+              persistErr,
+              'saving your message'
+            )}`
           );
         }
       } else {
@@ -660,7 +661,7 @@ export function AiChatWorkspace({
         <div className="max-h-64 flex-1 overflow-y-auto p-2.5 lg:max-h-none">
           {!isSupabaseConfigured ? (
             <p className="p-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-              Current session active locally. Configure Supabase to persist and reopen chat history across sessions.
+              Current session active locally. Sign in when cloud sync is enabled to save and reopen chat history across sessions.
             </p>
           ) : loadingSessions ? (
             <div className="space-y-2 p-2">
@@ -867,14 +868,14 @@ export function AiChatWorkspace({
           </div>
         </header>
 
-        {/* Missing API key notice */}
         {!geminiConfigured && (
           <div className="mx-3.5 sm:mx-5 mt-4 flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
             <div>
-              <p className="font-semibold">GEMINI_API_KEY is not configured</p>
+              <p className="font-semibold">AI Academic Chat Temporarily Unavailable</p>
               <p className="mt-0.5">
-                Add <code className="font-mono">GEMINI_API_KEY</code> in Secrets to enable live AI Academic Chat and image understanding. Saved conversation history remains browsable.
+                Live AI Academic Chat and image analysis are temporarily unavailable right now.
+                Please try again shortly. Your saved conversation history remains browsable.
               </p>
             </div>
           </div>

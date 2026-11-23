@@ -244,7 +244,10 @@ export function isUnsupportedModelError(err: unknown): boolean {
 
 export function formatGeminiError(err: unknown): { status: number; message: string } {
   if (err instanceof AiConfigurationError) {
-    return { status: err.status, message: err.message };
+    return {
+      status: err.status,
+      message: 'Brainstine is temporarily unavailable. Please try again shortly.',
+    };
   }
   if (err instanceof AiInvalidResponseError) {
     return { status: err.status, message: err.message };
@@ -264,11 +267,10 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
   const raw = err instanceof Error ? err.message : String(err);
   const lower = raw.toLowerCase();
 
-  if (raw.includes('GEMINI_API_KEY is missing')) {
+  if (raw.includes('GEMINI_API_KEY is missing') || isInvalidApiKeyError(err) || isUnsupportedModelError(err)) {
     return {
       status: 503,
-      message:
-        'AI service is not configured on this server (missing GEMINI_API_KEY in Secrets or environment variables).',
+      message: 'Brainstine is temporarily unavailable. Please try again shortly.',
     };
   }
 
@@ -280,45 +282,15 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
     return { status: 400, message: raw };
   }
 
-  if (isInvalidApiKeyError(err)) {
-    return {
-      status: 403,
-      message:
-        'The configured GEMINI_API_KEY is invalid or lacks permission. Please verify GEMINI_API_KEY in your server Secrets panel.',
-    };
-  }
-
   const quotaInfo = inspectGeminiQuotaError(err);
   if (quotaInfo.isQuotaError) {
-    if (quotaInfo.quotaScope === 'daily' || quotaInfo.quotaScope === 'zero_quota') {
-      return {
-        status: 429,
-        message:
-          'Gemini 3.1 Flash-Lite free-tier daily quota is currently exhausted. Your input has been preserved—please try again after your free-tier quota resets.',
-      };
-    }
-    if (quotaInfo.quotaScope === 'tpm') {
-      return {
-        status: 429,
-        message:
-          'Gemini 3.1 Flash-Lite token-per-minute free-tier limit reached. Your input has been preserved—please wait a moment or try shorter content, then retry.',
-      };
-    }
     const waitHint =
-      quotaInfo.retryDelaySeconds && quotaInfo.retryDelaySeconds <= 60
-        ? ` Please wait ~${quotaInfo.retryDelaySeconds} seconds and retry.`
-        : ' Please wait a moment and retry.';
+      quotaInfo.retryDelaySeconds && quotaInfo.retryDelaySeconds > 0 && quotaInfo.retryDelaySeconds <= 45
+        ? ` Please wait about ${quotaInfo.retryDelaySeconds} seconds and try again.`
+        : ' Please wait a moment and try again.';
     return {
       status: 429,
-      message: `Gemini 3.1 Flash-Lite free-tier rate limit reached due to high request frequency.${waitHint} Your input has been preserved.`,
-    };
-  }
-
-  if (isUnsupportedModelError(err)) {
-    return {
-      status: 502,
-      message:
-        'Gemini 3.1 Flash-Lite (gemini-3.1-flash-lite) is temporarily unavailable for this API key or endpoint. Brainstine is configured to use gemini-3.1-flash-lite only—please verify your Gemini API project access or retry shortly.',
+      message: `Brainstine is experiencing high demand right now.${waitHint} Your work has been preserved.`,
     };
   }
 
@@ -333,7 +305,7 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
     return {
       status: 502,
       message:
-        'Unable to connect to the Google Gemini API due to a temporary upstream network failure. Your input has been preserved—please try again shortly.',
+        'Network connection error. Please check your internet connection and try again.',
     };
   }
 
@@ -347,7 +319,7 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
     return {
       status: 504,
       message:
-        'Gemini 3.1 Flash-Lite took too long to respond and the request timed out. Your work has been preserved—please try again or shorten the prompt.',
+        'This request took too long to complete. Your input has been preserved—please try again.',
     };
   }
 
@@ -361,8 +333,7 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
   ) {
     return {
       status: 503,
-      message:
-        'Gemini 3.1 Flash-Lite is temporarily experiencing high demand or is unavailable. Your input has been preserved—please wait a moment and retry.',
+      message: 'Brainstine is temporarily unavailable. Please try again shortly.',
     };
   }
 
@@ -370,17 +341,13 @@ export function formatGeminiError(err: unknown): { status: number; message: stri
     return {
       status: 422,
       message:
-        'Gemini 3.1 Flash-Lite declined to generate a response for this input due to content safety filters. Please rephrase your study prompt and try again.',
+        'We could not generate a response for this input. Please rephrase your request and try again.',
     };
   }
 
-  const readable = extractReadableApiError(raw);
   return {
     status: 500,
-    message:
-      readable && !readable.toLowerCase().includes('request failed')
-        ? readable
-        : 'An unexpected server error occurred while contacting Gemini 3.1 Flash-Lite. Your input has been preserved—please try again.',
+    message: 'Something went wrong. Please try again.',
   };
 }
 
@@ -467,7 +434,7 @@ export async function withRetry<T>(
       if (timedOut) {
         throw Object.assign(
           new Error(
-            'Gemini 3.1 Flash-Lite timed out while waiting to respond. Your input has been preserved—please try again in a moment.'
+            'This request took too long to complete. Your input has been preserved—please try again.'
           ),
           { status: 504 }
         );

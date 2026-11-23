@@ -149,7 +149,7 @@ export function WelcomePage({ onOpenAuth, onNavigateToPrivacy }: WelcomePageProp
               </p>
               <p className="mt-4 max-w-xl text-sm leading-relaxed text-slate-600 sm:text-base dark:text-slate-300 academic-selectable">
                 Brainstine transforms PDFs, handwritten notebook photos, and lecture audio into
-                diagram-rich summaries, 10–40 question assessments, context-aware academic chat, and
+                diagram-rich summaries, 5–70 question assessments, context-aware academic chat, and
                 step-by-step personal tutoring—saved securely to your account.
               </p>
 
@@ -241,7 +241,7 @@ export function WelcomePage({ onOpenAuth, onNavigateToPrivacy }: WelcomePageProp
                   AI Quiz &amp; Exam Maker
                 </h3>
                 <p className="mt-2 text-sm leading-relaxed text-slate-600 dark:text-slate-300 academic-selectable">
-                  Generate 10, 20, 30, or 40 objective, theory, or mixed questions in Practice or
+                  Generate 5 to 70 objective, theory, or mixed questions in Practice or
                   timed Exam mode with instant grading and full answer explanations.
                 </p>
               </article>

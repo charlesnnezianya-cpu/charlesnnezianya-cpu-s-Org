@@ -44,10 +44,34 @@ export const supabase: SupabaseClient | null = isSupabaseConfigured
     })
   : null;
 
+function formatFriendlyStorageOrDbError(
+  rawMsg: string | undefined,
+  fallback: string
+): string {
+  const lower = (rawMsg || '').toLowerCase();
+  if (
+    lower.includes('jwt expired') ||
+    lower.includes('invalid refresh token') ||
+    lower.includes('session_not_found')
+  ) {
+    return 'Your sign-in session has expired. Please sign in again.';
+  }
+  if (lower.includes('row-level security') || lower.includes('permission denied')) {
+    return 'You do not have permission for this action. Please sign out, sign back in, and try again.';
+  }
+  if (lower.includes('failed to fetch') || lower.includes('network')) {
+    return 'Network connection error. Please check your internet connection and try again.';
+  }
+  if (lower.includes('object exceeded the maximum allowed size') || lower.includes('payload too large')) {
+    return 'This file exceeds the maximum upload size limit. Please upload a smaller file.';
+  }
+  return fallback;
+}
+
 export function requireSupabase(): SupabaseClient {
   if (!supabase) {
     throw new Error(
-      'Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your environment Secrets to enable authentication and cloud persistence.'
+      'Account and cloud sync services are temporarily unavailable. Please try again shortly.'
     );
   }
   return supabase;
@@ -62,7 +86,6 @@ export async function fetchUserProfile(userId: string): Promise<UserProfile | nu
     .maybeSingle();
 
   if (error) {
-    console.error('Error fetching profile:', error.message);
     return null;
   }
   return data as UserProfile | null;
@@ -91,7 +114,12 @@ export async function upsertUserProfile(profile: {
     .single();
 
   if (error) {
-    throw new Error(error.message);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not save your profile changes right now. Please try again.'
+      )
+    );
   }
   return data as UserProfile;
 }
@@ -127,7 +155,7 @@ async function resolveFreshAccessToken(
 ): Promise<string> {
   const { data: sessionData, error: sessionErr } = await client.auth.getSession();
   if (sessionErr) {
-    throw new Error(`Authentication check failed: ${sessionErr.message}`);
+    throw new Error('Unable to verify your sign-in session. Please sign in again.');
   }
 
   let activeSession = sessionData.session;
@@ -216,7 +244,7 @@ async function uploadBufferToStudyMaterialsBucket(params: {
             reject(
               Object.assign(
                 new Error(
-                  `Storage upload failed (${xhr.status}): ${serverMsg || 'Permission denied by storage security policy. Please sign out and sign back in.'}`
+                  'Your sign-in session may have expired. Please sign out, sign back in, and try uploading again.'
                 ),
                 { retryable: false }
               )
@@ -226,9 +254,7 @@ async function uploadBufferToStudyMaterialsBucket(params: {
           if (xhr.status === 404) {
             reject(
               Object.assign(
-                new Error(
-                  'Storage upload failed: The "study-materials" storage bucket was not found in Supabase.'
-                ),
+                new Error("We couldn't upload your file right now. Please try again shortly."),
                 { retryable: false }
               )
             );
@@ -238,7 +264,7 @@ async function uploadBufferToStudyMaterialsBucket(params: {
             reject(
               Object.assign(
                 new Error(
-                  'Storage upload failed: This file exceeds the Supabase Storage bucket file size limit.'
+                  'This file exceeds the maximum upload size limit. Please upload a smaller or compressed file.'
                 ),
                 { retryable: false }
               )
@@ -248,9 +274,7 @@ async function uploadBufferToStudyMaterialsBucket(params: {
 
           reject(
             Object.assign(
-              new Error(
-                `Storage upload failed (HTTP ${xhr.status}): ${serverMsg || 'Unexpected storage server response.'}`
-              ),
+              new Error("We couldn't upload your file. Please try again."),
               { retryable: xhr.status >= 500 || xhr.status === 429 }
             )
           );
@@ -260,7 +284,7 @@ async function uploadBufferToStudyMaterialsBucket(params: {
           reject(
             Object.assign(
               new Error(
-                'Storage upload failed: Network or connection drop while sending the file to cloud storage.'
+                'Network connection error while uploading your file. Please check your internet connection and try again.'
               ),
               { retryable: true }
             )
@@ -271,7 +295,7 @@ async function uploadBufferToStudyMaterialsBucket(params: {
           reject(
             Object.assign(
               new Error(
-                'Storage upload failed: Timed out while uploading file to cloud storage. Check your connection speed and try again.'
+                'Uploading your file took too long. Please check your internet connection and try again.'
               ),
               { retryable: true }
             )
@@ -284,7 +308,7 @@ async function uploadBufferToStudyMaterialsBucket(params: {
       return storagePath;
     } catch (err: unknown) {
       const retryable = Boolean((err as { retryable?: boolean })?.retryable);
-      lastError = err instanceof Error ? err : new Error('Storage upload failed.');
+      lastError = err instanceof Error ? err : new Error("We couldn't upload your file. Please try again.");
       if (!retryable || attempt >= 2) {
         throw lastError;
       }
@@ -292,7 +316,7 @@ async function uploadBufferToStudyMaterialsBucket(params: {
     }
   }
 
-  throw lastError || new Error('Storage upload failed.');
+  throw lastError || new Error("We couldn't upload your file. Please try again.");
 }
 
 export async function uploadMaterialFileToStorage(
@@ -335,7 +359,12 @@ export async function getMaterialSignedUrl(storagePath: string): Promise<string>
     .createSignedUrl(storagePath, 300);
 
   if (error || !data?.signedUrl) {
-    throw new Error(error?.message || 'Unable to generate download link.');
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error?.message,
+        "We couldn't prepare your file for processing. Please try again."
+      )
+    );
   }
   return data.signedUrl;
 }
@@ -371,7 +400,12 @@ export async function createStudyMaterialRecord(input: {
     .single();
 
   if (error) {
-    throw new Error(`Failed to save material record: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not save your study material right now. Please try again.'
+      )
+    );
   }
   return data as StudyMaterialRecord;
 }
@@ -385,7 +419,12 @@ export async function listStudyMaterials(userId: string): Promise<StudyMaterialR
     .order('created_at', { ascending: false });
 
   if (error) {
-    throw new Error(`Failed to load materials: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not load your study materials right now. Please try again.'
+      )
+    );
   }
   return (data ?? []) as StudyMaterialRecord[];
 }
@@ -406,7 +445,12 @@ export async function deleteStudyMaterial(
     .eq('user_id', userId);
 
   if (error) {
-    throw new Error(`Failed to delete material: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not delete this study material right now. Please try again.'
+      )
+    );
   }
 }
 
@@ -431,7 +475,12 @@ export async function saveStudySummaryRecord(input: {
     .single();
 
   if (error) {
-    throw new Error(`Failed to save summary: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not save your study summary right now. Please try again.'
+      )
+    );
   }
   return data as StudySummaryRecord;
 }
@@ -445,7 +494,12 @@ export async function listStudySummaries(userId: string): Promise<StudySummaryRe
     .order('created_at', { ascending: false });
 
   if (error) {
-    throw new Error(`Failed to load summaries: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not load your saved summaries right now. Please try again.'
+      )
+    );
   }
   return (data ?? []) as StudySummaryRecord[];
 }
@@ -469,7 +523,12 @@ export async function renameStudySummary(
     .single();
 
   if (fetchError || !existing) {
-    throw new Error(fetchError?.message || 'Summary not found.');
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        fetchError?.message,
+        'We could not find that summary.'
+      )
+    );
   }
 
   const prevStructured = (existing.structured_content || {}) as StructuredSummary;
@@ -491,7 +550,12 @@ export async function renameStudySummary(
     .single();
 
   if (error) {
-    throw new Error(`Failed to rename summary: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not rename this summary right now. Please try again.'
+      )
+    );
   }
   return data as StudySummaryRecord;
 }
@@ -505,7 +569,12 @@ export async function deleteStudySummary(userId: string, summaryId: string): Pro
     .eq('user_id', userId);
 
   if (error) {
-    throw new Error(`Failed to delete summary: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not delete this summary right now. Please try again.'
+      )
+    );
   }
 }
 
@@ -545,7 +614,12 @@ export async function listStudyActivities(
     .limit(limit);
 
   if (error) {
-    throw new Error(`Failed to load study activities: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not load your study activity right now. Please try again.'
+      )
+    );
   }
   return (data ?? []) as StudyActivityRecord[];
 }
@@ -583,7 +657,12 @@ export async function saveQuizRecord(input: {
     .single();
 
   if (error) {
-    throw new Error(`Failed to save quiz: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not save this assessment right now. Please try again.'
+      )
+    );
   }
   return data as QuizRecord;
 }
@@ -597,7 +676,12 @@ export async function listQuizzes(userId: string): Promise<QuizRecord[]> {
     .order('created_at', { ascending: false });
 
   if (error) {
-    throw new Error(`Failed to load quizzes: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not load your saved assessments right now. Please try again.'
+      )
+    );
   }
   return (data ?? []) as QuizRecord[];
 }
@@ -611,7 +695,12 @@ export async function deleteQuiz(userId: string, quizId: string): Promise<void> 
     .eq('user_id', userId);
 
   if (error) {
-    throw new Error(`Failed to delete quiz: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not delete this assessment right now. Please try again.'
+      )
+    );
   }
 }
 
@@ -649,7 +738,12 @@ export async function saveQuizAttemptRecord(input: {
     .single();
 
   if (error) {
-    throw new Error(`Failed to save quiz attempt: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not save your results to your academic history right now.'
+      )
+    );
   }
   return data as QuizAttemptRecord;
 }
@@ -663,7 +757,12 @@ export async function listQuizAttempts(userId: string): Promise<QuizAttemptRecor
     .order('created_at', { ascending: false });
 
   if (error) {
-    throw new Error(`Failed to load quiz attempts: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not load your assessment history right now. Please try again.'
+      )
+    );
   }
   return (data ?? []) as QuizAttemptRecord[];
 }
@@ -677,7 +776,12 @@ export async function deleteQuizAttempt(userId: string, attemptId: string): Prom
     .eq('user_id', userId);
 
   if (error) {
-    throw new Error(`Failed to delete quiz attempt: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not delete this history entry right now. Please try again.'
+      )
+    );
   }
 }
 
@@ -694,7 +798,9 @@ export async function uploadSessionImageToStorage(
   try {
     buffer = await file.arrayBuffer();
   } catch {
-    throw new Error('Image storage upload failed: Unable to read the selected image from your device.');
+    throw new Error(
+      'Unable to read the selected image from your device. Please choose the image again.'
+    );
   }
 
   return uploadBufferToStudyMaterialsBucket({
@@ -765,7 +871,12 @@ export async function listAiSessions(
     .order('updated_at', { ascending: false });
 
   if (error) {
-    throw new Error(`Failed to load ${sessionType} sessions: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not load your conversations right now. Please try again.'
+      )
+    );
   }
   return (data ?? []) as AiSessionRecord[];
 }
@@ -779,7 +890,12 @@ export async function listAllAiSessions(userId: string): Promise<AiSessionRecord
     .order('updated_at', { ascending: false });
 
   if (error) {
-    throw new Error(`Failed to load AI sessions: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not load your study sessions right now. Please try again.'
+      )
+    );
   }
   return (data ?? []) as AiSessionRecord[];
 }
@@ -817,7 +933,12 @@ export async function createAiSession(input: {
     .single();
 
   if (error) {
-    throw new Error(`Failed to create ${input.sessionType} session: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not start a new study session right now. Please try again.'
+      )
+    );
   }
   return data as AiSessionRecord;
 }
@@ -848,7 +969,12 @@ export async function updateAiSession(
     .eq('user_id', userId);
 
   if (error) {
-    throw new Error(`Failed to update session: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not update this session right now. Please try again.'
+      )
+    );
   }
 }
 
@@ -880,8 +1006,8 @@ export async function deleteAiSession(userId: string, sessionId: string): Promis
     if (paths.size > 0) {
       await client.storage.from('study-materials').remove(Array.from(paths));
     }
-  } catch (cleanupErr) {
-    console.warn('Optional session image storage cleanup warning:', cleanupErr);
+  } catch {
+    // Non-critical image cleanup warning intentionally ignored
   }
 
   const { error } = await client
@@ -891,7 +1017,12 @@ export async function deleteAiSession(userId: string, sessionId: string): Promis
     .eq('user_id', userId);
 
   if (error) {
-    throw new Error(`Failed to delete session: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not delete this session right now. Please try again.'
+      )
+    );
   }
 }
 
@@ -908,7 +1039,12 @@ export async function listAiMessages(
     .order('created_at', { ascending: true });
 
   if (error) {
-    throw new Error(`Failed to load messages: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not load messages for this session right now. Please try again.'
+      )
+    );
   }
   return (data ?? []) as AiMessageRecord[];
 }
@@ -938,7 +1074,12 @@ export async function createAiMessage(input: {
     .single();
 
   if (error) {
-    throw new Error(`Failed to save message: ${error.message}`);
+    throw new Error(
+      formatFriendlyStorageOrDbError(
+        error.message,
+        'We could not save your message right now. Please try again.'
+      )
+    );
   }
   return data as AiMessageRecord;
 }

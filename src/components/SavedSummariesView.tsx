@@ -10,6 +10,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { sanitizeUserErrorMessage } from '../lib/apiClient';
 import { deleteStudySummary, renameStudySummary } from '../lib/supabase';
 import type {
   StudyMaterialRecord,
@@ -102,7 +103,7 @@ export function SavedSummariesView({
       setRenameDraft('');
       onRefresh();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Unable to rename summary.');
+      setErrorMsg(sanitizeUserErrorMessage(err, 'renaming your summary'));
     } finally {
       setSavingRename(false);
     }
@@ -121,7 +122,7 @@ export function SavedSummariesView({
       setConfirmTarget(null);
       onRefresh();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Unable to delete summary.');
+      setErrorMsg(sanitizeUserErrorMessage(err, 'deleting your summary'));
     } finally {
       setDeletingId(null);
     }
