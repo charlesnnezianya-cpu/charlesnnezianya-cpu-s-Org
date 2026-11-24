@@ -49,6 +49,8 @@ import {
   runMasterAiGeneration,
   runMasterAiStream,
   probeIndividualGroqKey,
+  testGroqKeyFailover,
+  getGroqServiceDiagnostics,
   GROQ_MODEL,
 } from './groqService.ts';
 
@@ -790,9 +792,9 @@ export function createApiApp() {
       }
 
       const individualKeyProbes: {
-        key1?: { ok: boolean; latencyMs: number; status?: number; error?: string };
-        key2?: { ok: boolean; latencyMs: number; status?: number; error?: string };
-        key3?: { ok: boolean; latencyMs: number; status?: number; error?: string };
+        key1?: { ok: boolean; latencyMs: number; status?: number; error?: string; rateLimits?: Record<string, string | null> };
+        key2?: { ok: boolean; latencyMs: number; status?: number; error?: string; rateLimits?: Record<string, string | null> };
+        key3?: { ok: boolean; latencyMs: number; status?: number; error?: string; rateLimits?: Record<string, string | null> };
       } = {};
 
       if (groqKeyConfig.key1) {
@@ -803,6 +805,11 @@ export function createApiApp() {
       }
       if (groqKeyConfig.key3) {
         individualKeyProbes.key3 = await probeIndividualGroqKey(groqKeyConfig.key3);
+      }
+
+      let keyFailoverTestResult: { pass: boolean; providerResolved?: string; error?: string } | null = null;
+      if (groqKeyConfig.key2) {
+        keyFailoverTestResult = await testGroqKeyFailover();
       }
 
       let listedCount = 0;
@@ -820,23 +827,16 @@ export function createApiApp() {
           logServerWarn('api.health.probe', 'Model list probe encountered an error', err);
         }
 
-        const singleProbe = await probeSingleModelQuick(ai, activeModel, 18000);
-        if (!singleProbe.ok && singleProbe.status !== 503 && singleProbe.status !== 429 && singleProbe.status !== 504) {
-          logServerWarn('api.health.probe', 'Configured AI model probe failed', {
-            status: singleProbe.status,
-            quotaHit: singleProbe.quotaHit,
-            latencyMs: singleProbe.latencyMs,
-            detail: singleProbe.upstreamError,
-          });
-        }
-        probeResults = [
-          {
+        try {
+          const singleProbe = await probeSingleModelQuick(ai, activeModel, 6000);
+          probeResults.push({
             ok: singleProbe.ok,
             latencyMs: singleProbe.latencyMs,
             status: singleProbe.status,
             quotaHit: singleProbe.quotaHit,
-          },
-        ];
+            modelTested: activeModel,
+          } as any);
+        } catch {}
       }
 
       let supabaseHealthy: boolean | null = null;
@@ -863,6 +863,8 @@ export function createApiApp() {
         },
         groqProbe,
         groqIndividualProbes: individualKeyProbes,
+        keyFailoverTest: keyFailoverTestResult,
+        groqDiagnostics: getGroqServiceDiagnostics(),
         supabaseConfigured,
         supabaseHealthy,
         listedCount,
@@ -1430,12 +1432,18 @@ export function createApiApp() {
       let synthesisSource = extractedText.trim();
 
       if (chunks.length > 2) {
-        const chunkNotes = await mapWithConcurrency(chunks, 3, async (chunkTextItem, i) => {
+        const chunkNotes: string[] = [];
+        for (let i = 0; i < chunks.length; i++) {
+          if (i > 0) {
+            await new Promise((resolve) => setTimeout(resolve, 600));
+          }
+          const chunkTextItem = chunks[i];
           const chunkPrompt = `Extract all essential academic concepts, facts, definitions, formulas/frameworks, and examples strictly from Section ${i + 1} of ${chunks.length} of "${title || 'Study Material'}". Preserve exact order and accuracy without inventing external claims.\n\n---\n${chunkTextItem}`;
           const { text: textPart } = await runMasterAiGeneration({
             systemInstruction:
               'You are a rigorous academic research assistant. Distill each document section faithfully from the provided text without inventing facts.',
             userPrompt: chunkPrompt,
+            maxTokens: 1536,
             geminiFallback: async () => {
               const { result: partRes } = await runWithGeminiModel(
                 (model, signal) =>
@@ -1460,10 +1468,12 @@ export function createApiApp() {
               `The AI returned an empty response while processing section ${i + 1}. Please try again.`
             );
           }
-          return `[Section ${i + 1}]\n${trimmedPart}`;
-        });
+          chunkNotes.push(`[Section ${i + 1}]\n${trimmedPart}`);
+        }
         synthesisSource = chunkNotes.join('\n\n');
       }
+
+      const cappedSynthesisSource = synthesisSource.slice(0, 14000);
 
       const depthInstructions =
         level === 'short'
@@ -1535,13 +1545,15 @@ You must respond strictly with a valid JSON object matching this schema:
   "revisionNotes": ["string"],
   "keyTakeaways": ["string"]
 }`;
-      const summaryUserPrompt = `Material Title: ${title || 'Academic Study Material'}\nSource Format: ${materialType || 'text'}\n\n${depthInstructions}\n\nUploaded Source Content:\n${synthesisSource}\n\nRespond with a valid JSON object matching the requested schema.`;
+      const summaryUserPrompt = `Material Title: ${title || 'Academic Study Material'}\nSource Format: ${materialType || 'text'}\n\n${depthInstructions}\n\nUploaded Source Content:\n${cappedSynthesisSource}\n\nRespond with a valid JSON object matching the requested schema.`;
+
+      const targetSummaryMaxTokens = level === 'short' ? 2048 : level === 'detailed' ? 3000 : 3600;
 
       const { text: summaryResponseText } = await runMasterAiGeneration({
         systemInstruction: summarySystemInstruction,
         userPrompt: summaryUserPrompt,
         jsonMode: true,
-        maxTokens: 8192,
+        maxTokens: targetSummaryMaxTokens,
         temperature: 0.3,
         geminiFallback: async () => {
           const { result: response } = await runWithGeminiModel(
@@ -1908,8 +1920,8 @@ You must respond strictly with a valid JSON object matching this schema:
               : `Answer the student's follow-up question clearly: "${question?.trim()}"`;
 
       const contextSnippet = sourceText
-        ? sourceText.slice(0, 18000)
-        : (summary.markdown || '').slice(0, 12000);
+        ? sourceText.slice(0, 8000)
+        : (summary.markdown || '').slice(0, 6000);
 
       const followUpSystemInstruction =
         'You are Brainstine answering a scoped follow-up request on a specific study summary. You must respond with a valid JSON object strictly matching this schema: {"fromSource": "string", "aiExplanation": "string"}. Strictly separate what is explicitly stated in the uploaded source material ("fromSource") from any supplemental AI explanation, analogy, or examples ("aiExplanation"). Never claim AI-generated examples or clarifications came from the source text if they did not.';
@@ -1919,7 +1931,7 @@ You must respond strictly with a valid JSON object matching this schema:
         systemInstruction: followUpSystemInstruction,
         userPrompt: followUpUserPrompt,
         jsonMode: true,
-        maxTokens: 2048,
+        maxTokens: 1536,
         geminiFallback: async () => {
           const { result: response } = await runWithGeminiModel(
             (model, signal) =>
@@ -2050,7 +2062,7 @@ You must respond strictly with a valid JSON object matching this schema:
       const sourceContext =
         mode === 'topic'
           ? `Academic Topic / Subject: ${cleanTitle}`
-          : `Title: ${cleanTitle || 'Study Material'}\nSource Content:\n${cleanSource.slice(0, 28000)}`;
+          : `Title: ${cleanTitle || 'Study Material'}\nSource Content:\n${cleanSource.slice(0, 14000)}`;
 
       const normalizeCorrectIndex = (rawIdx: unknown, opts: string[], expectedAnswer: unknown): number => {
         if (typeof rawIdx === 'number' && Number.isFinite(rawIdx)) {
@@ -2264,7 +2276,7 @@ For theory questions, type="theory", options=[], maxMarks=5, and 2-4 concrete ma
           systemInstruction: quizSystemInstruction,
           userPrompt: quizUserPrompt,
           jsonMode: true,
-          maxTokens: 8192,
+          maxTokens: 2500,
           geminiFallback: async () => {
             const { result: response } = await runWithGeminiModel(
               (model, signal) =>
@@ -2292,7 +2304,10 @@ For theory questions, type="theory", options=[], maxMarks=5, and 2-4 concrete ma
         );
       };
 
-      const batchResults = await mapWithConcurrency(batchSizes, 3, async (batchCount, b) => {
+      const batchResults = await mapWithConcurrency(batchSizes, 1, async (batchCount, b) => {
+        if (b > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 600));
+        }
         const scopeHint =
           batchSizes.length > 1
             ? `\nBatch ${b + 1} of ${batchSizes.length}: ${batchFocusAngles[b % batchFocusAngles.length]} Do not overlap with other batches.`
@@ -2566,7 +2581,7 @@ For theory questions, type="theory", options=[], maxMarks=5, and 2-4 concrete ma
           { marksAwarded: number; feedback: string; missingPoints: string[] }
         >();
 
-        await mapWithConcurrency(theoryBatches, 2, async (batch) => {
+        await mapWithConcurrency(theoryBatches, 1, async (batch) => {
           const batchPayload = batch.map((item) => ({
             questionId: item.q.id,
             question: item.q.question,
@@ -2584,7 +2599,7 @@ For theory questions, type="theory", options=[], maxMarks=5, and 2-4 concrete ma
             systemInstruction: gradeSystemInstruction,
             userPrompt: gradeUserPrompt,
             jsonMode: true,
-            maxTokens: 4096,
+            maxTokens: 2048,
             geminiFallback: async () => {
               const { result: evalRes } = await runWithGeminiModel(
                 (model, signal) =>
@@ -2730,7 +2745,7 @@ For theory questions, type="theory", options=[], maxMarks=5, and 2-4 concrete ma
             systemInstruction: chatSystemInstruction,
             userPrompt: chatUserPrompt,
             jsonMode: true,
-            maxTokens: 4096,
+            maxTokens: 2500,
             geminiFallback: async () => {
               const { result: response } = await runWithGeminiModel(
                 (model, signal) =>
@@ -2829,7 +2844,7 @@ For theory questions, type="theory", options=[], maxMarks=5, and 2-4 concrete ma
         const resAI = await runMasterAiGeneration({
           systemInstruction,
           userPrompt: textPrompt,
-          maxTokens: 4096,
+          maxTokens: 2500,
           geminiFallback: async () => {
             const { result: response } = await runWithGeminiModel(
               (model, signal) =>
@@ -2955,6 +2970,7 @@ For theory questions, type="theory", options=[], maxMarks=5, and 2-4 concrete ma
           await runMasterAiStream({
             systemInstruction: streamInstruction,
             userPrompt: textPrompt,
+            maxTokens: 2500,
             onChunk: onChunkCallback,
             geminiFallback: async () => {
               const { iterator, firstResult } = await openStreamAndPullFirstChunk(
@@ -3084,7 +3100,7 @@ For theory questions, type="theory", options=[], maxMarks=5, and 2-4 concrete ma
           systemInstruction: tutorSystemInstruction,
           userPrompt: tutorUserPrompt,
           jsonMode: true,
-          maxTokens: 4096,
+          maxTokens: 2500,
           geminiFallback: async () => {
             const { result: response } = await runWithGeminiModel(
               (model, signal) =>
@@ -3289,6 +3305,7 @@ For theory questions, type="theory", options=[], maxMarks=5, and 2-4 concrete ma
           await runMasterAiStream({
             systemInstruction: streamInstruction,
             userPrompt: textPrompt,
+            maxTokens: 2500,
             onChunk: onChunkCallback,
             geminiFallback: async () => {
               const { iterator, firstResult } = await openStreamAndPullFirstChunk(

@@ -274,7 +274,13 @@ export function sanitizeSafeServerMessage(
 
   // 5. Rate-limit / quota protection -> friendly guidance without exposing model/tier/project details
   const quotaInfo = inspectGeminiQuotaError(err);
-  if (quotaInfo.isQuotaError || statusHint === 429) {
+  if (
+    quotaInfo.isQuotaError ||
+    statusHint === 429 ||
+    lower.includes('rate limit') ||
+    lower.includes('too many requests') ||
+    lower.includes('429')
+  ) {
     const waitHint =
       quotaInfo.retryDelaySeconds && quotaInfo.retryDelaySeconds > 0 && quotaInfo.retryDelaySeconds <= 45
         ? ` Please wait about ${quotaInfo.retryDelaySeconds} seconds and try again.`
@@ -315,7 +321,6 @@ export function sanitizeSafeServerMessage(
     statusHint === 503 ||
     raw.includes('UNAVAILABLE') ||
     raw.includes('"code":503') ||
-    lower.includes('high demand') ||
     lower.includes('overloaded')
   ) {
     return {
