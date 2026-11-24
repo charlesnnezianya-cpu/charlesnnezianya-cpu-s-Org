@@ -184,6 +184,8 @@ begin
   alter table public.quizzes
     add constraint quizzes_source_mode_check
     check (source_mode in ('material', 'summary', 'upload', 'text', 'topic'));
+  alter table public.quizzes
+    add column if not exists sealed_answer_key text;
 exception
   when undefined_table then null;
 end $$;
@@ -230,8 +232,20 @@ create table if not exists public.quiz_attempts (
   created_at timestamptz not null default now()
 );
 
+do $$
+begin
+  alter table public.quiz_attempts
+    add column if not exists session_id text;
+exception
+  when undefined_table then null;
+end $$;
+
 create index if not exists quiz_attempts_user_id_idx
   on public.quiz_attempts (user_id, created_at desc);
+
+create unique index if not exists quiz_attempts_user_session_unique_idx
+  on public.quiz_attempts (user_id, session_id)
+  where session_id is not null;
 
 alter table public.quiz_attempts enable row level security;
 
@@ -248,6 +262,57 @@ create policy "Users can insert their own quiz attempts"
 drop policy if exists "Users can delete their own quiz attempts" on public.quiz_attempts;
 create policy "Users can delete their own quiz attempts"
   on public.quiz_attempts for delete
+  using (auth.uid() = user_id);
+
+-- 6B. Persistent Active Quiz & Exam Sessions (Restart-Safe & RLS Protected)
+create table if not exists public.assessment_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  quiz_id uuid references public.quizzes (id) on delete set null,
+  assessment_mode text not null check (assessment_mode in ('practice', 'exam')),
+  title text not null,
+  subject_area text not null default 'General Studies',
+  format text not null default 'objective' check (format in ('objective')),
+  difficulty text not null default 'intermediate' check (difficulty in ('easy', 'intermediate', 'advanced', 'mixed')),
+  time_limit_minutes integer,
+  questions jsonb not null,
+  sealed_answer_key text not null,
+  current_question_index integer not null default 0,
+  answers jsonb not null default '{}'::jsonb,
+  question_status jsonb not null default '{}'::jsonb,
+  question_locks jsonb not null default '{}'::jsonb,
+  status text not null default 'ready' check (status in ('ready', 'active', 'submitting', 'submitted')),
+  started_at timestamptz,
+  deadline_at timestamptz,
+  submitted_at timestamptz,
+  last_saved_at timestamptz not null default now(),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists assessment_sessions_user_status_idx
+  on public.assessment_sessions (user_id, status, last_saved_at desc);
+
+alter table public.assessment_sessions enable row level security;
+
+drop policy if exists "Users can view their own assessment sessions" on public.assessment_sessions;
+create policy "Users can view their own assessment sessions"
+  on public.assessment_sessions for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert their own assessment sessions" on public.assessment_sessions;
+create policy "Users can insert their own assessment sessions"
+  on public.assessment_sessions for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Users can update their own assessment sessions" on public.assessment_sessions;
+create policy "Users can update their own assessment sessions"
+  on public.assessment_sessions for update
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists "Users can delete their own assessment sessions" on public.assessment_sessions;
+create policy "Users can delete their own assessment sessions"
+  on public.assessment_sessions for delete
   using (auth.uid() = user_id);
 
 -- 7. AI Chat & AI Tutor Sessions

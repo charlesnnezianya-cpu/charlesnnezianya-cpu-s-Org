@@ -96,12 +96,17 @@ export function generateExtractiveSummary(
   // Sort by score descending
   uniqueSentences.sort((a, b) => b.score - a.score);
 
+  const conceptLimit = summaryLevel === 'short' ? 4 : summaryLevel === 'comprehensive' ? 14 : 9;
+  const factLimit = summaryLevel === 'short' ? 4 : summaryLevel === 'comprehensive' ? 12 : 8;
+  const defLimit = summaryLevel === 'short' ? 3 : summaryLevel === 'comprehensive' ? 8 : 5;
+
   // 2. Extract Topic Overview (top-scoring sentence)
-  const overviewSentence = uniqueSentences[0]?.text || 'Comprehensive summary generated from uploaded study material.';
-  const topicOverview = `Based on the study material, ${overviewSentence.charAt(0).toLowerCase()}${overviewSentence.slice(1)}`;
+  const overviewSentence = uniqueSentences[0]?.text || 'Extractive summary generated from uploaded study material.';
+  const overviewPagePrefix = uniqueSentences[0]?.pageNumber ? `(Page ${uniqueSentences[0].pageNumber}) ` : '';
+  const topicOverview = `Based on the study material, ${overviewPagePrefix}${overviewSentence.charAt(0).toLowerCase()}${overviewSentence.slice(1)}`;
 
   // 3. Extract Main Concepts (Group top sentences into thematic concept blocks)
-  const conceptSentences = uniqueSentences.slice(1, 10);
+  const conceptSentences = uniqueSentences.slice(1, 1 + conceptLimit);
   const mainConcepts: Array<{ heading: string; sourcePoints: string[]; aiClarification: string }> = [];
 
   if (conceptSentences.length > 0) {
@@ -114,7 +119,7 @@ export function generateExtractiveSummary(
       mainConcepts.push({
         heading,
         sourcePoints: batch.map((b) => (b.pageNumber ? `(Page ${b.pageNumber}) ${b.text}` : b.text)),
-        aiClarification: `Extracted directly from source passage matching keyword '${firstKw}'.`,
+        aiClarification: '',
       });
     }
   }
@@ -123,10 +128,10 @@ export function generateExtractiveSummary(
   const definitionSentences = uniqueSentences.filter((s) =>
     /\b(is defined as|refers to|means|is a|are defined as|consists of)\b/i.test(s.text)
   );
-  const importantDefinitions = definitionSentences.slice(0, 5).map((ds) => {
+  const importantDefinitions = definitionSentences.slice(0, defLimit).map((ds) => {
     const parts = ds.text.split(/\b(is defined as|refers to|means|is a|are defined as)\b/i);
     const term = (parts[0] || 'Term').trim().replace(/[^a-zA-Z0-9\s-_]/g, '');
-    const definition = ds.text;
+    const definition = ds.pageNumber ? `(Page ${ds.pageNumber}) ${ds.text}` : ds.text;
     return {
       term: term.length > 3 && term.length < 35 ? term : 'Key Term',
       definition,
@@ -135,11 +140,14 @@ export function generateExtractiveSummary(
   });
 
   // 5. Extract Key Terminology
-  const allKeywords = extractKeywords(normalized, 15);
+  const termLimit = summaryLevel === 'short' ? 8 : summaryLevel === 'comprehensive' ? 20 : 15;
+  const allKeywords = extractKeywords(normalized, termLimit);
   const keyTerminology = Array.from(new Set(allKeywords));
 
-  // 6. Important Facts
-  const importantFacts = uniqueSentences.slice(3, 11).map((s) => s.text);
+  // 6. Important Facts (preserve page references and cover short texts cleanly)
+  const factPool =
+    uniqueSentences.length > 3 ? uniqueSentences.slice(3, 3 + factLimit) : uniqueSentences.slice(0, factLimit);
+  const importantFacts = factPool.map((s) => (s.pageNumber ? `(Page ${s.pageNumber}) ${s.text}` : s.text));
 
   // 7. Build Markdown Output
   const markdownLines: string[] = [
@@ -198,11 +206,12 @@ export function generateExtractiveSummary(
     formulasOrFrameworks: [],
     comparisonTables: [],
     visualDiagrams: [],
-    revisionNotes: importantFacts.slice(0, 4),
+    revisionNotes: importantFacts.slice(0, summaryLevel === 'short' ? 3 : 5),
     keyTakeaways: mainConcepts.map((m) => m.heading),
     wordCount,
     chunkCount: chunks.length,
     generatedAt: new Date().toISOString(),
+    generationMode: 'extractive',
     markdown: markdownLines.join('\n'),
   };
 

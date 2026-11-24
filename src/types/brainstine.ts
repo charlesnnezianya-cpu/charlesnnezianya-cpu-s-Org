@@ -128,6 +128,7 @@ export interface StructuredSummary {
   wordCount: number;
   chunkCount: number;
   generatedAt: string;
+  generationMode?: 'ai' | 'extractive';
 }
 
 export interface FollowUpItem {
@@ -205,21 +206,107 @@ export interface QuizQuestion {
   question: string;
   options?: string[];
   correctOptionIndex?: number;
-  expectedAnswer: string;
+  expectedAnswer?: string;
   markingCriteria?: string[];
   maxMarks: number;
-  explanation: string;
+  explanation?: string;
   topicTag?: string;
   visualAid?: EducationalDiagramSpec;
 }
 
 export interface GeneratedQuizPayload {
+  sessionId?: string;
+  quizId?: string | null;
   title: string;
   subjectArea: string;
   format: QuizFormat;
   difficulty: QuizDifficulty;
+  assessmentMode?: QuizAssessmentMode;
+  timeLimitMinutes?: number | null;
+  requestedQuestionCount?: number;
   questionCount: number;
+  insufficientSourceNote?: string | null;
   questions: QuizQuestion[];
+}
+
+export interface StartQuizSessionResponse {
+  sessionId: string;
+  quizId: string | null;
+  title: string;
+  subjectArea: string;
+  format: QuizFormat;
+  difficulty: QuizDifficulty;
+  assessmentMode: QuizAssessmentMode;
+  timeLimitMinutes: number | null;
+  startedAtMs: number;
+  deadlineAtMs: number | null;
+  serverNowMs: number;
+  remainingSeconds: number | null;
+  questions: QuizQuestion[];
+}
+
+export interface ActiveAssessmentSummary {
+  sessionId: string;
+  quizId: string | null;
+  title: string;
+  subjectArea: string;
+  assessmentMode: QuizAssessmentMode;
+  difficulty: QuizDifficulty;
+  questionCount: number;
+  answeredCount: number;
+  currentQuestionIndex: number;
+  timeLimitMinutes: number | null;
+  startedAtMs: number | null;
+  deadlineAtMs: number | null;
+  remainingSeconds: number | null;
+  isExpired: boolean;
+  lastSavedAt: string;
+}
+
+export type RestoredQuizSessionResponse =
+  | {
+      status: 'active';
+      sessionId: string;
+      quizId: string | null;
+      title: string;
+      subjectArea: string;
+      format: QuizFormat;
+      difficulty: QuizDifficulty;
+      assessmentMode: QuizAssessmentMode;
+      timeLimitMinutes: number | null;
+      startedAtMs: number;
+      deadlineAtMs: number | null;
+      serverNowMs: number;
+      remainingSeconds: number | null;
+      currentQuestionIndex: number;
+      answers: Record<string, StudentAnswer>;
+      questionStatus: Record<string, 'answered' | 'unanswered'>;
+      lockedQuestionIds: string[];
+      practiceFeedback: Record<string, QuizAnswerCheckResponse>;
+      lastSavedAt: string;
+      questions: QuizQuestion[];
+    }
+  | {
+      status: 'expired_submitted';
+      sessionId: string;
+      quizId: string | null;
+      title: string;
+      subjectArea: string;
+      format: QuizFormat;
+      difficulty: QuizDifficulty;
+      assessmentMode: QuizAssessmentMode;
+      grading: QuizGradingResponse;
+    };
+
+export interface QuizAnswerCheckResponse {
+  questionId: string;
+  selectedOptionIndex: number;
+  correctOptionIndex: number;
+  isCorrect: boolean;
+  expectedAnswerDisplay: string;
+  explanation: string;
+  topicTag?: string;
+  options: string[];
 }
 
 export interface StudentAnswer {
@@ -248,6 +335,7 @@ export interface GradedQuestionResult {
 }
 
 export interface QuizGradingResponse {
+  attemptId?: string | null;
   totalQuestions: number;
   correctCount: number;
   incorrectCount: number;
@@ -349,6 +437,40 @@ export interface AiMessageRecord {
 }
 
 export type QuizAssessmentMode = 'practice' | 'exam';
+
+export interface ChatRetrievedSource {
+  documentId: string;
+  documentTitle: string;
+  pageNumber: number | null;
+  chunkPosition: number;
+  matchedKeywords: string[];
+  excerpt: string;
+  score: number;
+}
+
+export interface ChatRagMeta {
+  intent?: 'document_specific' | 'follow_up' | 'general_academic' | 'ambiguous';
+  knowledgeSource?: 'study_materials' | 'general_knowledge' | 'hybrid';
+  searchedDocumentsCount?: number;
+  passagesRetrieved?: number;
+}
+
+export interface TutorRagMeta {
+  pedagogicalAction?:
+    | 'guided_full_lesson'
+    | 'answer_evaluation'
+    | 'simplify_reteach'
+    | 'advance_next'
+    | 'provide_examples'
+    | 'summarize_lesson'
+    | 'understanding_check'
+    | 'continue_lesson'
+    | 'concept_question';
+  useStructuredLessonPlan?: boolean;
+  knowledgeSource?: 'study_materials' | 'general_knowledge' | 'hybrid';
+  searchedDocumentsCount?: number;
+  passagesRetrieved?: number;
+}
 
 export type DashboardSection =
   | 'overview'

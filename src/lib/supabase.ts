@@ -77,6 +77,16 @@ export function requireSupabase(): SupabaseClient {
   return supabase;
 }
 
+export async function getOptionalAccessToken(): Promise<string | null> {
+  if (!supabase) return null;
+  try {
+    const { data } = await supabase.auth.getSession();
+    return data.session?.access_token ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchUserProfile(userId: string): Promise<UserProfile | null> {
   const client = requireSupabase();
   const { data, error } = await client
@@ -671,7 +681,9 @@ export async function listQuizzes(userId: string): Promise<QuizRecord[]> {
   const client = requireSupabase();
   const { data, error } = await client
     .from('quizzes')
-    .select('*')
+    .select(
+      'id, user_id, title, subject_area, source_mode, material_id, summary_id, format, difficulty, question_count, time_limit_minutes, questions, created_at'
+    )
     .eq('user_id', userId)
     .order('created_at', { ascending: false });
 
@@ -683,7 +695,21 @@ export async function listQuizzes(userId: string): Promise<QuizRecord[]> {
       )
     );
   }
-  return (data ?? []) as QuizRecord[];
+  return ((data ?? []) as QuizRecord[]).map((quiz) => ({
+    ...quiz,
+    questions: Array.isArray(quiz.questions)
+      ? quiz.questions.map((q, idx) => ({
+          id: q.id,
+          number: q.number || idx + 1,
+          type: q.type,
+          question: q.question,
+          options: Array.isArray(q.options) ? [...q.options] : undefined,
+          maxMarks: q.maxMarks || 1,
+          ...(q.topicTag ? { topicTag: q.topicTag } : {}),
+          ...(q.visualAid ? { visualAid: q.visualAid } : {}),
+        }))
+      : [],
+  }));
 }
 
 export async function deleteQuiz(userId: string, quizId: string): Promise<void> {

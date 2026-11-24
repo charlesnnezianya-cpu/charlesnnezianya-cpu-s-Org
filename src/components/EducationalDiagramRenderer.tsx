@@ -474,8 +474,13 @@ export const EducationalDiagramRenderer = React.memo(function EducationalDiagram
   };
 
   const renderCartesianPlotSvg = () => {
-    const series = spec.series ?? [];
-    const allPts = series.flatMap((s) => s.points ?? []);
+    const series = (spec.series ?? []).map((s) => ({
+      ...s,
+      points: (s.points ?? []).filter(
+        (p) => p && Number.isFinite(p.x) && Number.isFinite(p.y)
+      ),
+    }));
+    const allPts = series.flatMap((s) => s.points);
     if (allPts.length === 0) return null;
 
     const svgW = 680;

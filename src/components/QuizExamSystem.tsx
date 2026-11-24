@@ -9,7 +9,6 @@ import {
   FileText,
   History,
   Image as ImageIcon,
-  KeyRound,
   ListChecks,
   Loader2,
   Play,
@@ -32,14 +31,15 @@ import {
   deleteQuiz,
   deleteQuizAttempt,
   getMaterialSignedUrl,
+  getOptionalAccessToken,
   recordStudyActivity,
-  saveQuizAttemptRecord,
-  saveQuizRecord,
   uploadMaterialFileToStorage,
 } from '../lib/supabase';
 import type {
+  ActiveAssessmentSummary,
   GeneratedQuizPayload,
   MaterialSourceType,
+  QuizAnswerCheckResponse,
   QuizAssessmentMode,
   QuizAttemptRecord,
   QuizDifficulty,
@@ -49,6 +49,8 @@ import type {
   QuizQuestionCount,
   QuizRecord,
   QuizSourceMode,
+  RestoredQuizSessionResponse,
+  StartQuizSessionResponse,
   StructuredSummary,
   StudentAnswer,
   StudyMaterialRecord,
@@ -141,7 +143,7 @@ export function QuizExamSystem({
   summaries,
   quizzes,
   attempts,
-  geminiConfigured,
+  geminiConfigured: _geminiConfigured,
   initialAttemptToOpen,
   onConsumeAttemptToOpen,
   preselectedSource,
@@ -175,15 +177,21 @@ export function QuizExamSystem({
 
   const [assessmentMode, setAssessmentMode] = useState<QuizAssessmentMode>('practice');
   const [questionCount, setQuestionCount] = useState<QuizQuestionCount>(10);
-  const [format, setFormat] = useState<QuizFormat>('objective');
+  const [format] = useState<QuizFormat>('objective');
   const [difficulty, setDifficulty] = useState<QuizDifficulty>('intermediate');
   const [timeLimitMinutes, setTimeLimitMinutes] = useState<number>(20);
 
   const [generating, setGenerating] = useState(false);
+  const [startingSession, setStartingSession] = useState(false);
+  const [checkingAnswer, setCheckingAnswer] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [cloudNotice, setCloudNotice] = useState<string | null>(null);
+  const [restoredNotice, setRestoredNotice] = useState<string | null>(null);
+  const [activeSessions, setActiveSessions] = useState<ActiveAssessmentSummary[]>([]);
+  const [resumingSessionId, setResumingSessionId] = useState<string | null>(null);
   const generatingRef = useRef(false);
   const gradingRef = useRef(false);
+  const syncTimeoutRef = useRef<number | null>(null);
 
   const [deleteTarget, setDeleteTarget] = useState<
     | { kind: 'quiz'; item: QuizRecord }
@@ -192,19 +200,30 @@ export function QuizExamSystem({
   >(null);
   const [deletingRecord, setDeletingRecord] = useState(false);
 
-  // Active exam state
+  // Active exam / quiz state (server-managed sessionId; zero answer keys stored client-side)
   const [activeQuiz, setActiveQuiz] = useState<{
+    sessionId: string | null;
     quizId: string | null;
     title: string;
     subjectArea: string;
     format: QuizFormat;
     difficulty: QuizDifficulty;
+    assessmentMode: QuizAssessmentMode;
     timeLimitMinutes: number | null;
+    startedAtMs?: number | null;
+    deadlineAtMs?: number | null;
+    requestedQuestionCount?: number;
+    insufficientSourceNote?: string | null;
     questions: QuizQuestion[];
   } | null>(null);
   const [currentIdx, setCurrentIdx] = useState<number>(0);
   const [answersMap, setAnswersMap] = useState<Record<string, StudentAnswer>>({});
+  const [practiceFeedbackMap, setPracticeFeedbackMap] = useState<
+    Record<string, QuizAnswerCheckResponse>
+  >({});
   const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
+  const [serverClockOffsetMs, setServerClockOffsetMs] = useState<number>(0);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [showSubmitConfirm, setShowSubmitConfirm] = useState<boolean>(false);
   const [grading, setGrading] = useState<boolean>(false);
 
@@ -261,11 +280,13 @@ export function QuizExamSystem({
       setActiveQuiz(
         linkedQuiz
           ? {
+              sessionId: null,
               quizId: linkedQuiz.id,
               title: linkedQuiz.title,
               subjectArea: linkedQuiz.subject_area,
               format: linkedQuiz.format,
               difficulty: linkedQuiz.difficulty,
+              assessmentMode: mode,
               timeLimitMinutes: linkedQuiz.time_limit_minutes,
               questions: linkedQuiz.questions,
             }
@@ -304,13 +325,17 @@ export function QuizExamSystem({
   }, [preselectedSource, onConsumePreselection]);
 
   useEffect(() => {
-    if (!selectedMaterialId && materials.length > 0) {
+    if (materials.length === 0) {
+      if (selectedMaterialId) setSelectedMaterialId('');
+    } else if (!selectedMaterialId || !materials.some((m) => m.id === selectedMaterialId)) {
       setSelectedMaterialId(materials[0].id);
     }
   }, [materials, selectedMaterialId]);
 
   useEffect(() => {
-    if (!selectedSummaryId && summaries.length > 0) {
+    if (summaries.length === 0) {
+      if (selectedSummaryId) setSelectedSummaryId('');
+    } else if (!selectedSummaryId || !summaries.some((s) => s.id === selectedSummaryId)) {
       setSelectedSummaryId(summaries[0].id);
     }
   }, [summaries, selectedSummaryId]);
@@ -338,32 +363,136 @@ export function QuizExamSystem({
     };
   }, [onActiveAttemptChange]);
 
-  // Countdown & elapsed timer during active examination
+  const flushPendingSyncTimer = useCallback(() => {
+    if (syncTimeoutRef.current !== null) {
+      window.clearTimeout(syncTimeoutRef.current);
+      syncTimeoutRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      flushPendingSyncTimer();
+    };
+  }, [flushPendingSyncTimer]);
+
+  const syncProgressToServer = useCallback(
+    async (
+      sessionId: string | null,
+      nextIdx: number,
+      nextAnswers: Record<string, StudentAnswer>
+    ) => {
+      if (!sessionId) return;
+      try {
+        const accessToken = await getOptionalAccessToken();
+        await fetch(
+          resolveApiUrl(`/api/quizzes/sessions/${encodeURIComponent(sessionId)}/progress`),
+          {
+            method: 'PATCH',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+            },
+            body: JSON.stringify({
+              currentQuestionIndex: nextIdx,
+              answers: nextAnswers,
+            }),
+          }
+        );
+      } catch {
+        // Best-effort autosave; active session check or submission remains authoritative
+      }
+    },
+    []
+  );
+
+  const scheduleProgressSync = useCallback(
+    (
+      sessionId: string | null,
+      nextIdx: number,
+      nextAnswers: Record<string, StudentAnswer>,
+      immediate = false
+    ) => {
+      if (!sessionId) return;
+      flushPendingSyncTimer();
+      if (immediate) {
+        void syncProgressToServer(sessionId, nextIdx, nextAnswers);
+        return;
+      }
+      syncTimeoutRef.current = window.setTimeout(() => {
+        syncTimeoutRef.current = null;
+        void syncProgressToServer(sessionId, nextIdx, nextAnswers);
+      }, 250);
+    },
+    [flushPendingSyncTimer, syncProgressToServer]
+  );
+
+  const loadActiveSessions = useCallback(async () => {
+    if (isConfigured && !user) {
+      setActiveSessions([]);
+      return;
+    }
+    try {
+      const accessToken = await getOptionalAccessToken();
+      if (isConfigured && !accessToken) return;
+      const res = await fetch(resolveApiUrl('/api/quizzes/sessions/active'), {
+        headers: {
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { sessions?: ActiveAssessmentSummary[] };
+      if (Array.isArray(data.sessions)) {
+        setActiveSessions(data.sessions);
+      }
+    } catch {
+      // Ignore network hiccup during passive active-session lookup
+    }
+  }, [isConfigured, user]);
+
+  useEffect(() => {
+    if (stage === 'setup') {
+      void loadActiveSessions();
+    }
+  }, [stage, loadActiveSessions]);
+
+  // Countdown & elapsed timer during active examination / quiz using server clock offset
   useEffect(() => {
     if (stage !== 'exam' || !activeQuiz || grading) return;
 
     const timer = window.setInterval(() => {
-      setElapsedSeconds((prev) => prev + 1);
+      const current = Date.now() + serverClockOffsetMs;
+      setNowMs(current);
+      if (activeQuiz.startedAtMs) {
+        setElapsedSeconds(Math.max(0, Math.floor((current - activeQuiz.startedAtMs) / 1000)));
+      } else {
+        setElapsedSeconds((prev) => prev + 1);
+      }
     }, 1000);
 
     return () => window.clearInterval(timer);
-  }, [stage, activeQuiz, grading]);
+  }, [stage, activeQuiz, grading, serverClockOffsetMs]);
 
-  // Auto-submit when countdown timer expires
+  // Auto-submit when server countdown deadline expires
   useEffect(() => {
     if (
       stage === 'exam' &&
-      activeQuiz?.timeLimitMinutes &&
-      activeQuiz.timeLimitMinutes > 0 &&
-      !grading
+      activeQuiz?.assessmentMode === 'exam' &&
+      !grading &&
+      !gradingRef.current
     ) {
-      const limitSec = activeQuiz.timeLimitMinutes * 60;
-      if (elapsedSeconds >= limitSec) {
+      const remaining = activeQuiz.deadlineAtMs
+        ? Math.max(0, Math.ceil((activeQuiz.deadlineAtMs - nowMs) / 1000))
+        : activeQuiz.timeLimitMinutes && activeQuiz.timeLimitMinutes > 0
+          ? Math.max(0, activeQuiz.timeLimitMinutes * 60 - elapsedSeconds)
+          : null;
+
+      if (remaining !== null && remaining <= 0) {
         submitExamination(true);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [elapsedSeconds, stage, activeQuiz, grading]);
+  }, [nowMs, elapsedSeconds, stage, activeQuiz, grading]);
 
   const resolvedSource = useMemo(() => {
     if (sourceMode === 'material') {
@@ -545,6 +674,7 @@ export function QuizExamSystem({
         title: string;
         extractedText: string;
         wordCount: number;
+        chunkCount?: number;
         materialType?: MaterialSourceType;
         mimeType?: string;
       }>(extractRes, 'extracting uploaded study material');
@@ -574,7 +704,7 @@ export function QuizExamSystem({
             storagePath: stagedStoragePathRef.current,
             extractedText: extracted.extractedText,
             wordCount: extracted.wordCount,
-            chunkCount: 1,
+            chunkCount: extracted.chunkCount ?? 1,
           });
           setUploadedMaterialId(savedMat.id);
           onDataChanged();
@@ -602,11 +732,6 @@ export function QuizExamSystem({
     if (generatingRef.current) return;
     setErrorMsg(null);
 
-    if (!geminiConfigured) {
-      setErrorMsg('Brainstine is temporarily unavailable. Please try again shortly.');
-      return;
-    }
-
     if (sourceMode === 'topic' && resolvedSource.title.trim().length < 3) {
       setErrorMsg('Please enter a subject or topic (at least 3 characters).');
       return;
@@ -633,76 +758,68 @@ export function QuizExamSystem({
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 150000);
     try {
+      const accessToken = await getOptionalAccessToken();
+      const persistedSourceMode: QuizSourceMode =
+        sourceMode === 'upload'
+          ? resolvedSource.materialId
+            ? 'material'
+            : 'text'
+          : sourceMode;
+
       const res = await fetch(resolveApiUrl('/api/quizzes/generate'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
         signal: controller.signal,
         body: JSON.stringify({
-          sourceMode,
+          sourceMode: persistedSourceMode,
           sourceText: resolvedSource.text,
           topicTitle: resolvedSource.title,
-          format,
+          format: 'objective',
           difficulty,
           questionCount,
+          assessmentMode,
+          timeLimitMinutes: effectiveTimeLimit,
+          materialId: resolvedSource.materialId,
+          summaryId: resolvedSource.summaryId,
         }),
       });
       const generated = await parseApiJsonResponse<GeneratedQuizPayload>(
         res,
         'generating your quiz'
       );
-      let savedQuizId: string | null = null;
-      let syncWarning: string | null = null;
 
       if (user && isConfigured) {
-        try {
-          // Ensure compatibility with existing Supabase quizzes.source_mode CHECK constraint
-          const persistedSourceMode: QuizSourceMode =
-            sourceMode === 'upload'
-              ? resolvedSource.materialId
-                ? 'material'
-                : 'text'
-              : sourceMode;
-          const saved = await saveQuizRecord({
-            userId: user.id,
-            title: generated.title,
-            subjectArea: generated.subjectArea,
-            sourceMode: persistedSourceMode,
-            materialId: resolvedSource.materialId,
-            summaryId: resolvedSource.summaryId,
-            format: generated.format,
-            difficulty: generated.difficulty,
-            questionCount: generated.questionCount,
-            timeLimitMinutes: effectiveTimeLimit,
-            questions: generated.questions,
-          });
-          savedQuizId = saved.id;
+        if (generated.quizId) {
           onDataChanged();
-        } catch (saveErr) {
-          syncWarning = `Quiz generated, but it could not be saved to your history right now: ${sanitizeUserErrorMessage(
-            saveErr,
-            'saving your quiz'
-          )}`;
+        } else {
+          setCloudNotice(
+            'Assessment generated for this session, but could not be saved to your cloud library right now.'
+          );
         }
       }
 
       prepareExamInstructions({
-        quizId: savedQuizId,
+        sessionId: generated.sessionId || null,
+        quizId: generated.quizId ?? null,
         title: generated.title,
         subjectArea: generated.subjectArea,
         format: generated.format,
         difficulty: generated.difficulty,
-        timeLimitMinutes: effectiveTimeLimit,
+        assessmentMode: generated.assessmentMode || assessmentMode,
+        timeLimitMinutes: generated.timeLimitMinutes ?? effectiveTimeLimit,
+        requestedQuestionCount: generated.requestedQuestionCount ?? questionCount,
+        insufficientSourceNote: generated.insufficientSourceNote ?? null,
         questions: generated.questions,
       });
-      if (syncWarning) {
-        setCloudNotice(syncWarning);
-      }
     } catch (err: unknown) {
       setErrorMsg(
         formatClientApiError(
           err,
           'generating your quiz',
-          'Quiz generation timed out while waiting for the AI service. Please try fewer questions or try again shortly.'
+          'Assessment generation timed out. Please try fewer questions or try again shortly.'
         )
       );
     } finally {
@@ -713,54 +830,284 @@ export function QuizExamSystem({
   };
 
   const prepareExamInstructions = (quiz: {
+    sessionId: string | null;
     quizId: string | null;
     title: string;
     subjectArea: string;
     format: QuizFormat;
     difficulty: QuizDifficulty;
+    assessmentMode: QuizAssessmentMode;
     timeLimitMinutes: number | null;
+    requestedQuestionCount?: number;
+    insufficientSourceNote?: string | null;
     questions: QuizQuestion[];
   }) => {
     setActiveQuiz(quiz);
     setCurrentIdx(0);
     setAnswersMap({});
+    setPracticeFeedbackMap({});
     setElapsedSeconds(0);
     setShowSubmitConfirm(false);
     setGradingResult(null);
     setResultMeta(null);
     setErrorMsg(null);
     setCloudNotice(null);
+    setRestoredNotice(null);
     setStage('instructions');
   };
 
-  const startExamSession = (quiz: {
-    quizId: string | null;
-    title: string;
-    subjectArea: string;
-    format: QuizFormat;
-    difficulty: QuizDifficulty;
-    timeLimitMinutes: number | null;
-    questions: QuizQuestion[];
-  }) => {
-    setActiveQuiz(quiz);
-    setCurrentIdx(0);
-    setAnswersMap({});
-    setElapsedSeconds(0);
-    setShowSubmitConfirm(false);
-    setGradingResult(null);
-    setResultMeta(null);
+  const startExamSession = async (
+    quiz: {
+      sessionId: string | null;
+      quizId: string | null;
+      title: string;
+      subjectArea: string;
+      format: QuizFormat;
+      difficulty: QuizDifficulty;
+      assessmentMode: QuizAssessmentMode;
+      timeLimitMinutes: number | null;
+      requestedQuestionCount?: number;
+      insufficientSourceNote?: string | null;
+      questions: QuizQuestion[];
+    },
+    retake = false
+  ) => {
+    if (startingSession) return;
+    setStartingSession(true);
     setErrorMsg(null);
     setCloudNotice(null);
-    setStage('exam');
+    setRestoredNotice(null);
+
+    try {
+      const accessToken = await getOptionalAccessToken();
+      const res = await fetch(resolveApiUrl('/api/quizzes/sessions/start'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        body: JSON.stringify({
+          sessionId: quiz.sessionId,
+          quizId: quiz.quizId,
+          assessmentMode: quiz.assessmentMode,
+          timeLimitMinutes: quiz.timeLimitMinutes,
+          retake,
+        }),
+      });
+      const started = await parseApiJsonResponse<StartQuizSessionResponse>(
+        res,
+        'starting your assessment session'
+      );
+
+      const offset =
+        typeof started.serverNowMs === 'number' ? started.serverNowMs - Date.now() : 0;
+      const effectiveNow = Date.now() + offset;
+      setServerClockOffsetMs(offset);
+      setNowMs(effectiveNow);
+      setActiveQuiz({
+        sessionId: started.sessionId,
+        quizId: started.quizId,
+        title: started.title,
+        subjectArea: started.subjectArea,
+        format: started.format,
+        difficulty: started.difficulty,
+        assessmentMode: started.assessmentMode,
+        timeLimitMinutes: started.timeLimitMinutes,
+        startedAtMs: started.startedAtMs,
+        deadlineAtMs: started.deadlineAtMs,
+        requestedQuestionCount: quiz.requestedQuestionCount,
+        insufficientSourceNote: quiz.insufficientSourceNote,
+        questions: started.questions,
+      });
+      setCurrentIdx(0);
+      setAnswersMap({});
+      setPracticeFeedbackMap({});
+      setElapsedSeconds(
+        started.startedAtMs ? Math.max(0, Math.floor((effectiveNow - started.startedAtMs) / 1000)) : 0
+      );
+      setShowSubmitConfirm(false);
+      setGradingResult(null);
+      setResultMeta(null);
+      setStage('exam');
+    } catch (err: unknown) {
+      setErrorMsg(
+        formatClientApiError(
+          err,
+          'starting your assessment session',
+          'Could not start this assessment session. Please generate a new assessment or try again.'
+        )
+      );
+    } finally {
+      setStartingSession(false);
+    }
+  };
+
+  const handleResumeSession = async (sessionId: string) => {
+    if (resumingSessionId) return;
+    setResumingSessionId(sessionId);
+    setErrorMsg(null);
+    setCloudNotice(null);
+    setRestoredNotice(null);
+
+    try {
+      const accessToken = await getOptionalAccessToken();
+      const res = await fetch(resolveApiUrl('/api/quizzes/sessions/restore'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        body: JSON.stringify({ sessionId }),
+      });
+      const restored = await parseApiJsonResponse<RestoredQuizSessionResponse>(
+        res,
+        'restoring your assessment session'
+      );
+
+      if (restored.status === 'expired_submitted') {
+        setActiveSessions((prev) => prev.filter((s) => s.sessionId !== sessionId));
+        setGradingResult(restored.grading);
+        setResultMeta({
+          attemptId: restored.grading.attemptId ?? null,
+          quizId: restored.quizId,
+          title: restored.title,
+          subjectArea: restored.subjectArea || 'General Studies',
+          assessmentMode: restored.assessmentMode,
+          format: restored.format,
+          difficulty: restored.difficulty,
+          createdAt: new Date().toISOString(),
+        });
+        const linkedQuiz = restored.quizId ? quizLookup.get(restored.quizId) : undefined;
+        setActiveQuiz(
+          linkedQuiz
+            ? {
+                sessionId: restored.sessionId,
+                quizId: linkedQuiz.id,
+                title: linkedQuiz.title,
+                subjectArea: linkedQuiz.subject_area,
+                format: linkedQuiz.format,
+                difficulty: linkedQuiz.difficulty,
+                assessmentMode: restored.assessmentMode,
+                timeLimitMinutes: linkedQuiz.time_limit_minutes,
+                questions: linkedQuiz.questions,
+              }
+            : {
+                sessionId: restored.sessionId,
+                quizId: restored.quizId,
+                title: restored.title,
+                subjectArea: restored.subjectArea,
+                format: restored.format,
+                difficulty: restored.difficulty,
+                assessmentMode: restored.assessmentMode,
+                timeLimitMinutes: null,
+                questions: [],
+              }
+        );
+        setCloudNotice(
+          'Your timed examination deadline passed while you were away, so your previously saved answers were automatically submitted and graded.'
+        );
+        onDataChanged();
+        setStage('results');
+        return;
+      }
+
+      const offset = restored.serverNowMs - Date.now();
+      const effectiveNow = Date.now() + offset;
+      setServerClockOffsetMs(offset);
+      setNowMs(effectiveNow);
+      setActiveQuiz({
+        sessionId: restored.sessionId,
+        quizId: restored.quizId,
+        title: restored.title,
+        subjectArea: restored.subjectArea,
+        format: restored.format,
+        difficulty: restored.difficulty,
+        assessmentMode: restored.assessmentMode,
+        timeLimitMinutes: restored.timeLimitMinutes,
+        startedAtMs: restored.startedAtMs,
+        deadlineAtMs: restored.deadlineAtMs,
+        questions: restored.questions,
+      });
+      setCurrentIdx(
+        Math.min(
+          Math.max(0, restored.currentQuestionIndex || 0),
+          Math.max(0, restored.questions.length - 1)
+        )
+      );
+      setAnswersMap(restored.answers || {});
+      setPracticeFeedbackMap(restored.practiceFeedback || {});
+      setElapsedSeconds(
+        restored.startedAtMs ? Math.max(0, Math.floor((effectiveNow - restored.startedAtMs) / 1000)) : 0
+      );
+      setShowSubmitConfirm(false);
+      setGradingResult(null);
+      setResultMeta(null);
+      setRestoredNotice(
+        restored.assessmentMode === 'exam'
+          ? 'Examination restored with your saved answers and original server countdown.'
+          : 'Quiz session restored with your saved progress and locked question feedback.'
+      );
+      setStage('exam');
+    } catch (err: unknown) {
+      await loadActiveSessions();
+      setErrorMsg(
+        formatClientApiError(
+          err,
+          'restoring your assessment session',
+          'Could not restore this assessment session.'
+        )
+      );
+    } finally {
+      setResumingSessionId(null);
+    }
+  };
+
+  const handleCheckPracticeAnswer = async (question: QuizQuestion) => {
+    if (!activeQuiz?.sessionId || checkingAnswer) return;
+    const selectedIdx = answersMap[question.id]?.selectedOptionIndex;
+    if (typeof selectedIdx !== 'number') return;
+
+    setCheckingAnswer(true);
+    setErrorMsg(null);
+    try {
+      const accessToken = await getOptionalAccessToken();
+      const res = await fetch(resolveApiUrl('/api/quizzes/answer'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        body: JSON.stringify({
+          sessionId: activeQuiz.sessionId,
+          questionId: question.id,
+          selectedOptionIndex: selectedIdx,
+        }),
+      });
+      const checked = await parseApiJsonResponse<QuizAnswerCheckResponse>(
+        res,
+        'checking your answer'
+      );
+      setPracticeFeedbackMap((prev) => ({
+        ...prev,
+        [question.id]: checked,
+      }));
+    } catch (err: unknown) {
+      setErrorMsg(
+        formatClientApiError(
+          err,
+          'checking your answer',
+          'Could not verify this answer right now. Please try again.'
+        )
+      );
+    } finally {
+      setCheckingAnswer(false);
+    }
   };
 
   const isQuestionAnswered = (q: QuizQuestion): boolean => {
     const ans = answersMap[q.id];
     if (!ans) return false;
-    if (q.type === 'objective') {
-      return ans.selectedOptionIndex !== undefined && ans.selectedOptionIndex !== null;
-    }
-    return Boolean(ans.textResponse && ans.textResponse.trim().length > 0);
+    return ans.selectedOptionIndex !== undefined && ans.selectedOptionIndex !== null;
   };
 
   const answeredCount = activeQuiz
@@ -768,7 +1115,8 @@ export function QuizExamSystem({
     : 0;
 
   const submitExamination = async (autoTriggered = false) => {
-    if (!activeQuiz || gradingRef.current) return;
+    if (!activeQuiz || !activeQuiz.sessionId || gradingRef.current) return;
+    flushPendingSyncTimer();
     gradingRef.current = true;
     setShowSubmitConfirm(false);
     setGrading(true);
@@ -783,47 +1131,75 @@ export function QuizExamSystem({
           answersMap[q.id] || {
             questionId: q.id,
             selectedOptionIndex: null,
-            textResponse: '',
           }
         );
       });
 
+      const accessToken = await getOptionalAccessToken();
       const res = await fetch(resolveApiUrl('/api/quizzes/grade'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
         signal: controller.signal,
         body: JSON.stringify({
-          quizTitle: activeQuiz.title,
-          questions: activeQuiz.questions,
+          sessionId: activeQuiz.sessionId,
           answers: answersArray,
           timeTakenSeconds: elapsedSeconds,
+          autoSubmitted: autoTriggered,
         }),
       });
+
+      if (autoTriggered && res.status === 403) {
+        const restoreRes = await fetch(resolveApiUrl('/api/quizzes/sessions/restore'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+          },
+          body: JSON.stringify({ sessionId: activeQuiz.sessionId }),
+        });
+        if (restoreRes.ok) {
+          const restored = (await restoreRes.json()) as RestoredQuizSessionResponse;
+          if (restored.status === 'expired_submitted') {
+            setActiveSessions((prev) => prev.filter((s) => s.sessionId !== activeQuiz.sessionId));
+            setGradingResult(restored.grading);
+            setResultMeta({
+              attemptId: restored.grading.attemptId ?? null,
+              quizId: activeQuiz.quizId,
+              title: activeQuiz.title,
+              subjectArea: activeQuiz.subjectArea || 'General Studies',
+              assessmentMode: activeQuiz.assessmentMode,
+              format: activeQuiz.format,
+              difficulty: activeQuiz.difficulty,
+              createdAt: new Date().toISOString(),
+            });
+            setCloudNotice(
+              'The examination deadline expired and your saved answers were automatically graded.'
+            );
+            onDataChanged();
+            setStage('results');
+            return;
+          }
+        }
+      }
+
       const graded = await parseApiJsonResponse<QuizGradingResponse>(
         res,
-        'grading your examination'
+        'grading your assessment'
       );
-      const mode: QuizAssessmentMode =
-        activeQuiz.timeLimitMinutes && activeQuiz.timeLimitMinutes > 0 ? 'exam' : 'practice';
-      let savedAttemptId: string | null = null;
+      const mode: QuizAssessmentMode = activeQuiz.assessmentMode;
+      setActiveSessions((prev) => prev.filter((s) => s.sessionId !== activeQuiz.sessionId));
+      setRestoredNotice(null);
 
       if (user && isConfigured) {
         try {
-          const savedAttempt = await saveQuizAttemptRecord({
-            userId: user.id,
-            quizId: activeQuiz.quizId,
-            title: activeQuiz.title,
-            format: activeQuiz.format,
-            difficulty: activeQuiz.difficulty,
-            answers: answersArray,
-            grading: graded,
-          });
-          savedAttemptId = savedAttempt.id;
           await recordStudyActivity({
             userId: user.id,
             activityType: 'quiz',
             title: activeQuiz.title,
-            detail: `${mode === 'exam' ? 'Exam Mode' : 'Practice Mode'}${
+            detail: `${mode === 'exam' ? 'Exam Mode' : 'Quiz Practice Mode'}${
               autoTriggered ? ' (auto-submitted)' : ''
             } · ${graded.percentage}% (${graded.earnedMarks}/${graded.maxMarks} marks)`,
             materialType: 'text',
@@ -831,9 +1207,9 @@ export function QuizExamSystem({
           onDataChanged();
         } catch (saveErr) {
           setCloudNotice(
-            `Your score was graded, but could not be saved to your Academic History right now: ${sanitizeUserErrorMessage(
+            `Your score was graded, but your activity log could not sync right now: ${sanitizeUserErrorMessage(
               saveErr,
-              'saving your quiz results'
+              'saving your activity'
             )}`
           );
         }
@@ -841,7 +1217,7 @@ export function QuizExamSystem({
 
       setGradingResult(graded);
       setResultMeta({
-        attemptId: savedAttemptId,
+        attemptId: graded.attemptId ?? null,
         quizId: activeQuiz.quizId,
         title: activeQuiz.title,
         subjectArea: activeQuiz.subjectArea || 'General Studies',
@@ -855,8 +1231,8 @@ export function QuizExamSystem({
       setErrorMsg(
         formatClientApiError(
           err,
-          'grading your examination',
-          'Examination grading timed out. Your answers are preserved—please try submitting again.'
+          'grading your assessment',
+          'Submission timed out. Please try again.'
         )
       );
     } finally {
@@ -886,10 +1262,12 @@ export function QuizExamSystem({
   };
 
   // ============================================================================
-  // STAGE 1B: PRE-EXAM INSTRUCTIONS SCREEN
+  // STAGE 1B: PRE-EXAM / PRE-QUIZ INSTRUCTIONS SCREEN
   // ============================================================================
   if (stage === 'instructions' && activeQuiz) {
-    const isTimedExam = Boolean(activeQuiz.timeLimitMinutes && activeQuiz.timeLimitMinutes > 0);
+    const isTimedExam =
+      activeQuiz.assessmentMode === 'exam' &&
+      Boolean(activeQuiz.timeLimitMinutes && activeQuiz.timeLimitMinutes > 0);
     const totalMarks = activeQuiz.questions.reduce((acc, q) => acc + (q.maxMarks || 1), 0);
 
     return (
@@ -904,9 +1282,29 @@ export function QuizExamSystem({
           </div>
         )}
 
+        {activeQuiz.insufficientSourceNote && (
+          <div
+            role="status"
+            className="flex items-start gap-2.5 rounded-xl border border-blue-200 bg-blue-50 p-3.5 text-xs text-blue-900 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-cyan-200"
+          >
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>{activeQuiz.insufficientSourceNote}</span>
+          </div>
+        )}
+
+        {errorMsg && (
+          <div
+            role="alert"
+            className="flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 p-3.5 text-sm text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200"
+          >
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>{errorMsg}</span>
+          </div>
+        )}
+
         <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-8 dark:border-slate-800 dark:bg-[#0D162B]">
           <p className="text-xs font-semibold tracking-wide text-[#1D4ED8] dark:text-[#38BDF8]">
-            {isTimedExam ? 'Timed Exam Instructions' : 'Practice Session Instructions'} ·{' '}
+            {isTimedExam ? 'Timed Exam Instructions' : 'Quiz Mode Instructions'} ·{' '}
             {activeQuiz.subjectArea}
           </p>
           <h2 className="mt-1.5 font-display text-xl font-bold tracking-tight text-slate-900 sm:text-2xl dark:text-white">
@@ -945,24 +1343,36 @@ export function QuizExamSystem({
               Before You Begin
             </h3>
             <ul className="list-disc space-y-1.5 pl-5 text-xs leading-relaxed">
-              <li>
-                Use the Question Navigator panel to jump directly to any question; your selected
-                options and written answers are preserved automatically during the session.
-              </li>
-              <li>
-                Correct answers and detailed explanations remain strictly hidden until you confirm
-                submission (or when the exam timer expires).
-              </li>
               {isTimedExam ? (
-                <li>
-                  Your {activeQuiz.timeLimitMinutes}-minute countdown starts immediately when you
-                  click Begin Assessment and will auto-submit on completion.
-                </li>
+                <>
+                  <li>
+                    Use the Question Navigator panel to jump directly to any question; your selected
+                    options are preserved automatically during the session.
+                  </li>
+                  <li>
+                    Answer keys remain strictly protected on the server until you submit or time
+                    expires.
+                  </li>
+                  <li>
+                    Your {activeQuiz.timeLimitMinutes}-minute server-tracked countdown starts
+                    immediately when you click Begin Assessment and will auto-submit on expiry.
+                  </li>
+                </>
               ) : (
-                <li>
-                  Practice mode is untimed so you can reason carefully before submitting for scoring
-                  and explanations.
-                </li>
+                <>
+                  <li>
+                    Questions are shown one at a time in sequence. Choose an option and click{' '}
+                    <strong>Check Answer</strong> to see immediate feedback.
+                  </li>
+                  <li>
+                    After checking each answer, the correct option highlights in green along with
+                    an explanation and source page reference.
+                  </li>
+                  <li>
+                    Quiz mode is untimed. When you finish the final question, your full score
+                    summary is recorded automatically.
+                  </li>
+                </>
               )}
               <li>
                 Brainstine guards against accidental page refresh or leaving this screen mid-attempt.
@@ -977,17 +1387,28 @@ export function QuizExamSystem({
                 setActiveQuiz(null);
                 setStage('setup');
               }}
-              className="min-h-11 w-full rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 sm:w-auto dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              disabled={startingSession}
+              className="min-h-11 w-full rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 sm:w-auto dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               Back to Setup
             </button>
             <button
               type="button"
               onClick={() => startExamSession(activeQuiz)}
-              className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] sm:w-auto dark:bg-[#1D4ED8] dark:hover:bg-blue-500"
+              disabled={startingSession}
+              className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-60 sm:w-auto dark:bg-[#1D4ED8] dark:hover:bg-blue-500"
             >
-              <Play className="h-4 w-4" aria-hidden="true" />
-              <span>Begin Assessment</span>
+              {startingSession ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  <span>Starting Session...</span>
+                </>
+              ) : (
+                <>
+                  <Play className="h-4 w-4" aria-hidden="true" />
+                  <span>{isTimedExam ? 'Begin Exam' : 'Begin Quiz'}</span>
+                </>
+              )}
             </button>
           </div>
         </section>
@@ -996,15 +1417,310 @@ export function QuizExamSystem({
   }
 
   // ============================================================================
-  // STAGE 2: ACTIVE EXAMINATION INTERFACE
+  // STAGE 2A: QUIZ PRACTICE MODE (ONE QUESTION AT A TIME + IMMEDIATE GREEN FEEDBACK)
+  // ============================================================================
+  if (stage === 'exam' && activeQuiz && activeQuiz.assessmentMode === 'practice') {
+    const currentQuestion = activeQuiz.questions[currentIdx];
+    const currentAnswer = answersMap[currentQuestion.id];
+    const feedback = practiceFeedbackMap[currentQuestion.id];
+    const total = activeQuiz.questions.length;
+    const checkedCount = activeQuiz.questions.filter((q) => Boolean(practiceFeedbackMap[q.id])).length;
+    const correctSoFar = activeQuiz.questions.filter(
+      (q) => practiceFeedbackMap[q.id]?.isCorrect
+    ).length;
+    const progressPct = Math.round((checkedCount / total) * 100);
+
+    return (
+      <div className="mx-auto max-w-3xl space-y-6">
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-[#0D162B]">
+          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center sm:gap-4">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold tracking-wide text-blue-700 select-none dark:text-cyan-400">
+                Quiz Mode · Immediate Feedback · {activeQuiz.difficulty.toUpperCase()}
+              </p>
+              <h2 className="mt-0.5 truncate font-display text-base font-bold text-slate-900 select-none sm:text-lg dark:text-white">
+                {activeQuiz.title}
+              </h2>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5 shrink-0 select-none">
+              <div className="flex min-h-9 items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 font-mono text-xs font-semibold tabular-nums text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                <span>
+                  {correctSoFar}/{checkedCount} correct
+                </span>
+              </div>
+              <div className="flex min-h-9 items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 font-mono text-xs font-semibold tabular-nums text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+                <Clock className="h-3.5 w-3.5 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
+                <span>{formatSeconds(elapsedSeconds)}</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 space-y-1.5 select-none">
+            <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+              <span className="font-mono tabular-nums">
+                Question {currentIdx + 1} of {total}
+              </span>
+              <span className="font-mono tabular-nums">
+                {checkedCount} of {total} checked ({progressPct}%)
+              </span>
+            </div>
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+              <div
+                className="h-full rounded-full bg-blue-600 transition-all duration-200 dark:bg-cyan-400"
+                style={{ width: `${progressPct}%` }}
+              />
+            </div>
+          </div>
+        </section>
+
+        {restoredNotice && (
+          <div
+            role="status"
+            className="flex items-start gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50 p-3.5 text-xs text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-200"
+          >
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>{restoredNotice}</span>
+          </div>
+        )}
+
+        {activeQuiz.insufficientSourceNote && (
+          <div
+            role="status"
+            className="flex items-start gap-2.5 rounded-xl border border-blue-200 bg-blue-50 p-3.5 text-xs text-blue-900 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-cyan-200"
+          >
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>{activeQuiz.insufficientSourceNote}</span>
+          </div>
+        )}
+
+        {errorMsg && (
+          <div
+            role="alert"
+            className="flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 p-3.5 text-sm text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200"
+          >
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>{errorMsg}</span>
+          </div>
+        )}
+
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3.5 select-none sm:pb-4 dark:border-slate-800">
+            <span className="font-mono text-xs font-semibold text-slate-500 tabular-nums dark:text-slate-400">
+              Question {currentIdx + 1} · Objective ({currentQuestion.maxMarks || 1} mark)
+            </span>
+            {currentQuestion.topicTag && (
+              <span className="text-xs font-medium text-blue-700 dark:text-cyan-400">
+                Source: {currentQuestion.topicTag}
+              </span>
+            )}
+          </div>
+
+          <h3 className="mt-4 font-display text-base font-semibold leading-snug text-slate-900 academic-selectable sm:mt-5 sm:text-lg dark:text-white">
+            {currentQuestion.question}
+          </h3>
+
+          <div
+            className="mt-6 space-y-3"
+            role="radiogroup"
+            aria-label={`Options for question ${currentIdx + 1}`}
+          >
+            {(currentQuestion.options || []).map((optText, optIdx) => {
+              const letter = String.fromCharCode(65 + optIdx);
+              const isSelected = feedback
+                ? feedback.selectedOptionIndex === optIdx
+                : currentAnswer?.selectedOptionIndex === optIdx;
+              const isCorrectOption = Boolean(feedback && optIdx === feedback.correctOptionIndex);
+              const isWrongSelection = Boolean(
+                feedback && optIdx === feedback.selectedOptionIndex && !feedback.isCorrect
+              );
+
+              let containerClass =
+                'border-slate-200 bg-slate-50/50 text-slate-800 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-200 dark:hover:bg-slate-900';
+              let badgeClass =
+                'border border-slate-300 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300';
+
+              if (isCorrectOption) {
+                containerClass =
+                  'border-emerald-600 bg-emerald-50 text-emerald-950 dark:border-emerald-400 dark:bg-emerald-950/50 dark:text-emerald-100';
+                badgeClass =
+                  'bg-emerald-600 text-white dark:bg-emerald-500 dark:text-slate-950';
+              } else if (isWrongSelection) {
+                containerClass =
+                  'border-red-500 bg-red-50 text-red-950 dark:border-red-500 dark:bg-red-950/40 dark:text-red-100';
+                badgeClass = 'bg-red-600 text-white';
+              } else if (isSelected) {
+                containerClass =
+                  'border-blue-600 bg-blue-50/80 text-slate-900 dark:border-cyan-400 dark:bg-blue-950/50 dark:text-white';
+                badgeClass = 'bg-blue-600 text-white dark:bg-cyan-400 dark:text-slate-950';
+              }
+
+              return (
+                <button
+                  key={optIdx}
+                  type="button"
+                  role="radio"
+                  aria-checked={isSelected}
+                  disabled={Boolean(feedback) || checkingAnswer}
+                  onClick={() => {
+                    if (feedback) return;
+                    const nextAnswers: Record<string, StudentAnswer> = {
+                      ...answersMap,
+                      [currentQuestion.id]: {
+                        questionId: currentQuestion.id,
+                        selectedOptionIndex: optIdx,
+                      },
+                    };
+                    setAnswersMap(nextAnswers);
+                    scheduleProgressSync(activeQuiz.sessionId, currentIdx, nextAnswers, true);
+                  }}
+                  className={`flex min-h-12 w-full items-start gap-3.5 rounded-xl border p-3.5 text-left transition-colors select-none disabled:cursor-default sm:p-4 ${containerClass}`}
+                >
+                  <span
+                    className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md font-mono text-xs font-bold select-none ${badgeClass}`}
+                  >
+                    {letter}
+                  </span>
+                  <span className="flex-1 text-sm leading-relaxed academic-selectable select-text">
+                    {optText}
+                  </span>
+                  {isCorrectOption && (
+                    <CheckCircle2
+                      className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400"
+                      aria-hidden="true"
+                    />
+                  )}
+                  {isWrongSelection && (
+                    <XCircle
+                      className="mt-0.5 h-5 w-5 shrink-0 text-red-600 dark:text-red-400"
+                      aria-hidden="true"
+                    />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {feedback && (
+            <div
+              className={`mt-5 rounded-xl border p-4 ${
+                feedback.isCorrect
+                  ? 'border-emerald-200 bg-emerald-50/70 dark:border-emerald-900/60 dark:bg-emerald-950/30'
+                  : 'border-amber-200 bg-amber-50/70 dark:border-amber-900/60 dark:bg-amber-950/30'
+              }`}
+            >
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                {feedback.isCorrect ? (
+                  <>
+                    <CheckCircle2 className="h-4 w-4 text-emerald-700 dark:text-emerald-400" aria-hidden="true" />
+                    <span className="text-emerald-800 dark:text-emerald-300">
+                      Correct Answer
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <XCircle className="h-4 w-4 text-red-700 dark:text-red-400" aria-hidden="true" />
+                    <span className="text-red-800 dark:text-red-300">
+                      Incorrect — Correct answer: {feedback.expectedAnswerDisplay}
+                    </span>
+                  </>
+                )}
+              </div>
+              <p className="mt-2 text-sm leading-relaxed text-slate-800 select-text dark:text-slate-200">
+                <span className="font-semibold text-slate-900 dark:text-white">Explanation: </span>
+                {feedback.explanation}
+              </p>
+              {feedback.topicTag && (
+                <p className="mt-1.5 text-xs font-medium text-blue-700 dark:text-cyan-400">
+                  Source Page Reference: {feedback.topicTag}
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="mt-6 flex items-center justify-between gap-3 border-t border-slate-200 pt-5 select-none dark:border-slate-800">
+            <button
+              type="button"
+              onClick={() => {
+                const nextIdx = Math.max(0, currentIdx - 1);
+                setCurrentIdx(nextIdx);
+                scheduleProgressSync(activeQuiz.sessionId, nextIdx, answersMap, true);
+              }}
+              disabled={currentIdx === 0}
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-40 sm:min-h-9 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+            >
+              <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+              <span>Previous</span>
+            </button>
+
+            {!feedback ? (
+              <button
+                type="button"
+                onClick={() => handleCheckPracticeAnswer(currentQuestion)}
+                disabled={
+                  checkingAnswer ||
+                  currentAnswer?.selectedOptionIndex === undefined ||
+                  currentAnswer?.selectedOptionIndex === null
+                }
+                className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 sm:min-h-9 dark:bg-blue-600 dark:hover:bg-blue-500"
+              >
+                {checkingAnswer ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                    <span>Checking...</span>
+                  </>
+                ) : (
+                  <span>Check Answer</span>
+                )}
+              </button>
+            ) : currentIdx < total - 1 ? (
+              <button
+                type="button"
+                onClick={() => {
+                  const nextIdx = Math.min(total - 1, currentIdx + 1);
+                  setCurrentIdx(nextIdx);
+                  scheduleProgressSync(activeQuiz.sessionId, nextIdx, answersMap, true);
+                }}
+                className="inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-[#0F1E3D] px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] sm:min-h-9 sm:px-4 dark:bg-blue-600 dark:hover:bg-blue-500"
+              >
+                <span>Next Question</span>
+                <ChevronRight className="h-4 w-4" aria-hidden="true" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => submitExamination(false)}
+                disabled={grading}
+                className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-700 px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-emerald-800 disabled:opacity-60 sm:min-h-9"
+              >
+                {grading ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                    <span>Saving Results...</span>
+                  </>
+                ) : (
+                  <span>Finish & View Results</span>
+                )}
+              </button>
+            )}
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  // ============================================================================
+  // STAGE 2B: ACTIVE TIMED EXAMINATION INTERFACE (ANSWER KEYS SERVER-ONLY)
   // ============================================================================
   if (stage === 'exam' && activeQuiz) {
     const currentQuestion = activeQuiz.questions[currentIdx];
     const currentAnswer = answersMap[currentQuestion.id];
     const total = activeQuiz.questions.length;
     const progressPct = Math.round((answeredCount / total) * 100);
-    const remainingSeconds =
-      activeQuiz.timeLimitMinutes && activeQuiz.timeLimitMinutes > 0
+    const remainingSeconds = activeQuiz.deadlineAtMs
+      ? Math.max(0, Math.ceil((activeQuiz.deadlineAtMs - nowMs) / 1000))
+      : activeQuiz.timeLimitMinutes && activeQuiz.timeLimitMinutes > 0
         ? Math.max(0, activeQuiz.timeLimitMinutes * 60 - elapsedSeconds)
         : null;
 
@@ -1015,7 +1731,8 @@ export function QuizExamSystem({
           <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center sm:gap-4">
             <div className="min-w-0">
               <p className="text-xs font-semibold tracking-wide text-blue-700 select-none dark:text-cyan-400">
-                Examination Mode · {activeQuiz.format.toUpperCase()} · {activeQuiz.difficulty.toUpperCase()}
+                Timed Examination Mode · {activeQuiz.format.toUpperCase()} ·{' '}
+                {activeQuiz.difficulty.toUpperCase()}
               </p>
               <h2 className="mt-0.5 truncate font-display text-base font-bold text-slate-900 select-none sm:text-lg dark:text-white">
                 {activeQuiz.title}
@@ -1063,6 +1780,26 @@ export function QuizExamSystem({
           </div>
         </section>
 
+        {restoredNotice && (
+          <div
+            role="status"
+            className="flex items-start gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50 p-3.5 text-xs text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-200"
+          >
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>{restoredNotice}</span>
+          </div>
+        )}
+
+        {activeQuiz.insufficientSourceNote && (
+          <div
+            role="status"
+            className="flex items-start gap-2.5 rounded-xl border border-blue-200 bg-blue-50 p-3.5 text-xs text-blue-900 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-cyan-200"
+          >
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>{activeQuiz.insufficientSourceNote}</span>
+          </div>
+        )}
+
         {cloudNotice && (
           <div
             role="alert"
@@ -1089,8 +1826,7 @@ export function QuizExamSystem({
             <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3.5 select-none sm:gap-3 sm:pb-4 dark:border-slate-800">
                 <span className="font-mono text-xs font-semibold text-slate-500 tabular-nums dark:text-slate-400">
-                  Question {currentIdx + 1} ·{' '}
-                  {currentQuestion.type === 'objective' ? 'Objective (1 mark)' : `Theory (${currentQuestion.maxMarks} marks)`}
+                  Question {currentIdx + 1} · Objective ({currentQuestion.maxMarks || 1} mark)
                 </span>
                 {currentQuestion.topicTag && (
                   <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
@@ -1139,78 +1875,63 @@ export function QuizExamSystem({
                 })()
               )}
 
-              {currentQuestion.type === 'objective' && currentQuestion.options ? (
-                <div className="mt-6 space-y-3" role="radiogroup" aria-label={`Options for question ${currentIdx + 1}`}>
-                  {currentQuestion.options.map((optText, optIdx) => {
-                    const letter = String.fromCharCode(65 + optIdx);
-                    const isSelected = currentAnswer?.selectedOptionIndex === optIdx;
-                    return (
-                      <button
-                        key={optIdx}
-                        type="button"
-                        role="radio"
-                        aria-checked={isSelected}
-                        onClick={() =>
-                          setAnswersMap((prev) => ({
-                            ...prev,
-                            [currentQuestion.id]: {
-                              questionId: currentQuestion.id,
-                              selectedOptionIndex: optIdx,
-                            },
-                          }))
-                        }
-                        className={`flex min-h-12 w-full items-start gap-3.5 rounded-xl border p-3.5 text-left transition-colors select-none sm:p-4 ${
+              <div
+                className="mt-6 space-y-3"
+                role="radiogroup"
+                aria-label={`Options for question ${currentIdx + 1}`}
+              >
+                {(currentQuestion.options || []).map((optText, optIdx) => {
+                  const letter = String.fromCharCode(65 + optIdx);
+                  const isSelected = currentAnswer?.selectedOptionIndex === optIdx;
+                  return (
+                    <button
+                      key={optIdx}
+                      type="button"
+                      role="radio"
+                      aria-checked={isSelected}
+                      onClick={() => {
+                        const nextAnswers: Record<string, StudentAnswer> = {
+                          ...answersMap,
+                          [currentQuestion.id]: {
+                            questionId: currentQuestion.id,
+                            selectedOptionIndex: optIdx,
+                          },
+                        };
+                        setAnswersMap(nextAnswers);
+                        scheduleProgressSync(activeQuiz.sessionId, currentIdx, nextAnswers, false);
+                      }}
+                      className={`flex min-h-12 w-full items-start gap-3.5 rounded-xl border p-3.5 text-left transition-colors select-none sm:p-4 ${
+                        isSelected
+                          ? 'border-blue-600 bg-blue-50/80 text-slate-900 dark:border-cyan-400 dark:bg-blue-950/50 dark:text-white'
+                          : 'border-slate-200 bg-slate-50/50 text-slate-800 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-200 dark:hover:bg-slate-900'
+                      }`}
+                    >
+                      <span
+                        className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md font-mono text-xs font-bold select-none ${
                           isSelected
-                            ? 'border-blue-600 bg-blue-50/80 text-slate-900 dark:border-cyan-400 dark:bg-blue-950/50 dark:text-white'
-                            : 'border-slate-200 bg-slate-50/50 text-slate-800 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-200 dark:hover:bg-slate-900'
+                            ? 'bg-blue-600 text-white dark:bg-cyan-400 dark:text-slate-950'
+                            : 'border border-slate-300 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300'
                         }`}
                       >
-                        <span
-                          className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md font-mono text-xs font-bold select-none ${
-                            isSelected
-                              ? 'bg-blue-600 text-white dark:bg-cyan-400 dark:text-slate-950'
-                              : 'border border-slate-300 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300'
-                          }`}
-                        >
-                          {letter}
-                        </span>
-                        <span className="text-sm leading-relaxed academic-selectable select-text">{optText}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="mt-6">
-                  <label
-                    htmlFor={`theory-input-${currentQuestion.id}`}
-                    className="mb-2 block text-xs font-medium text-slate-600 select-none dark:text-slate-400"
-                  >
-                    Write your response clearly (key concepts, reasoning, and examples):
-                  </label>
-                  <textarea
-                    id={`theory-input-${currentQuestion.id}`}
-                    rows={7}
-                    value={currentAnswer?.textResponse || ''}
-                    onChange={(e) =>
-                      setAnswersMap((prev) => ({
-                        ...prev,
-                        [currentQuestion.id]: {
-                          questionId: currentQuestion.id,
-                          textResponse: e.target.value,
-                        },
-                      }))
-                    }
-                    placeholder="Type your answer here..."
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-relaxed text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-                  />
-                </div>
-              )}
+                        {letter}
+                      </span>
+                      <span className="text-sm leading-relaxed academic-selectable select-text">
+                        {optText}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
 
               {/* Previous / Next Controls */}
               <div className="mt-6 flex items-center justify-between gap-3 border-t border-slate-200 pt-5 select-none dark:border-slate-800">
                 <button
                   type="button"
-                  onClick={() => setCurrentIdx((i) => Math.max(0, i - 1))}
+                  onClick={() => {
+                    const nextIdx = Math.max(0, currentIdx - 1);
+                    setCurrentIdx(nextIdx);
+                    scheduleProgressSync(activeQuiz.sessionId, nextIdx, answersMap, true);
+                  }}
                   disabled={currentIdx === 0}
                   className="inline-flex min-h-11 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-40 sm:min-h-9 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
                 >
@@ -1221,7 +1942,11 @@ export function QuizExamSystem({
                 {currentIdx < total - 1 ? (
                   <button
                     type="button"
-                    onClick={() => setCurrentIdx((i) => Math.min(total - 1, i + 1))}
+                    onClick={() => {
+                      const nextIdx = Math.min(total - 1, currentIdx + 1);
+                      setCurrentIdx(nextIdx);
+                      scheduleProgressSync(activeQuiz.sessionId, nextIdx, answersMap, true);
+                    }}
                     className="inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-[#0F1E3D] px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] sm:min-h-9 sm:px-4 dark:bg-blue-600 dark:hover:bg-blue-500"
                   >
                     <span>Next</span>
@@ -1259,7 +1984,10 @@ export function QuizExamSystem({
                     <button
                       key={q.id}
                       type="button"
-                      onClick={() => setCurrentIdx(idx)}
+                      onClick={() => {
+                        setCurrentIdx(idx);
+                        scheduleProgressSync(activeQuiz.sessionId, idx, answersMap, true);
+                      }}
                       aria-label={`Question ${idx + 1}${answered ? ' (answered)' : ' (unanswered)'}`}
                       className={`h-10 rounded-lg font-mono text-xs font-semibold tabular-nums transition-colors sm:h-9 ${
                         isCurrent
@@ -1344,7 +2072,7 @@ export function QuizExamSystem({
             <div className="rounded-2xl border border-slate-200 bg-white px-8 py-6 text-center shadow-xl dark:border-slate-800 dark:bg-[#0D162B]">
               <Loader2 className="mx-auto h-7 w-7 animate-spin text-blue-600 dark:text-cyan-400" />
               <p className="mt-3 font-display text-sm font-semibold text-slate-900 dark:text-white">
-                Evaluating your examination responses...
+                Scoring your examination on the server...
               </p>
             </div>
           </div>
@@ -1395,14 +2123,15 @@ export function QuizExamSystem({
             </div>
 
             <div className="flex flex-wrap items-center gap-2.5 select-none">
-              {activeQuiz && (
+              {activeQuiz && (activeQuiz.sessionId || activeQuiz.quizId) && (
                 <button
                   type="button"
-                  onClick={() => startExamSession(activeQuiz)}
-                  className="inline-flex min-h-11 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 sm:min-h-10 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                  disabled={startingSession}
+                  onClick={() => startExamSession(activeQuiz, true)}
+                  className="inline-flex min-h-11 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 sm:min-h-10 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
                 >
                   <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Retake Assessment</span>
+                  <span>{startingSession ? 'Starting...' : 'Retake Assessment'}</span>
                 </button>
               )}
               <button
@@ -1671,23 +2400,6 @@ export function QuizExamSystem({
   // ============================================================================
   return (
     <div className="space-y-6">
-      {!geminiConfigured && (
-        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
-          <div className="flex items-start gap-3">
-            <KeyRound className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
-            <div>
-              <h3 className="font-display font-semibold select-none">
-                Quiz &amp; Exam Generation Temporarily Unavailable
-              </h3>
-              <p className="mt-1 text-xs leading-relaxed">
-                Brainstine AI assessment tools are temporarily unavailable right now. Please try
-                again shortly. You can still review past examination results in your history below.
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
       <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
         <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-5 sm:flex-row sm:items-center dark:border-slate-800">
           <div>
@@ -1695,8 +2407,8 @@ export function QuizExamSystem({
               Quiz & Examination System
             </h2>
             <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-              Generate objective, theory, or mixed assessments from your materials, summaries, or
-              topics.
+              Generate document-grounded objective multiple-choice quizzes and timed examinations
+              from your materials, summaries, or topics.
             </p>
           </div>
 
@@ -1715,7 +2427,7 @@ export function QuizExamSystem({
                   : 'text-slate-600 hover:text-slate-900 dark:text-slate-400'
               }`}
             >
-              New Exam
+              New Quiz / Exam
             </button>
             <button
               type="button"
@@ -1749,10 +2461,64 @@ export function QuizExamSystem({
         <SubjectVisualBanner
           visualKey="quiz"
           variant="compact"
-          title="AI Assessment & Timed Exam Studio"
-          subtitle="Build objective MCQs, written theory exams, or mixed tests grounded directly in your study materials."
+          title="Document-Grounded Quiz & Exam Studio"
+          subtitle="Build objective multiple-choice quizzes with immediate feedback or timed examinations backed by server-side grading."
           className="mt-5"
         />
+
+        {activeSessions.length > 0 && (
+          <div className="mt-5 space-y-2.5 rounded-xl border border-blue-200 bg-blue-50/70 p-4 dark:border-blue-900/60 dark:bg-blue-950/30">
+            <div className="flex items-center justify-between gap-2">
+              <p className="font-display text-xs font-bold uppercase tracking-wide text-blue-800 select-none dark:text-cyan-300">
+                Resume In-Progress Assessment ({activeSessions.length})
+              </p>
+            </div>
+            <div className="space-y-2">
+              {activeSessions.map((sess) => {
+                const isResuming = resumingSessionId === sess.sessionId;
+                return (
+                  <div
+                    key={sess.sessionId}
+                    className="flex flex-col justify-between gap-3 rounded-xl border border-blue-200/80 bg-white p-3.5 sm:flex-row sm:items-center dark:border-slate-800 dark:bg-[#0D162B]"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate font-display text-sm font-semibold text-slate-900 dark:text-white">
+                        {sess.title}
+                      </p>
+                      <p className="mt-0.5 font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
+                        {sess.assessmentMode === 'exam' ? 'Timed Exam' : 'Quiz Mode'} ·{' '}
+                        {sess.answeredCount}/{sess.questionCount} answered ·{' '}
+                        {sess.isExpired
+                          ? 'Deadline expired — click to finalize results'
+                          : sess.remainingSeconds !== null
+                            ? `${formatSeconds(sess.remainingSeconds)} remaining`
+                            : `Question ${sess.currentQuestionIndex + 1} of ${sess.questionCount}`}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={Boolean(resumingSessionId)}
+                      onClick={() => handleResumeSession(sess.sessionId)}
+                      className="inline-flex min-h-10 shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 sm:min-h-9 dark:bg-blue-600 dark:hover:bg-blue-500"
+                    >
+                      {isResuming ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                          <span>Restoring...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Play className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>{sess.isExpired ? 'Finalize & View Score' : 'Resume Assessment'}</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {errorMsg && (
           <div
@@ -1999,7 +2765,7 @@ export function QuizExamSystem({
               </div>
             </div>
 
-            {/* Practice vs Exam Mode */}
+            {/* Quiz vs Exam Mode */}
             <div>
               <p className="mb-2.5 text-xs font-semibold text-slate-700 select-none dark:text-slate-300">
                 2. Assessment Mode
@@ -2021,10 +2787,11 @@ export function QuizExamSystem({
                         : 'text-slate-900 dark:text-white'
                     }`}
                   >
-                    Practice Mode (Untimed)
+                    Quiz Mode (Immediate Feedback)
                   </p>
                   <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
-                    Study at your own pace without a countdown clock, then review answers and explanations.
+                    One question at a time with instant answer verification, green correct answer
+                    highlighting, explanation, and source page reference.
                   </p>
                 </button>
 
@@ -2047,10 +2814,11 @@ export function QuizExamSystem({
                         : 'text-slate-900 dark:text-white'
                     }`}
                   >
-                    Exam Mode (Timed)
+                    Exam Mode (Timed Examination)
                   </p>
                   <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
-                    Simulate real exam conditions with a countdown timer and automatic submission on expiry.
+                    Simulate real exam conditions with a server-enforced timer, protected answer
+                    keys, and automatic submission on expiry.
                   </p>
                 </button>
               </div>
@@ -2065,13 +2833,15 @@ export function QuizExamSystem({
                 </label>
                 <select
                   value={format}
-                  onChange={(e) => setFormat(e.target.value as QuizFormat)}
-                  className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                  disabled
+                  aria-label="Question Format (Objective MCQ)"
+                  className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-100 px-3.5 py-2.5 text-sm text-slate-800 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
                 >
                   <option value="objective">Objective (MCQ — A/B/C/D)</option>
-                  <option value="theory">Theory (Short & Long Answer)</option>
-                  <option value="mixed">Mixed (Objective + Theory)</option>
                 </select>
+                <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                  Only objective multiple-choice questions are supported.
+                </p>
               </div>
 
               {/* Quantity */}
@@ -2146,7 +2916,7 @@ export function QuizExamSystem({
             <div className="flex items-center justify-end border-t border-slate-200 pt-5 select-none dark:border-slate-800">
               <button
                 type="submit"
-                disabled={generating || !geminiConfigured || uploading || extractingUpload}
+                disabled={generating || uploading || extractingUpload}
                 className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 sm:w-auto dark:bg-blue-600 dark:hover:bg-blue-500"
               >
                 {generating ? (
@@ -2157,7 +2927,9 @@ export function QuizExamSystem({
                 ) : (
                   <>
                     <Play className="h-4 w-4" aria-hidden="true" />
-                    <span>Start Examination</span>
+                    <span>
+                      {assessmentMode === 'exam' ? 'Prepare Timed Exam' : 'Prepare Quiz'}
+                    </span>
                   </>
                 )}
               </button>
@@ -2197,11 +2969,14 @@ export function QuizExamSystem({
                         type="button"
                         onClick={() =>
                           prepareExamInstructions({
+                            sessionId: null,
                             quizId: q.id,
                             title: q.title,
                             subjectArea: q.subject_area,
-                            format: q.format,
+                            format: 'objective',
                             difficulty: q.difficulty,
+                            assessmentMode:
+                              q.time_limit_minutes && q.time_limit_minutes > 0 ? 'exam' : 'practice',
                             timeLimitMinutes: q.time_limit_minutes,
                             questions: q.questions,
                           })
@@ -2209,7 +2984,9 @@ export function QuizExamSystem({
                         className="inline-flex min-h-10 items-center gap-1.5 rounded-lg bg-[#0F1E3D] px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-[#192F5D] sm:min-h-8 dark:bg-blue-600 dark:hover:bg-blue-500"
                       >
                         <Play className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Take Exam</span>
+                        <span>
+                          {q.time_limit_minutes && q.time_limit_minutes > 0 ? 'Take Exam' : 'Take Quiz'}
+                        </span>
                       </button>
                       <button
                         type="button"

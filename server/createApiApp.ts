@@ -54,6 +54,23 @@ import {
   GROQ_MODEL,
 } from './groqService.ts';
 import { generateGroundedQuizQuestions } from './quizEngine.ts';
+import { generateExtractiveSummary } from './summaryEngine.ts';
+import {
+  buildChatRagContext,
+  resolveAuthorizedUserFromBearer,
+} from './chatRagService.ts';
+import { buildTutorRagContext } from './tutorRagService.ts';
+import {
+  AssessmentHttpError,
+  checkPracticeQuestionAnswer,
+  createServerAssessmentSession,
+  getSupabaseAssessmentConfig,
+  listActiveAssessmentSessions,
+  restoreServerAssessmentSession,
+  saveAssessmentProgress,
+  startServerAssessmentSession,
+  submitAndGradeServerAssessment,
+} from './assessmentService.ts';
 
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -427,15 +444,27 @@ function sanitizeConversationHistory(
     }));
 }
 
-function buildAiChatParts(body: {
-  message?: string;
-  history?: unknown;
-  documentContext?: { title: string; type: string; content: string } | null;
-  image?: { data?: string; mimeType?: string } | null;
-  imageAction?: ImageActionType;
-  explanationStyle?: 'default' | 'shorter' | 'simpler' | 'detailed';
-  needsTitle?: boolean;
-}) {
+async function buildAiChatParts(
+  body: {
+    message?: string;
+    history?: unknown;
+    documentContext?: { id?: string | null; title: string; type?: string; content: string } | null;
+    studyMaterials?: Array<{
+      id: string;
+      userId?: string;
+      title: string;
+      materialType?: string;
+      extractedText: string;
+    }> | null;
+    attachedDocumentId?: string | null;
+    userId?: string | null;
+    image?: { data?: string; mimeType?: string } | null;
+    imageAction?: ImageActionType;
+    explanationStyle?: 'default' | 'shorter' | 'simpler' | 'detailed';
+    needsTitle?: boolean;
+  },
+  authHeader?: string | string[]
+) {
   const cleanMessage = typeof body.message === 'string' ? body.message.trim() : '';
   const validatedImage = validateVisionImage(body.image || undefined);
 
@@ -451,10 +480,17 @@ function buildAiChatParts(body: {
     .map((h) => `${h.role === 'user' ? 'Student' : 'Brainstine'}: ${h.content}`)
     .join('\n\n');
 
-  const docBlock =
-    body.documentContext && body.documentContext.content
-      ? `\n\nUPLOADED STUDY DOCUMENT CONTEXT (${body.documentContext.type}: "${body.documentContext.title}"):\n${body.documentContext.content.slice(0, 16000)}`
-      : '\n\nNo external uploaded document is attached to this chat. Do NOT claim to have read any uploaded file unless text or an image is provided right here.';
+  const rag = await buildChatRagContext({
+    message: cleanMessage || 'Please analyze the attached academic image.',
+    history: recentHistory,
+    documentContext: body.documentContext || null,
+    studyMaterials: body.studyMaterials || null,
+    attachedDocumentId: body.attachedDocumentId || null,
+    userId: body.userId || null,
+    authHeader,
+    hasImage: Boolean(validatedImage),
+    explanationStyle: body.explanationStyle || 'default',
+  });
 
   const styleDirective =
     body.explanationStyle === 'shorter'
@@ -494,25 +530,38 @@ Rules:
 - When—and ONLY when—a visual diagram genuinely clarifies a cycle, hierarchy, labeled system, or quantitative curve, include ONE single-line diagram block on its own line:
   [[DIAGRAM:{"type":"process_flow","title":"...","subject":"...","caption":"...","nodes":[{"id":"n1","label":"...","sublabel":"...","detail":"..."}],"edges":[{"from":"n1","to":"n2","label":"..."}]}]]
   Supported types: "process_flow", "concept_map", "scientific_system", "cartesian_plot". Never invent raw ASCII art when a structured table or [[DIAGRAM:...]] is clearer.
-- Support step-by-step academic calculations and problem solving.
-- Be thorough yet concise and scannable; avoid unnecessary filler or repetition.
+- Support step-by-step academic calculations, concrete examples, and clear conceptual explanations.
+- Be thorough yet concise and scannable; maintain seamless continuity with earlier messages when answering follow-up questions.
+- If a student query is ambiguous or underspecified, ask a short clarifying question instead of guessing blindly.
 - If an image is provided (or active in this conversation): read visible text, equations, diagrams, charts, or handwritten notes carefully. Clearly state if handwriting blur, low resolution, or cropped edges prevent confident interpretation—NEVER fabricate text, numbers, or diagram labels that are not clearly legible.
-- If document context is provided, prioritize and reference that material accurately. Never pretend to have accessed a file that was not supplied.${docBlock}`;
+- KNOWLEDGE GROUNDING: You support two distinct knowledge sources: (A) the student's uploaded study materials (via retrieved passages below) and (B) general academic knowledge. Always prioritize retrieved study material passages with exact Document Title and Page citations when relevant passages are provided, clearly distinguish general academic knowledge from document-sourced facts, honestly admit when uploaded materials lack requested details, and NEVER fabricate citations or page numbers.${rag.documentContextPromptBlock}`;
 
-  return { parts, systemInstruction, needsTitle: Boolean(body.needsTitle) };
+  return { parts, systemInstruction, needsTitle: Boolean(body.needsTitle), rag };
 }
 
-function buildAiTutorParts(body: {
-  message?: string;
-  history?: unknown;
-  tutorMode?: TutorMode;
-  currentTopic?: string;
-  currentStep?: number;
-  quickAction?: string;
-  documentContext?: { title: string; type: string; content: string } | null;
-  image?: { data?: string; mimeType?: string } | null;
-  imageAction?: ImageActionType;
-}) {
+async function buildAiTutorParts(
+  body: {
+    message?: string;
+    history?: unknown;
+    tutorMode?: TutorMode;
+    currentTopic?: string;
+    currentStep?: number;
+    quickAction?: string;
+    documentContext?: { id?: string | null; title: string; type?: string; content: string } | null;
+    studyMaterials?: Array<{
+      id: string;
+      userId?: string;
+      title: string;
+      materialType?: string;
+      extractedText: string;
+    }> | null;
+    attachedDocumentId?: string | null;
+    userId?: string | null;
+    image?: { data?: string; mimeType?: string } | null;
+    imageAction?: ImageActionType;
+  },
+  authHeader?: string | string[]
+) {
   const cleanMessage = typeof body.message === 'string' ? body.message.trim() : '';
   const validatedImage = validateVisionImage(body.image || undefined);
 
@@ -533,17 +582,27 @@ function buildAiTutorParts(body: {
     .map((h) => `${h.role === 'user' ? 'Student' : 'Tutor'}: ${h.content}`)
     .join('\n\n');
 
-  const docBlock =
-    body.documentContext && body.documentContext.content
-      ? `\n\nREFERENCE STUDY MATERIAL ("${body.documentContext.title}"):\n${body.documentContext.content.slice(0, 14000)}`
-      : '';
+  const rag = await buildTutorRagContext({
+    message: cleanMessage || body.quickAction || 'Please teach me the material shown in the attached image step by step.',
+    quickAction: body.quickAction,
+    currentTopic: typeof body.currentTopic === 'string' ? body.currentTopic : undefined,
+    currentStep: typeof body.currentStep === 'number' ? body.currentStep : 1,
+    tutorMode: mode,
+    history: recentHistory,
+    documentContext: body.documentContext || null,
+    studyMaterials: body.studyMaterials || null,
+    attachedDocumentId: body.attachedDocumentId || null,
+    userId: body.userId || null,
+    authHeader,
+    hasImage: Boolean(validatedImage),
+  });
 
   const modeGuide =
     mode === 'beginner'
-      ? 'BEGINNER MODE: Use plain everyday language, foundational concepts, relatable analogies, and small incremental steps. Define any technical term before using it.'
+      ? 'BEGINNER MODE: Use plain everyday language, foundational concepts, relatable analogies, and small incremental steps. Define every technical term before using it.'
       : mode === 'standard'
         ? 'STANDARD MODE: Use clear university-level explanations, structured reasoning, concrete academic examples, and check conceptual understanding along the way.'
-        : 'ADVANCED MODE: Use rigorous academic terminology, formal derivations/mechanisms, nuanced edge cases, and challenging applied questions.';
+        : 'ADVANCED MODE: Use rigorous academic terminology, formal derivations/mechanisms, nuanced edge cases, and synthesis across concepts.';
 
   const actionDirective = getImageActionDirective(body.imageAction);
 
@@ -570,22 +629,29 @@ function buildAiTutorParts(body: {
   }
   parts.push({ text: userTurn });
 
-  const systemInstruction = `You are Brainstine Personal AI Tutor — a patient, structured, interactive academic tutor.
+  const lengthGuidance = rag.useStructuredLessonPlan
+    ? 'Deliver a clear, scannable structured lesson (~350–650 words) using concise subheadings so every section is easy to absorb without feeling like a wall of text.'
+    : 'Teach progressively one focused step at a time (~180–400 words per turn) rather than dumping an entire textbook chapter at once.';
+
+  const systemInstruction = `You are Brainstine Personal AI Tutor — an intelligent, patient, interactive university academic teacher.
 Core Pedagogical Rules:
-- Teach progressively one focused step at a time (~180 to 350 words per turn) rather than dumping an entire textbook chapter at once.
+- ${lengthGuidance}
 - ${modeGuide}
-- Break difficult ideas into digestible steps, introduce a practical example or analogy before advancing complexity, and explain technical terminology clearly. Use Markdown headings, bullet lists, comparison tables (| ... | ... |) when contrasting ideas, clean equations ($...$ / $$...$$), and > **Key Concept:** highlights.
-- When a structured visual diagram genuinely helps explain a step (such as a cycle, pathway, concept tree, scientific system, or plotted curve), you may include ONE single-line diagram block on its own line:
+- Break complex subjects into logical steps: define unfamiliar terminology clearly, explain processes in sequential order, compare related concepts cleanly with Markdown tables (| ... | ... |) when useful, format equations cleanly ($...$ or $$...$$), highlight essential ideas with > **Key Concept:**, visually separate worked examples or analogies with > **Example:**, and visually separate understanding checks with > **Knowledge Check:**.
+- Adaptive Personalization: Adapt pace and depth strictly from what the student demonstrated in THIS session's messages (simplify and re-explain from another angle if confused, advance smoothly if they answer checks accurately, provide deeper rigor or extra examples when asked). Never claim to know the student's overall ability beyond the observed session.
+- Mid-Lesson Questions & Continuation: Answer mid-lesson questions accurately and connect them smoothly back to where the student stopped so they can continue without losing progress.
+- When a structured visual diagram genuinely clarifies a cycle, pathway, concept map, scientific system, or quantitative curve, include ONE single-line diagram block on its own line:
   [[DIAGRAM:{"type":"process_flow","title":"...","subject":"...","caption":"...","nodes":[{"id":"n1","label":"...","sublabel":"..."}],"edges":[{"from":"n1","to":"n2"}]}]]
-- When the student answers a practice check question, evaluate their answer kindly: identify misunderstandings, explain why their answer is right or wrong, and clarify the reasoning before moving forward.
-- End with a short check-for-understanding question or concrete next step.
-- If an image is present, analyze legible text, equations, diagrams, or handwritten problems faithfully; clearly inform the student if any portion is blurry or illegible instead of guessing.${docBlock}`;
+- If an image is present, analyze legible text, equations, diagrams, or handwritten problems faithfully; clearly inform the student if any portion is blurry or illegible instead of guessing.
+
+${rag.tutorPromptDirective}${rag.documentContextPromptBlock}`;
 
   return {
     parts,
     systemInstruction,
     mode,
     currentTopic: body.currentTopic,
+    rag,
   };
 }
 
@@ -706,15 +772,68 @@ export function createApiApp() {
     next();
   });
 
+  const isOriginAllowed = (originHeader: string, req: Request): boolean => {
+    let parsedOrigin: URL;
+    try {
+      parsedOrigin = new URL(originHeader);
+    } catch {
+      return false;
+    }
+    if (parsedOrigin.protocol !== 'http:' && parsedOrigin.protocol !== 'https:') {
+      return false;
+    }
+
+    const originNorm = parsedOrigin.origin.toLowerCase();
+    const requestHost = (req.get('x-forwarded-host') || req.get('host') || '')
+      .split(',')[0]
+      .trim()
+      .toLowerCase();
+    if (requestHost && parsedOrigin.host.toLowerCase() === requestHost) {
+      return true;
+    }
+
+    const configuredOrigins = new Set<string>();
+    const envCandidates = [
+      process.env.APP_URL,
+      process.env.VITE_APP_URL,
+      ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : []),
+      process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined,
+    ];
+    for (const candidate of envCandidates) {
+      if (!candidate || !candidate.trim()) continue;
+      try {
+        configuredOrigins.add(new URL(candidate.trim()).origin.toLowerCase());
+      } catch {
+        // ignore invalid configured origin
+      }
+    }
+    if (configuredOrigins.has(originNorm)) {
+      return true;
+    }
+
+    if (process.env.NODE_ENV !== 'production') {
+      const hostName = parsedOrigin.hostname.toLowerCase();
+      if (hostName === 'localhost' || hostName === '127.0.0.1') {
+        return true;
+      }
+    }
+
+    return false;
+  };
+
   app.use((req: Request, res: Response, next: NextFunction) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     const origin = req.headers.origin;
     if (origin) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
+      if (isOriginAllowed(origin, req)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Vary', 'Origin');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
+      } else if (req.method === 'OPTIONS') {
+        return res.status(403).end();
+      }
     }
     if (req.method === 'OPTIONS') {
       return res.status(204).end();
@@ -1090,14 +1209,28 @@ export function createApiApp() {
             );
           }
 
-          const isSupabaseHost =
-            (expectedHost && parsedSignedUrl.hostname.toLowerCase() === expectedHost) ||
-            parsedSignedUrl.hostname.toLowerCase().endsWith('.supabase.co');
+          const parsedHost = parsedSignedUrl.hostname.toLowerCase();
+          const isPrivateOrLocalHost =
+            parsedHost === 'localhost' ||
+            parsedHost === '127.0.0.1' ||
+            parsedHost === '::1' ||
+            parsedHost === '0.0.0.0' ||
+            parsedHost.endsWith('.local') ||
+            parsedHost.endsWith('.internal') ||
+            /^10\./.test(parsedHost) ||
+            /^192\.168\./.test(parsedHost) ||
+            /^172\.(1[6-9]|2\d|3[0-1])\./.test(parsedHost) ||
+            /^169\.254\./.test(parsedHost);
+
+          const isSupabaseHost = expectedHost
+            ? parsedHost === expectedHost
+            : parsedHost.endsWith('.supabase.co') && parsedHost.split('.').length >= 3;
 
           if (
             parsedSignedUrl.protocol !== 'https:' ||
             Boolean(parsedSignedUrl.username) ||
             Boolean(parsedSignedUrl.password) ||
+            isPrivateOrLocalHost ||
             !isSupabaseHost ||
             !parsedSignedUrl.pathname.startsWith('/storage/v1/object/sign/study-materials/')
           ) {
@@ -1427,7 +1560,6 @@ export function createApiApp() {
           ? summaryLevel
           : 'detailed';
 
-      const ai = getGeminiClient();
       const chunks = chunkText(extractedText.trim(), 18000, 350);
 
       let synthesisSource = extractedText.trim();
@@ -1446,6 +1578,7 @@ export function createApiApp() {
             userPrompt: chunkPrompt,
             maxTokens: 1536,
             geminiFallback: async () => {
+              const ai = getGeminiClient();
               const { result: partRes } = await runWithGeminiModel(
                 (model, signal) =>
                   ai.models.generateContent({
@@ -1557,6 +1690,7 @@ You must respond strictly with a valid JSON object matching this schema:
         maxTokens: targetSummaryMaxTokens,
         temperature: 0.3,
         geminiFallback: async () => {
+          const ai = getGeminiClient();
           const { result: response } = await runWithGeminiModel(
             (model, signal) =>
               ai.models.generateContent({
@@ -1874,6 +2008,7 @@ You must respond strictly with a valid JSON object matching this schema:
         wordCount: countWords(extractedText),
         chunkCount: chunks.length,
         generatedAt: new Date().toISOString(),
+        generationMode: 'ai',
       };
 
       const fullSummary: StructuredSummary = {
@@ -1882,6 +2017,43 @@ You must respond strictly with a valid JSON object matching this schema:
       };
 
       return res.json(fullSummary);
+    } catch (err: unknown) {
+      return sendSafeApiError(res, 'summaries.generate', err);
+    }
+  });
+
+  app.post('/api/summaries/extractive', (req: Request, res: Response) => {
+    try {
+      const { extractedText, title, subjectArea, summaryLevel } = (req.body || {}) as {
+        extractedText?: string;
+        title?: string;
+        subjectArea?: string;
+        summaryLevel?: SummaryLevel;
+      };
+
+      if (!extractedText || typeof extractedText !== 'string' || extractedText.trim().length < 20) {
+        return res.status(400).json({
+          error:
+            'Insufficient study material text. Please extract or paste at least 20 characters before summarizing.',
+        });
+      }
+
+      const level: SummaryLevel =
+        summaryLevel === 'short' || summaryLevel === 'detailed' || summaryLevel === 'comprehensive'
+          ? summaryLevel
+          : 'detailed';
+
+      const summary = generateExtractiveSummary(
+        (title || 'Study Summary').trim(),
+        (subjectArea || 'General Studies').trim(),
+        extractedText.trim(),
+        level
+      );
+
+      return res.json({
+        ...summary,
+        generationMode: 'extractive' as const,
+      });
     } catch (err: unknown) {
       return sendSafeApiError(res, 'summaries.generate', err);
     }
@@ -1909,8 +2081,6 @@ You must respond strictly with a valid JSON object matching this schema:
           .json({ error: 'Please enter a follow-up question about the summary.' });
       }
 
-      const ai = getGeminiClient();
-
       const promptTask =
         mode === 'simpler_explanation'
           ? 'Provide a much simpler, intuitive explanation of the core concepts in this study summary as if explaining to a beginner student.'
@@ -1934,6 +2104,7 @@ You must respond strictly with a valid JSON object matching this schema:
         jsonMode: true,
         maxTokens: 1536,
         geminiFallback: async () => {
+          const ai = getGeminiClient();
           const { result: response } = await runWithGeminiModel(
             (model, signal) =>
               ai.models.generateContent({
@@ -1986,15 +2157,45 @@ You must respond strictly with a valid JSON object matching this schema:
     }
   });
 
+  const resolveQuizCaller = async (
+    req: Request
+  ): Promise<{ userId: string; accessToken: string | null }> => {
+    const verifiedAuth = await resolveAuthorizedUserFromBearer(req.headers.authorization);
+    if (getSupabaseAssessmentConfig() !== null && !verifiedAuth) {
+      throw new AssessmentHttpError(
+        401,
+        'Please sign in to access quizzes and examinations.'
+      );
+    }
+    return {
+      userId: verifiedAuth?.userId || 'local-user',
+      accessToken: verifiedAuth?.accessToken || null,
+    };
+  };
+
+  const sendAssessmentError = (res: Response, operation: string, err: unknown) => {
+    if (err instanceof AssessmentHttpError) {
+      if (err.status >= 500) {
+        logServerError(operation, err);
+      }
+      return res.status(err.status).json({ error: err.message });
+    }
+    return sendSafeApiError(res, operation, err);
+  };
+
   app.post('/api/quizzes/generate', async (req: Request, res: Response) => {
     try {
+      const caller = await resolveQuizCaller(req);
       const {
         sourceMode,
         sourceText,
         topicTitle,
-        format,
         difficulty,
         questionCount,
+        assessmentMode,
+        timeLimitMinutes,
+        materialId,
+        summaryId,
       } = (req.body || {}) as {
         sourceMode?: QuizSourceMode;
         sourceText?: string;
@@ -2002,6 +2203,10 @@ You must respond strictly with a valid JSON object matching this schema:
         format?: QuizFormat;
         difficulty?: QuizDifficulty;
         questionCount?: number;
+        assessmentMode?: 'practice' | 'exam';
+        timeLimitMinutes?: number | null;
+        materialId?: string | null;
+        summaryId?: string | null;
       };
 
       const cleanTitle = (topicTitle || '').trim();
@@ -2042,317 +2247,258 @@ You must respond strictly with a valid JSON object matching this schema:
           ? questionCount
           : 10;
 
-      const sourceContent = mode === 'topic' ? `Study topic: ${cleanTitle}` : cleanSource;
-      const questions = generateGroundedQuizQuestions(sourceContent, totalCount, validDifficulty);
+      const resolvedAssessmentMode = assessmentMode === 'exam' ? 'exam' : 'practice';
+      const resolvedTimeLimit =
+        resolvedAssessmentMode === 'exam'
+          ? Math.min(180, Math.max(5, Number(timeLimitMinutes) || 20))
+          : null;
 
-      if (questions.length === 0) {
+      const sourceContent = mode === 'topic' ? `Study topic: ${cleanTitle}` : cleanSource;
+      const rawQuestions = generateGroundedQuizQuestions(sourceContent, totalCount, validDifficulty);
+
+      if (rawQuestions.length === 0) {
         return res.status(400).json({
-          error: 'Could not extract enough factual sentences from the material to generate grounded quiz questions. Please provide more detailed text.',
+          error:
+            'Could not extract enough factual sentences from the material to generate grounded quiz questions. Please provide more detailed text.',
         });
       }
 
-      const payload: GeneratedQuizPayload = {
-        title: cleanTitle || 'Document Assessment',
+      const safeTitle = cleanTitle || 'Document Assessment';
+      const { session, sanitizedQuestions } = await createServerAssessmentSession({
+        userId: caller.userId,
+        accessToken: caller.accessToken,
+        title: safeTitle,
         subjectArea: 'General Studies',
+        sourceMode: mode,
+        materialId: typeof materialId === 'string' && materialId.trim() ? materialId.trim() : null,
+        summaryId: typeof summaryId === 'string' && summaryId.trim() ? summaryId.trim() : null,
         format: validFormat,
         difficulty: validDifficulty,
-        questionCount: questions.length,
-        questions,
+        assessmentMode: resolvedAssessmentMode,
+        timeLimitMinutes: resolvedTimeLimit,
+        rawQuestions,
+      });
+
+      const insufficientSourceNote =
+        sanitizedQuestions.length < totalCount
+          ? `Only ${sanitizedQuestions.length} of ${totalCount} requested questions could be reliably grounded in your study material without inventing facts.`
+          : null;
+
+      const payload: GeneratedQuizPayload = {
+        sessionId: session.sessionId,
+        quizId: session.quizId,
+        title: session.title,
+        subjectArea: session.subjectArea,
+        format: validFormat,
+        difficulty: validDifficulty,
+        assessmentMode: session.assessmentMode,
+        timeLimitMinutes: session.timeLimitMinutes,
+        requestedQuestionCount: totalCount,
+        questionCount: sanitizedQuestions.length,
+        insufficientSourceNote,
+        questions: sanitizedQuestions,
       };
 
       return res.json(payload);
     } catch (err: unknown) {
-      return sendSafeApiError(res, 'quizzes.generate', err);
+      return sendAssessmentError(res, 'quizzes.generate', err);
+    }
+  });
+
+  app.post('/api/quizzes/sessions/start', async (req: Request, res: Response) => {
+    try {
+      const caller = await resolveQuizCaller(req);
+      const { sessionId, quizId, assessmentMode, timeLimitMinutes, retake } = (req.body || {}) as {
+        sessionId?: string | null;
+        quizId?: string | null;
+        assessmentMode?: 'practice' | 'exam';
+        timeLimitMinutes?: number | null;
+        retake?: boolean;
+      };
+
+      if (!sessionId && !quizId) {
+        return res.status(400).json({ error: 'An assessment sessionId or quizId is required.' });
+      }
+
+      const started = await startServerAssessmentSession({
+        userId: caller.userId,
+        accessToken: caller.accessToken,
+        sessionId: typeof sessionId === 'string' ? sessionId : null,
+        quizId: typeof quizId === 'string' ? quizId : null,
+        assessmentMode:
+          assessmentMode === 'exam' || assessmentMode === 'practice' ? assessmentMode : undefined,
+        timeLimitMinutes:
+          typeof timeLimitMinutes === 'number' ? timeLimitMinutes : undefined,
+        retake: Boolean(retake),
+      });
+
+      return res.json(started);
+    } catch (err: unknown) {
+      return sendAssessmentError(res, 'quizzes.generate', err);
+    }
+  });
+
+  app.get('/api/quizzes/sessions/active', async (req: Request, res: Response) => {
+    try {
+      const caller = await resolveQuizCaller(req);
+      const sessions = await listActiveAssessmentSessions({
+        userId: caller.userId,
+        accessToken: caller.accessToken,
+      });
+      return res.json({ sessions });
+    } catch (err: unknown) {
+      return sendAssessmentError(res, 'quizzes.generate', err);
+    }
+  });
+
+  app.post('/api/quizzes/sessions/restore', async (req: Request, res: Response) => {
+    try {
+      const caller = await resolveQuizCaller(req);
+      const { sessionId } = (req.body || {}) as { sessionId?: string };
+      if (!sessionId || typeof sessionId !== 'string' || !sessionId.trim()) {
+        return res.status(400).json({ error: 'An active assessment sessionId is required.' });
+      }
+      const restored = await restoreServerAssessmentSession({
+        userId: caller.userId,
+        accessToken: caller.accessToken,
+        sessionId: sessionId.trim(),
+      });
+      return res.json(restored);
+    } catch (err: unknown) {
+      return sendAssessmentError(res, 'quizzes.generate', err);
+    }
+  });
+
+  app.get('/api/quizzes/sessions/:sessionId', async (req: Request, res: Response) => {
+    try {
+      const caller = await resolveQuizCaller(req);
+      const sessionId = String(req.params.sessionId || '').trim();
+      if (!sessionId) {
+        return res.status(400).json({ error: 'An assessment sessionId is required.' });
+      }
+      const restored = await restoreServerAssessmentSession({
+        userId: caller.userId,
+        accessToken: caller.accessToken,
+        sessionId,
+      });
+      return res.json(restored);
+    } catch (err: unknown) {
+      return sendAssessmentError(res, 'quizzes.generate', err);
+    }
+  });
+
+  const handleSaveSessionProgress = async (req: Request, res: Response) => {
+    try {
+      const caller = await resolveQuizCaller(req);
+      const sessionId = String(req.params.sessionId || '').trim();
+      if (!sessionId) {
+        return res.status(400).json({ error: 'An assessment sessionId is required.' });
+      }
+      const { currentQuestionIndex, answers } = (req.body || {}) as {
+        currentQuestionIndex?: number;
+        answers?: Record<string, StudentAnswer> | StudentAnswer[];
+      };
+
+      if (
+        Array.isArray(answers) && answers.length > 70 ||
+        (answers && !Array.isArray(answers) && typeof answers === 'object' && Object.keys(answers).length > 70)
+      ) {
+        return res.status(400).json({ error: 'Assessment progress exceeds maximum allowed 70 questions.' });
+      }
+
+      const saved = await saveAssessmentProgress({
+        userId: caller.userId,
+        accessToken: caller.accessToken,
+        sessionId,
+        currentQuestionIndex:
+          typeof currentQuestionIndex === 'number' ? currentQuestionIndex : undefined,
+        answers,
+      });
+      return res.json(saved);
+    } catch (err: unknown) {
+      return sendAssessmentError(res, 'quizzes.grade', err);
+    }
+  };
+
+  app.patch('/api/quizzes/sessions/:sessionId/progress', handleSaveSessionProgress);
+  app.post('/api/quizzes/sessions/:sessionId/progress', handleSaveSessionProgress);
+
+  app.post('/api/quizzes/answer', async (req: Request, res: Response) => {
+    try {
+      const caller = await resolveQuizCaller(req);
+      const { sessionId, questionId, selectedOptionIndex } = (req.body || {}) as {
+        sessionId?: string;
+        questionId?: string;
+        selectedOptionIndex?: number;
+      };
+
+      if (!sessionId || typeof sessionId !== 'string' || !questionId || typeof questionId !== 'string') {
+        return res.status(400).json({ error: 'Session ID and question ID are required.' });
+      }
+
+      const checked = await checkPracticeQuestionAnswer({
+        userId: caller.userId,
+        accessToken: caller.accessToken,
+        sessionId,
+        questionId,
+        selectedOptionIndex: Number(selectedOptionIndex),
+      });
+
+      return res.json(checked);
+    } catch (err: unknown) {
+      return sendAssessmentError(res, 'quizzes.grade', err);
     }
   });
 
   app.post('/api/quizzes/grade', async (req: Request, res: Response) => {
     try {
-      const { quizTitle, questions, answers, timeTakenSeconds } = (req.body || {}) as {
-        quizTitle?: string;
-        questions?: QuizQuestion[];
+      const caller = await resolveQuizCaller(req);
+      const { sessionId, answers, timeTakenSeconds, autoSubmitted } = (req.body || {}) as {
+        sessionId?: string;
         answers?: StudentAnswer[];
         timeTakenSeconds?: number;
+        autoSubmitted?: boolean;
       };
 
-      if (!Array.isArray(questions) || questions.length === 0) {
-        return res.status(400).json({ error: 'Quiz questions are required for grading.' });
+      if (!sessionId || typeof sessionId !== 'string') {
+        return res.status(400).json({
+          error: 'An active assessment sessionId is required to submit for grading.',
+        });
       }
 
-      const answerMap = new Map<string, StudentAnswer>();
-      for (const ans of answers || []) {
-        answerMap.set(ans.questionId, ans);
+      if (Array.isArray(answers) && answers.length > 70) {
+        return res.status(400).json({ error: 'Quiz submission exceeds maximum allowed 70 questions.' });
       }
 
-      const gradedResults: GradedQuestionResult[] = [];
-      const theoryQueue: { q: QuizQuestion; responseText: string; resultIndex: number }[] = [];
-
-      questions.forEach((q, idx) => {
-        const ans = answerMap.get(q.id);
-        if (q.type === 'objective') {
-          const selected =
-            ans?.selectedOptionIndex !== undefined && ans?.selectedOptionIndex !== null
-              ? ans.selectedOptionIndex
-              : null;
-          const correctIdx = q.correctOptionIndex ?? 0;
-          const options = q.options || ['Option A', 'Option B', 'Option C', 'Option D'];
-          const letter = (i: number) => String.fromCharCode(65 + i);
-
-          if (selected === null) {
-            gradedResults.push({
-              questionId: q.id,
-              number: q.number || idx + 1,
-              type: 'objective',
-              question: q.question,
-              options,
-              correctOptionIndex: correctIdx,
-              selectedOptionIndex: null,
-              studentAnswerDisplay: 'No answer selected',
-              expectedAnswerDisplay: `${letter(correctIdx)}. ${options[correctIdx] || q.expectedAnswer}`,
-              status: 'unanswered',
-              marksAwarded: 0,
-              maxMarks: q.maxMarks || 1,
-              feedback: 'This question was left unanswered.',
-              explanation: q.explanation,
-              aiEvaluated: false,
-            });
-          } else if (selected === correctIdx) {
-            gradedResults.push({
-              questionId: q.id,
-              number: q.number || idx + 1,
-              type: 'objective',
-              question: q.question,
-              options,
-              correctOptionIndex: correctIdx,
-              selectedOptionIndex: selected,
-              studentAnswerDisplay: `${letter(selected)}. ${options[selected] || ''}`,
-              expectedAnswerDisplay: `${letter(correctIdx)}. ${options[correctIdx] || q.expectedAnswer}`,
-              status: 'correct',
-              marksAwarded: q.maxMarks || 1,
-              maxMarks: q.maxMarks || 1,
-              feedback: 'Correct selection.',
-              explanation: q.explanation,
-              aiEvaluated: false,
-            });
-          } else {
-            gradedResults.push({
-              questionId: q.id,
-              number: q.number || idx + 1,
-              type: 'objective',
-              question: q.question,
-              options,
-              correctOptionIndex: correctIdx,
-              selectedOptionIndex: selected,
-              studentAnswerDisplay: `${letter(selected)}. ${options[selected] || ''}`,
-              expectedAnswerDisplay: `${letter(correctIdx)}. ${options[correctIdx] || q.expectedAnswer}`,
-              status: 'incorrect',
-              marksAwarded: 0,
-              maxMarks: q.maxMarks || 1,
-              feedback: `Incorrect. You selected option ${letter(selected)}, whereas option ${letter(correctIdx)} is correct.`,
-              explanation: q.explanation,
-              aiEvaluated: false,
-            });
-          }
-        } else {
-          const responseText = (ans?.textResponse || '').trim();
-          const resultIndex = gradedResults.length;
-          if (!responseText) {
-            gradedResults.push({
-              questionId: q.id,
-              number: q.number || idx + 1,
-              type: 'theory',
-              question: q.question,
-              studentAnswerDisplay: 'No response submitted',
-              expectedAnswerDisplay: q.expectedAnswer,
-              status: 'unanswered',
-              marksAwarded: 0,
-              maxMarks: q.maxMarks || 5,
-              feedback: 'No written answer was provided for this theory question.',
-              missingPoints: q.markingCriteria || [],
-              explanation: q.explanation,
-              aiEvaluated: false,
-            });
-          } else {
-            gradedResults.push({
-              questionId: q.id,
-              number: q.number || idx + 1,
-              type: 'theory',
-              question: q.question,
-              studentAnswerDisplay: responseText,
-              expectedAnswerDisplay: q.expectedAnswer,
-              status: 'incorrect',
-              marksAwarded: 0,
-              maxMarks: q.maxMarks || 5,
-              feedback: '',
-              missingPoints: [],
-              explanation: q.explanation,
-              aiEvaluated: true,
-            });
-            theoryQueue.push({ q, responseText, resultIndex });
-          }
-        }
+      const graded = await submitAndGradeServerAssessment({
+        userId: caller.userId,
+        accessToken: caller.accessToken,
+        sessionId,
+        answers: Array.isArray(answers) ? answers : [],
+        clientElapsedSeconds: timeTakenSeconds,
+        autoSubmitted: Boolean(autoSubmitted),
       });
 
-      if (theoryQueue.length > 0) {
-        const ai = getGeminiClient();
-        const theoryBatches: typeof theoryQueue[] = [];
-        for (let i = 0; i < theoryQueue.length; i += 8) {
-          theoryBatches.push(theoryQueue.slice(i, i + 8));
-        }
-
-        const evalMap = new Map<
-          string,
-          { marksAwarded: number; feedback: string; missingPoints: string[] }
-        >();
-
-        await mapWithConcurrency(theoryBatches, 1, async (batch) => {
-          const batchPayload = batch.map((item) => ({
-            questionId: item.q.id,
-            question: item.q.question,
-            maxMarks: item.q.maxMarks || 5,
-            expectedAnswer: item.q.expectedAnswer,
-            markingCriteria: item.q.markingCriteria || [],
-            studentResponse: item.responseText,
-          }));
-
-          const gradeSystemInstruction =
-            'You are an objective academic examiner evaluating student theory answers. Award marks from 0 up to maxMarks based strictly on how accurately and completely the student addressed the marking criteria. Provide concise, constructive feedback and list any important missing points.\n\nCRITICAL JSON FORMAT REQUIREMENT:\nYou must respond strictly with a valid JSON object matching this schema: {"evaluations": [{"questionId": "string", "marksAwarded": number, "feedback": "string", "missingPoints": ["string"]}]}';
-          const gradeUserPrompt = `Examination Title: ${quizTitle || 'Academic Assessment'}\n\nEvaluate each student theory response fairly and strictly against the expectedAnswer and markingCriteria:\n${JSON.stringify(batchPayload, null, 2)}\n\nRespond with a valid JSON object containing the "evaluations" array.`;
-
-          const { text: gradeResponseText } = await runMasterAiGeneration({
-            systemInstruction: gradeSystemInstruction,
-            userPrompt: gradeUserPrompt,
-            jsonMode: true,
-            maxTokens: 2048,
-            geminiFallback: async () => {
-              const { result: evalRes } = await runWithGeminiModel(
-                (model, signal) =>
-                  ai.models.generateContent({
-                    model,
-                    contents: gradeUserPrompt,
-                    config: {
-                      systemInstruction:
-                        'You are an objective academic examiner evaluating student theory answers. Award marks from 0 up to maxMarks based strictly on how accurately and completely the student addressed the marking criteria. Provide concise, constructive feedback and list any important missing points.',
-                      ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-                      abortSignal: signal,
-                      responseMimeType: 'application/json',
-                      responseSchema: {
-                        type: Type.OBJECT,
-                        properties: {
-                          evaluations: {
-                            type: Type.ARRAY,
-                            items: {
-                              type: Type.OBJECT,
-                              properties: {
-                                questionId: { type: Type.STRING },
-                                marksAwarded: { type: Type.NUMBER },
-                                feedback: { type: Type.STRING },
-                                missingPoints: {
-                                  type: Type.ARRAY,
-                                  items: { type: Type.STRING },
-                                },
-                              },
-                              required: ['questionId', 'marksAwarded', 'feedback', 'missingPoints'],
-                            },
-                          },
-                        },
-                        required: ['evaluations'],
-                      },
-                    },
-                  }),
-                { maxRetries: 1, timeoutMs: 60000 }
-              );
-              return evalRes.text ?? '';
-            },
-          });
-
-          const parsedEval = parseAiJsonResponse<{
-            evaluations?: Array<{
-              questionId?: string;
-              marksAwarded?: number;
-              feedback?: string;
-              missingPoints?: unknown[];
-            }>;
-          }>(gradeResponseText, 'grading theory answers');
-
-          for (const ev of parsedEval.evaluations || []) {
-            evalMap.set(String(ev.questionId), {
-              marksAwarded: Number(ev.marksAwarded) || 0,
-              feedback: String(ev.feedback || ''),
-              missingPoints: Array.isArray(ev.missingPoints)
-                ? ev.missingPoints.map((m: unknown) => String(m))
-                : [],
-            });
-          }
-        });
-
-        for (const item of theoryQueue) {
-          const ev = evalMap.get(item.q.id);
-          const maxM = item.q.maxMarks || 5;
-          const clamped = ev
-            ? Math.min(maxM, Math.max(0, Math.round(ev.marksAwarded * 10) / 10))
-            : 0;
-          const ratio = maxM > 0 ? clamped / maxM : 0;
-
-          gradedResults[item.resultIndex] = {
-            ...gradedResults[item.resultIndex],
-            marksAwarded: clamped,
-            status: ratio >= 0.75 ? 'correct' : ratio >= 0.35 ? 'partial' : 'incorrect',
-            feedback:
-              ev?.feedback ||
-              'Automated AI evaluation completed against expected marking criteria.',
-            missingPoints: ev?.missingPoints || [],
-            aiEvaluated: true,
-          };
-        }
-      }
-
-      const correctCount = gradedResults.filter((r) => r.status === 'correct').length;
-      const unansweredCount = gradedResults.filter((r) => r.status === 'unanswered').length;
-      const incorrectCount = gradedResults.length - correctCount - unansweredCount;
-      const earnedMarks =
-        Math.round(gradedResults.reduce((acc, r) => acc + r.marksAwarded, 0) * 10) / 10;
-      const maxMarks = gradedResults.reduce((acc, r) => acc + r.maxMarks, 0);
-      const percentage = maxMarks > 0 ? Math.round((earnedMarks / maxMarks) * 1000) / 10 : 0;
-
-      let performanceAssessment = '';
-      if (percentage >= 85) {
-        performanceAssessment =
-          'Strong mastery demonstrated across the tested concepts. Review any minor missed nuances below to maintain retention.';
-      } else if (percentage >= 70) {
-        performanceAssessment =
-          'Solid foundational grasp with a few conceptual gaps. Revisit the highlighted explanations and marking feedback below.';
-      } else if (percentage >= 50) {
-        performanceAssessment =
-          'Developing understanding. Focus your next revision session on the topics missed below before attempting another examination.';
-      } else {
-        performanceAssessment =
-          'Significant gaps identified in this assessment. Review your study summary and key definitions carefully, then retake this quiz.';
-      }
-
-      const responsePayload: QuizGradingResponse = {
-        totalQuestions: gradedResults.length,
-        correctCount,
-        incorrectCount,
-        unansweredCount,
-        earnedMarks,
-        maxMarks,
-        percentage,
-        timeTakenSeconds: Math.max(0, Number(timeTakenSeconds) || 0),
-        performanceAssessment,
-        gradedResults,
-      };
-
-      return res.json(responsePayload);
+      return res.json(graded);
     } catch (err: unknown) {
-      return sendSafeApiError(res, 'quizzes.grade', err);
+      return sendAssessmentError(res, 'quizzes.grade', err);
     }
   });
 
   app.post('/api/ai/chat', async (req: Request, res: Response) => {
     try {
-      const { parts, systemInstruction, needsTitle } = buildAiChatParts(req.body || {});
-      const ai = getGeminiClient();
+      const { parts, systemInstruction, needsTitle, rag } = await buildAiChatParts(
+        req.body || {},
+        req.headers.authorization
+      );
+      const ragMeta = {
+        intent: rag.intent,
+        knowledgeSource: rag.knowledgeSource,
+        searchedDocumentsCount: rag.searchedDocumentsCount,
+        passagesRetrieved: rag.sources.length,
+        totalRawDocumentChars: rag.totalRawDocumentChars,
+        injectedPassageChars: rag.injectedPassageChars,
+      };
       const hasImage = parts.some((p) => 'inlineData' in p);
       const textPrompt = parts
         .map((p) => ('text' in p ? p.text : ''))
@@ -2371,6 +2517,7 @@ You must respond strictly with a valid JSON object matching this schema:
             jsonMode: true,
             maxTokens: 2500,
             geminiFallback: async () => {
+              const ai = getGeminiClient();
               const { result: response } = await runWithGeminiModel(
                 (model, signal) =>
                   ai.models.generateContent({
@@ -2409,6 +2556,7 @@ You must respond strictly with a valid JSON object matching this schema:
           });
           chatJsonText = resAI.text;
         } else {
+          const ai = getGeminiClient();
           const { result: response } = await runWithGeminiModel(
             (model, signal) =>
               ai.models.generateContent({
@@ -2460,6 +2608,8 @@ You must respond strictly with a valid JSON object matching this schema:
           reply,
           suggestedTitle: String(parsed.suggestedTitle || 'Academic Study Chat').trim(),
           subjectArea: String(parsed.subjectArea || 'General Studies').trim(),
+          sources: rag.sources,
+          ragMeta,
         });
       }
 
@@ -2470,6 +2620,7 @@ You must respond strictly with a valid JSON object matching this schema:
           userPrompt: textPrompt,
           maxTokens: 2500,
           geminiFallback: async () => {
+            const ai = getGeminiClient();
             const { result: response } = await runWithGeminiModel(
               (model, signal) =>
                 ai.models.generateContent({
@@ -2488,6 +2639,7 @@ You must respond strictly with a valid JSON object matching this schema:
         });
         reply = resAI.text.trim();
       } else {
+        const ai = getGeminiClient();
         const { result: response } = await runWithGeminiModel(
           (model, signal) =>
             ai.models.generateContent({
@@ -2510,7 +2662,11 @@ You must respond strictly with a valid JSON object matching this schema:
         );
       }
 
-      return res.json({ reply });
+      return res.json({
+        reply,
+        sources: rag.sources,
+        ragMeta,
+      });
     } catch (err: unknown) {
       return sendSafeApiError(res, 'ai.chat', err);
     }
@@ -2541,8 +2697,18 @@ You must respond strictly with a valid JSON object matching this schema:
     });
 
     try {
-      const { parts, systemInstruction, needsTitle } = buildAiChatParts(req.body || {});
-      const ai = getGeminiClient();
+      const { parts, systemInstruction, needsTitle, rag } = await buildAiChatParts(
+        req.body || {},
+        req.headers.authorization
+      );
+      const ragMeta = {
+        intent: rag.intent,
+        knowledgeSource: rag.knowledgeSource,
+        searchedDocumentsCount: rag.searchedDocumentsCount,
+        passagesRetrieved: rag.sources.length,
+        totalRawDocumentChars: rag.totalRawDocumentChars,
+        injectedPassageChars: rag.injectedPassageChars,
+      };
       const hasImage = parts.some((p) => 'inlineData' in p);
       const textPrompt = parts
         .map((p) => ('text' in p ? p.text : ''))
@@ -2554,6 +2720,10 @@ You must respond strictly with a valid JSON object matching this schema:
         : systemInstruction;
 
       initSseResponse(res);
+      writeSseEvent(res, 'sources', {
+        sources: rag.sources,
+        ragMeta,
+      });
       heartbeat = setInterval(() => {
         if (!clientClosed && !res.writableEnded) {
           res.write(': keepalive\n\n');
@@ -2597,6 +2767,7 @@ You must respond strictly with a valid JSON object matching this schema:
             maxTokens: 2500,
             onChunk: onChunkCallback,
             geminiFallback: async () => {
+              const ai = getGeminiClient();
               const { iterator, firstResult } = await openStreamAndPullFirstChunk(
                 (signal) =>
                   ai.models.generateContentStream({
@@ -2624,6 +2795,7 @@ You must respond strictly with a valid JSON object matching this schema:
           });
         } else {
           resetStallTimer(60000);
+          const ai = getGeminiClient();
           const { iterator, firstResult } = await openStreamAndPullFirstChunk(
             (signal) =>
               ai.models.generateContentStream({
@@ -2671,6 +2843,8 @@ You must respond strictly with a valid JSON object matching this schema:
             reply: cleanText,
             suggestedTitle: String(meta.suggestedTitle || 'Academic Study Chat').trim(),
             subjectArea: String(meta.subjectArea || 'General Studies').trim(),
+            sources: rag.sources,
+            ragMeta,
           });
         } else {
           const clean = fullText.trim();
@@ -2681,6 +2855,8 @@ You must respond strictly with a valid JSON object matching this schema:
           }
           writeSseEvent(res, 'done', {
             reply: clean,
+            sources: rag.sources,
+            ragMeta,
           });
         }
         res.end();
@@ -2707,8 +2883,10 @@ You must respond strictly with a valid JSON object matching this schema:
 
   app.post('/api/ai/tutor', async (req: Request, res: Response) => {
     try {
-      const { parts, systemInstruction, currentTopic } = buildAiTutorParts(req.body || {});
-      const ai = getGeminiClient();
+      const { parts, systemInstruction, currentTopic, rag } = await buildAiTutorParts(
+        req.body || {},
+        req.headers.authorization
+      );
       const hasImage = parts.some((p) => 'inlineData' in p);
       const textPrompt = parts
         .map((p) => ('text' in p ? p.text : ''))
@@ -2717,6 +2895,7 @@ You must respond strictly with a valid JSON object matching this schema:
 
       const tutorSystemInstruction = `${systemInstruction}\n\nCRITICAL JSON FORMAT REQUIREMENT:\nYou must respond strictly with a valid JSON object matching this schema: {"reply": "Markdown tutoring lesson", "topicTitle": "3 to 6 word topic title", "subjectArea": "Academic subject", "currentStageLabel": "Stage label", "advanceStep": true}`;
       const tutorUserPrompt = `${textPrompt}\n\nRespond with a valid JSON object containing "reply", "topicTitle", "subjectArea", "currentStageLabel", and "advanceStep".`;
+      const maxTokens = rag.useStructuredLessonPlan ? 3200 : 2500;
 
       let tutorJsonText = '';
       if (!hasImage) {
@@ -2724,8 +2903,9 @@ You must respond strictly with a valid JSON object matching this schema:
           systemInstruction: tutorSystemInstruction,
           userPrompt: tutorUserPrompt,
           jsonMode: true,
-          maxTokens: 2500,
+          maxTokens,
           geminiFallback: async () => {
+            const ai = getGeminiClient();
             const { result: response } = await runWithGeminiModel(
               (model, signal) =>
                 ai.models.generateContent({
@@ -2779,6 +2959,7 @@ You must respond strictly with a valid JSON object matching this schema:
         });
         tutorJsonText = resAI.text;
       } else {
+        const ai = getGeminiClient();
         const { result: response } = await runWithGeminiModel(
           (model, signal) =>
             ai.models.generateContent({
@@ -2852,6 +3033,16 @@ You must respond strictly with a valid JSON object matching this schema:
           parsed.currentStageLabel || 'Guided Concept Exploration'
         ).trim(),
         advanceStep: Boolean(parsed.advanceStep),
+        sources: rag.sources,
+        ragMeta: {
+          pedagogicalAction: rag.pedagogicalAction,
+          useStructuredLessonPlan: rag.useStructuredLessonPlan,
+          knowledgeSource: rag.knowledgeSource,
+          searchedDocumentsCount: rag.searchedDocumentsCount,
+          passagesRetrieved: rag.sources.length,
+          totalRawDocumentChars: rag.totalRawDocumentChars,
+          injectedPassageChars: rag.injectedPassageChars,
+        },
       });
     } catch (err: unknown) {
       return sendSafeApiError(res, 'ai.tutor', err);
@@ -2883,8 +3074,10 @@ You must respond strictly with a valid JSON object matching this schema:
     });
 
     try {
-      const { parts, systemInstruction, currentTopic } = buildAiTutorParts(req.body || {});
-      const ai = getGeminiClient();
+      const { parts, systemInstruction, currentTopic, rag } = await buildAiTutorParts(
+        req.body || {},
+        req.headers.authorization
+      );
       const hasImage = parts.some((p) => 'inlineData' in p);
       const textPrompt = parts
         .map((p) => ('text' in p ? p.text : ''))
@@ -2892,15 +3085,29 @@ You must respond strictly with a valid JSON object matching this schema:
         .join('\n\n');
 
       const streamInstruction = `${systemInstruction}\n\nOUTPUT FORMAT REQUIREMENT:\nWrite your full Markdown tutoring response directly first. Then on a brand-new final line at the very end, append exactly one metadata marker in this exact format (single-line valid JSON, no code fences):\n[[TUTOR_META:{"topicTitle":"3 to 6 word topic title","subjectArea":"Academic Discipline","currentStageLabel":"Current Stage Label","advanceStep":true}]]`;
+      const maxTokens = rag.useStructuredLessonPlan ? 3200 : 2500;
+
+      const ragMeta = {
+        pedagogicalAction: rag.pedagogicalAction,
+        useStructuredLessonPlan: rag.useStructuredLessonPlan,
+        knowledgeSource: rag.knowledgeSource,
+        searchedDocumentsCount: rag.searchedDocumentsCount,
+        passagesRetrieved: rag.sources.length,
+        totalRawDocumentChars: rag.totalRawDocumentChars,
+        injectedPassageChars: rag.injectedPassageChars,
+      };
 
       initSseResponse(res);
+      writeSseEvent(res, 'sources', {
+        sources: rag.sources,
+        ragMeta,
+      });
       heartbeat = setInterval(() => {
         if (!clientClosed && !res.writableEnded) {
           res.write(': keepalive\n\n');
         }
       }, 4000);
 
-      const model = getGeminiModel();
       const META_PREFIX = '[[TUTOR_META:';
       let fullText = '';
       let emittedLength = 0;
@@ -2929,9 +3136,11 @@ You must respond strictly with a valid JSON object matching this schema:
           await runMasterAiStream({
             systemInstruction: streamInstruction,
             userPrompt: textPrompt,
-            maxTokens: 2500,
+            maxTokens,
             onChunk: onChunkCallback,
             geminiFallback: async () => {
+              const ai = getGeminiClient();
+              const model = getGeminiModel();
               const { iterator, firstResult } = await openStreamAndPullFirstChunk(
                 (signal) =>
                   ai.models.generateContentStream({
@@ -2959,6 +3168,8 @@ You must respond strictly with a valid JSON object matching this schema:
           });
         } else {
           resetStallTimer(60000);
+          const ai = getGeminiClient();
+          const model = getGeminiModel();
           const { iterator, firstResult } = await openStreamAndPullFirstChunk(
             (signal) =>
               ai.models.generateContentStream({
@@ -3014,6 +3225,8 @@ You must respond strictly with a valid JSON object matching this schema:
             meta.currentStageLabel || 'Guided Concept Exploration'
           ).trim(),
           advanceStep: Boolean(meta.advanceStep),
+          sources: rag.sources,
+          ragMeta,
         });
         res.end();
       }

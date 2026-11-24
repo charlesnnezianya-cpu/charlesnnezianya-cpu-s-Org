@@ -9,9 +9,11 @@ import {
 export interface SseStreamOptions<TDone> {
   url: string;
   body: Record<string, unknown>;
+  headers?: Record<string, string>;
   signal?: AbortSignal;
   idleTimeoutMs?: number;
   onChunk: (delta: string, accumulated: string) => void;
+  onSources?: (payload: Record<string, unknown>) => void;
   onStart?: () => void;
   fallbackErrorMessage: string;
   contextAction?: string;
@@ -20,9 +22,11 @@ export interface SseStreamOptions<TDone> {
 export async function postSseStream<TDone>({
   url,
   body,
+  headers,
   signal,
   idleTimeoutMs = 75000,
   onChunk,
+  onSources,
   onStart,
   fallbackErrorMessage,
   contextAction = 'communicating with the AI service',
@@ -104,6 +108,7 @@ export async function postSseStream<TDone>({
       headers: {
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
+        ...(headers || {}),
       },
       body: JSON.stringify(body),
       signal: internalController.signal,
@@ -167,7 +172,9 @@ export async function postSseStream<TDone>({
         return;
       }
 
-      if (eventName === 'chunk') {
+      if (eventName === 'sources') {
+        onSources?.(parsed);
+      } else if (eventName === 'chunk') {
         const delta = typeof parsed.delta === 'string' ? parsed.delta : '';
         if (delta) {
           latestAccumulated += delta;

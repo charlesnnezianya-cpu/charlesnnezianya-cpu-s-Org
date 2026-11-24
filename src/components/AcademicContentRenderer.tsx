@@ -371,18 +371,35 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
       if (trimmed.startsWith('> ')) {
         flushParagraph(seed);
         flushList(seed);
-        const rawQuote = trimmed.slice(2).replace(/^\[!(KEY|NOTE|TIP)\]\s*/i, '');
+        const rawQuote = trimmed.slice(2).replace(/^\[!(KEY|NOTE|TIP|EXAMPLE|CHECK)\]\s*/i, '');
+        const isExample =
+          /^(?:\*\*|__)?(worked example|example|analogy|application|real-world example)\b/i.test(
+            rawQuote
+          ) || /^\[!EXAMPLE\]/i.test(trimmed.slice(2));
+        const isKnowledgeCheck =
+          /^(?:\*\*|__)?(knowledge check|check your understanding|practice question|quick check)\b/i.test(
+            rawQuote
+          ) || /^\[!CHECK\]/i.test(trimmed.slice(2));
+        const isSourceNote =
+          /^(?:\*\*|__)?source note\b/i.test(rawQuote);
         const isKeyTakeaway =
           /key (concept|takeaway|idea|formula)|important|remember/i.test(rawQuote) ||
           /^\[!(KEY|NOTE|TIP)\]/i.test(trimmed.slice(2));
+
+        const blockStyle = isExample
+          ? 'border-emerald-200 bg-emerald-50/65 text-slate-900 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-slate-100'
+          : isKnowledgeCheck
+            ? 'border-amber-200 bg-amber-50/75 text-slate-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-slate-100'
+            : isSourceNote
+              ? 'border-slate-200 bg-slate-100/70 text-slate-700 dark:border-slate-700 dark:bg-slate-800/50 dark:text-slate-300'
+              : isKeyTakeaway
+                ? 'border-sky-200 bg-sky-50/80 text-slate-900 dark:border-sky-800/70 dark:bg-sky-950/35 dark:text-slate-100'
+                : 'border-blue-200/80 bg-blue-50/70 text-slate-800 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-slate-200';
+
         elements.push(
           <blockquote
             key={`bq-${seed}`}
-            className={`my-2 rounded-xl border px-3.5 py-2.5 text-sm leading-relaxed ${
-              isKeyTakeaway
-                ? 'border-sky-200 bg-sky-50/80 text-slate-900 dark:border-sky-800/70 dark:bg-sky-950/35 dark:text-slate-100'
-                : 'border-blue-200/80 bg-blue-50/70 text-slate-800 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-slate-200'
-            }`}
+            className={`my-2.5 rounded-xl border px-3.5 py-2.5 text-sm leading-relaxed ${blockStyle}`}
           >
             {renderInlineSegments(rawQuote, `bq-${seed}`)}
           </blockquote>

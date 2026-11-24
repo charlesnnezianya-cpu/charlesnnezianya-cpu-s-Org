@@ -171,9 +171,19 @@ export function chunkDocumentText(
   return chunks;
 }
 
+function lightStem(word: string): string {
+  if (word.length <= 4) return word;
+  return word
+    .replace(/(?:ization|ation|ition|ement|ment|ness|ance|ence|able|ible|ally|ing|ied|ies|ed|es|s)$/i, '');
+}
+
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
- * Keyword-based retrieval function using TF-IDF / overlap scoring.
- * Accepts a document ID, student question, and authorization userId,
+ * Keyword-based retrieval function using TF-IDF / BM25-style overlap scoring.
+ * Accepts a student question, indexed chunks, authorization userId, and optional documentId,
  * returning the most relevant passages with source references.
  */
 export function retrieveRelevantPassages(
@@ -184,45 +194,109 @@ export function retrieveRelevantPassages(
   topK = 3
 ): RetrievalResult[] {
   const cleanQ = normalizeText(question).toLowerCase();
-  if (!cleanQ || chunks.length === 0) return [];
+  if (!cleanQ || chunks.length === 0 || !authUserId) return [];
 
-  const qKeywords = extractKeywords(cleanQ, 10);
-  const qTerms = new Set(qKeywords);
+  const qKeywords = extractKeywords(cleanQ, 12);
+  const qTermsSet = new Set(qKeywords);
   const qWords = cleanQ.match(/\b[a-z0-9][a-z0-9'-]{2,}\b/g) || [];
+  const orderedQueryTerms: string[] = [];
   for (const w of qWords) {
-    if (!STOP_WORDS.has(w)) qTerms.add(w);
+    if (!STOP_WORDS.has(w)) {
+      qTermsSet.add(w);
+      orderedQueryTerms.push(w);
+    }
+  }
+
+  const qTerms = Array.from(qTermsSet);
+  if (qTerms.length === 0) return [];
+
+  // Enforce User/Document Authorization Isolation before corpus scoring
+  const eligibleChunks = chunks.filter(
+    (chunk) =>
+      chunk.userId === authUserId &&
+      (!targetDocumentId || chunk.documentId === targetDocumentId)
+  );
+  if (eligibleChunks.length === 0) return [];
+
+  // Build bigrams for multi-word concept matching (e.g. "calvin cycle", "proton gradient")
+  const queryBigrams: string[] = [];
+  for (let i = 0; i < orderedQueryTerms.length - 1; i++) {
+    queryBigrams.push(`${orderedQueryTerms[i]} ${orderedQueryTerms[i + 1]}`);
+  }
+
+  // Compute Document Frequency (df) across eligible chunks for smooth IDF weighting
+  const totalDocs = eligibleChunks.length;
+  const termDf = new Map<string, number>();
+  const lowerTexts = eligibleChunks.map((c) => c.originalText.toLowerCase());
+
+  for (const term of qTerms) {
+    const stem = lightStem(term);
+    let df = 0;
+    for (let i = 0; i < eligibleChunks.length; i++) {
+      const chunk = eligibleChunks[i];
+      const textLower = lowerTexts[i];
+      if (
+        chunk.keywords.includes(term) ||
+        textLower.includes(term) ||
+        (stem.length >= 5 && textLower.includes(stem))
+      ) {
+        df++;
+      }
+    }
+    termDf.set(term, df);
   }
 
   const results: RetrievalResult[] = [];
 
-  for (const chunk of chunks) {
-    // Enforce User/Document Authorization Isolation
-    if (chunk.userId !== authUserId) continue;
-    if (targetDocumentId && chunk.documentId !== targetDocumentId) continue;
-
-    const chunkTextLower = chunk.originalText.toLowerCase();
+  for (let i = 0; i < eligibleChunks.length; i++) {
+    const chunk = eligibleChunks[i];
+    const chunkTextLower = lowerTexts[i];
     const matchedKeywords: string[] = [];
     let matchScore = 0;
 
     for (const term of qTerms) {
+      const df = termDf.get(term) || 0;
+      if (df === 0) continue;
+
+      // Smooth IDF: always positive (>= 0.28), rewards rarer distinctive terms
+      const idf = Math.log(1 + (totalDocs - df + 0.5) / (df + 0.5));
+      const wordRegex = new RegExp(`\\b${escapeRegExp(term)}\\b`, 'g');
+      const exactMatches = chunkTextLower.match(wordRegex);
+      const tf = exactMatches ? exactMatches.length : 0;
+
       if (chunk.keywords.includes(term)) {
-        matchScore += 3.5;
+        const tfWeight = tf > 0 ? (tf * 2.2) / (tf + 1.2) : 1.0;
+        matchScore += (2.8 + tfWeight) * idf;
         matchedKeywords.push(term);
-      } else if (chunkTextLower.includes(term)) {
-        matchScore += 1.0;
+      } else if (tf > 0) {
+        const tfWeight = (tf * 2.2) / (tf + 1.2);
+        matchScore += 1.6 * tfWeight * idf;
         matchedKeywords.push(term);
+      } else {
+        const stem = lightStem(term);
+        if (stem.length >= 5 && chunkTextLower.includes(stem)) {
+          matchScore += 0.95 * idf;
+          matchedKeywords.push(term);
+        }
+      }
+    }
+
+    // Multi-word bigram bonus
+    for (const bigram of queryBigrams) {
+      if (chunkTextLower.includes(bigram)) {
+        matchScore += 1.8;
       }
     }
 
     // Exact phrase / substring bonus
-    if (chunkTextLower.includes(cleanQ)) {
-      matchScore += 5.0;
+    if (cleanQ.length >= 6 && chunkTextLower.includes(cleanQ)) {
+      matchScore += 4.5;
     }
 
     if (matchScore > 0) {
       results.push({
         chunk,
-        score: matchScore,
+        score: Number(matchScore.toFixed(4)),
         matchedKeywords: Array.from(new Set(matchedKeywords)),
       });
     }

@@ -24,6 +24,7 @@ import {
   createAiSession,
   deleteAiSession,
   getMaterialSignedUrl,
+  getOptionalAccessToken,
   isSupabaseConfigured,
   listAiMessages,
   listAiSessions,
@@ -35,11 +36,13 @@ import {
 import type {
   AiMessageRecord,
   AiSessionRecord,
+  ChatRetrievedSource,
   ImageActionType,
   SnapImageAttachment,
   StudyMaterialRecord,
   StudySummaryRecord,
   TutorMode,
+  TutorRagMeta,
 } from '../types/brainstine';
 import {
   hasSubjectVisualMatch,
@@ -84,8 +87,12 @@ const TUTOR_MODES: { id: TutorMode; label: string; description: string }[] = [
 
 const INTERACTIVE_TUTOR_PROMPTS: { label: string; command: string }[] = [
   {
-    label: 'Teach from beginning',
-    command: 'Teach me this topic from the beginning, starting with Step 1.',
+    label: 'Start guided lesson',
+    command: 'Start a full guided lesson on this topic from the beginning using clear steps.',
+  },
+  {
+    label: 'Continue lesson',
+    command: 'Continue our lesson seamlessly from where we stopped and teach the next step.',
   },
   {
     label: 'Explain like a beginner',
@@ -102,6 +109,10 @@ const INTERACTIVE_TUTOR_PROMPTS: { label: string; command: string }[] = [
   {
     label: 'Test my understanding',
     command: 'Ask me a practice question to test my understanding of what we just covered.',
+  },
+  {
+    label: 'Summarize lesson',
+    command: 'Summarize what we have covered so far with key points and terms.',
   },
   {
     label: 'Make it easier',
@@ -163,6 +174,14 @@ export function AiTutorWorkspace({
   const [pendingImage, setPendingImage] = useState<SnapImageAttachment | null>(null);
   const [activeSessionImage, setActiveSessionImage] = useState<SnapImageAttachment | null>(null);
   const [signedImageUrls, setSignedImageUrls] = useState<Record<string, string>>({});
+  const [messageRagById, setMessageRagById] = useState<
+    Record<string, { sources: ChatRetrievedSource[]; ragMeta?: TutorRagMeta }>
+  >({});
+  const [streamingRag, setStreamingRag] = useState<{
+    sources: ChatRetrievedSource[];
+    ragMeta?: TutorRagMeta;
+  } | null>(null);
+  const [expandedSourceKey, setExpandedSourceKey] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const inFlightRef = useRef(false);
@@ -208,6 +227,7 @@ export function AiTutorWorkspace({
       const mat = materials.find((m) => m.id === selectedMaterialId);
       if (mat) {
         return {
+          id: mat.id,
           title: mat.title,
           type: `Uploaded ${mat.material_type.toUpperCase()} Material`,
           content: mat.extracted_text,
@@ -218,6 +238,7 @@ export function AiTutorWorkspace({
       const sum = summaries.find((s) => s.id === selectedSummaryId);
       if (sum) {
         return {
+          id: sum.id,
           title: sum.title,
           type: 'Saved Study Summary',
           content: sum.markdown_content,
@@ -226,6 +247,18 @@ export function AiTutorWorkspace({
     }
     return null;
   }, [materials, summaries, selectedMaterialId, selectedSummaryId]);
+
+  useEffect(() => {
+    if (selectedMaterialId && !materials.some((m) => m.id === selectedMaterialId)) {
+      setSelectedMaterialId(null);
+    }
+  }, [materials, selectedMaterialId]);
+
+  useEffect(() => {
+    if (selectedSummaryId && !summaries.some((s) => s.id === selectedSummaryId)) {
+      setSelectedSummaryId(null);
+    }
+  }, [summaries, selectedSummaryId]);
 
   const loadSessions = useCallback(async () => {
     if (!user || !isSupabaseConfigured) {
@@ -303,6 +336,9 @@ export function AiTutorWorkspace({
     setInputText('');
     setPendingImage(null);
     setActiveSessionImage(null);
+    setMessageRagById({});
+    setStreamingRag(null);
+    setExpandedSourceKey(null);
     setError(null);
     setHistoryOpen(false);
   };
@@ -328,6 +364,9 @@ export function AiTutorWorkspace({
     setSelectedSummaryId(session.attached_summary_id);
     setPendingImage(null);
     setActiveSessionImage(null);
+    setMessageRagById({});
+    setStreamingRag(null);
+    setExpandedSourceKey(null);
     setError(null);
     setHistoryOpen(false);
 
@@ -448,6 +487,7 @@ export function AiTutorWorkspace({
     setError(null);
     setSending(true);
     setStreamingContent('');
+    setStreamingRag(null);
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
@@ -491,15 +531,33 @@ export function AiTutorWorkspace({
 
     setMessages((prev) => [...prev, tempUserMsg]);
 
+    let latestSources: ChatRetrievedSource[] = [];
+    let latestRagMeta: TutorRagMeta | undefined;
+
     try {
+      const accessToken = isSupabaseConfigured ? await getOptionalAccessToken() : null;
+      const localFallbackMaterials =
+        !accessToken && !activeDocumentContext && materials.length > 0
+          ? materials.slice(0, 12).map((m) => ({
+              id: m.id,
+              userId: m.user_id,
+              title: m.title,
+              materialType: m.material_type,
+              extractedText: m.extracted_text,
+            }))
+          : undefined;
+
       const data = await postSseStream<{
         reply: string;
         topicTitle?: string;
         subjectArea?: string;
         currentStageLabel?: string;
         advanceStep?: boolean;
+        sources?: ChatRetrievedSource[];
+        ragMeta?: TutorRagMeta;
       }>({
         url: '/api/ai/tutor/stream',
+        headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
         body: {
           message: cleanText,
           history: historyForApi,
@@ -508,6 +566,9 @@ export function AiTutorWorkspace({
           currentStep: tutorStep,
           quickAction: options?.quickAction,
           documentContext: activeDocumentContext,
+          attachedDocumentId: selectedMaterialId || selectedSummaryId || null,
+          userId: user?.id || null,
+          studyMaterials: localFallbackMaterials,
           image: imageToSend
             ? { data: imageToSend.base64, mimeType: imageToSend.mimeType }
             : null,
@@ -518,10 +579,22 @@ export function AiTutorWorkspace({
         fallbackErrorMessage:
           'Unable to get a response from Personal AI Tutor. Your message has been preserved—please try again.',
         contextAction: 'contacting Personal AI Tutor',
+        onSources: (payload) => {
+          const incomingSources = Array.isArray(payload.sources)
+            ? (payload.sources as ChatRetrievedSource[])
+            : [];
+          const incomingMeta = payload.ragMeta as TutorRagMeta | undefined;
+          latestSources = incomingSources;
+          latestRagMeta = incomingMeta;
+          setStreamingRag({ sources: incomingSources, ragMeta: incomingMeta });
+        },
         onChunk: (_delta, accumulated) => {
           setStreamingContent(accumulated);
         },
       });
+
+      const finalSources = Array.isArray(data.sources) ? data.sources : latestSources;
+      const finalRagMeta = data.ragMeta ?? latestRagMeta;
 
       const replyText: string = data.reply || '';
       const nextTopic: string = data.topicTitle || currentTopic || 'Tutoring Session';
@@ -534,6 +607,7 @@ export function AiTutorWorkspace({
       setStageLabel(nextStage);
       setTutorStep(nextStep);
       setStreamingContent('');
+      setStreamingRag(null);
 
       let resolvedSessionId = activeSessionId;
       let uploadedImagePath: string | null = null;
@@ -633,9 +707,16 @@ export function AiTutorWorkspace({
             { ...savedUserMsg, localPreviewUrl: outgoingImage?.previewUrl },
             savedAssistantMsg,
           ]);
+          if (finalSources.length > 0 || finalRagMeta) {
+            setMessageRagById((prev) => ({
+              ...prev,
+              [savedAssistantMsg.id]: { sources: finalSources, ragMeta: finalRagMeta },
+            }));
+          }
         } catch (persistErr: unknown) {
+          const localId = `local-tutor-ai-${Date.now()}`;
           const localAssistantMsg: AiMessageRecord = {
-            id: `local-tutor-ai-${Date.now()}`,
+            id: localId,
             session_id: resolvedSessionId || 'local',
             user_id: user.id,
             role: 'assistant',
@@ -646,6 +727,12 @@ export function AiTutorWorkspace({
             created_at: new Date().toISOString(),
           };
           setMessages((prev) => [...prev, localAssistantMsg]);
+          if (finalSources.length > 0 || finalRagMeta) {
+            setMessageRagById((prev) => ({
+              ...prev,
+              [localId]: { sources: finalSources, ragMeta: finalRagMeta },
+            }));
+          }
           setError(
             `Lesson step generated, but could not save to your history right now: ${sanitizeUserErrorMessage(
               persistErr,
@@ -654,8 +741,9 @@ export function AiTutorWorkspace({
           );
         }
       } else {
+        const localId = `local-tutor-ai-${Date.now()}`;
         const localAssistantMsg: AiMessageRecord = {
-          id: `local-tutor-ai-${Date.now()}`,
+          id: localId,
           session_id: 'local',
           user_id: 'local',
           role: 'assistant',
@@ -666,6 +754,12 @@ export function AiTutorWorkspace({
           created_at: new Date().toISOString(),
         };
         setMessages((prev) => [...prev, localAssistantMsg]);
+        if (finalSources.length > 0 || finalRagMeta) {
+          setMessageRagById((prev) => ({
+            ...prev,
+            [localId]: { sources: finalSources, ragMeta: finalRagMeta },
+          }));
+        }
       }
     } catch (err: unknown) {
       if ((err as { name?: string })?.name === 'AbortError' && controller.signal.aborted) {
@@ -685,6 +779,7 @@ export function AiTutorWorkspace({
       if (abortControllerRef.current === controller) {
         abortControllerRef.current = null;
         setStreamingContent('');
+        setStreamingRag(null);
         setSending(false);
         inFlightRef.current = false;
       }
@@ -1108,7 +1203,73 @@ export function AiTutorWorkspace({
                           {msg.content}
                         </p>
                       ) : (
-                        <AcademicContentRenderer content={msg.content} />
+                        <>
+                          <AcademicContentRenderer content={msg.content} />
+                          {(() => {
+                            const ragInfo = messageRagById[msg.id];
+                            if (!ragInfo) return null;
+                            if (ragInfo.sources.length > 0) {
+                              return (
+                                <div className="mt-3 border-t border-slate-200/80 pt-2.5 dark:border-slate-800">
+                                  <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                                    <BookOpen className="h-3 w-3 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
+                                    <span>Study Material References</span>
+                                  </p>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {ragInfo.sources.map((src, sIdx) => {
+                                      const srcKey = `${msg.id}-${src.documentId}-${src.chunkPosition}-${sIdx}`;
+                                      const isExpanded = expandedSourceKey === srcKey;
+                                      return (
+                                        <button
+                                          key={srcKey}
+                                          type="button"
+                                          onClick={() =>
+                                            setExpandedSourceKey(isExpanded ? null : srcKey)
+                                          }
+                                          className="inline-flex min-h-8 sm:min-h-7 items-center gap-1.5 rounded-lg border border-blue-200/80 bg-blue-50/70 px-2.5 py-1 text-left text-[11px] font-medium text-blue-900 transition-colors hover:bg-blue-100/80 dark:border-cyan-800/70 dark:bg-cyan-950/35 dark:text-cyan-200 dark:hover:bg-cyan-900/40"
+                                        >
+                                          <FileText className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                          <span className="max-w-[14rem] truncate">
+                                            {src.documentTitle}
+                                          </span>
+                                          {src.pageNumber !== null && (
+                                            <span className="shrink-0 font-semibold">
+                                              · Page {src.pageNumber}
+                                            </span>
+                                          )}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                  {ragInfo.sources.map((src, sIdx) => {
+                                    const srcKey = `${msg.id}-${src.documentId}-${src.chunkPosition}-${sIdx}`;
+                                    if (expandedSourceKey !== srcKey) return null;
+                                    return (
+                                      <div
+                                        key={`${srcKey}-preview`}
+                                        className="mt-2 rounded-lg border border-slate-200 bg-white/90 px-3 py-2 text-xs leading-relaxed text-slate-700 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-300"
+                                      >
+                                        <p className="mb-1 text-[11px] font-semibold text-slate-900 dark:text-white">
+                                          {src.documentTitle}
+                                          {src.pageNumber !== null ? ` · Page ${src.pageNumber}` : ''}
+                                        </p>
+                                        <p className="italic">“{src.excerpt}”</p>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              );
+                            }
+                            if ((ragInfo.ragMeta?.searchedDocumentsCount ?? 0) > 0) {
+                              return (
+                                <p className="mt-3 border-t border-slate-200/80 pt-2 text-[11px] text-slate-500 dark:border-slate-800 dark:text-slate-400">
+                                  General academic knowledge · No matching excerpt found in your uploaded study materials
+                                </p>
+                              );
+                            }
+                            return null;
+                          })()}
+                        </>
                       )}
                     </div>
 
@@ -1151,6 +1312,20 @@ export function AiTutorWorkspace({
                       </span>
                     </div>
                     <AcademicContentRenderer content={streamingContent} />
+                    {streamingRag && streamingRag.sources.length > 0 && (
+                      <div className="mt-3 border-t border-slate-200/80 pt-2 dark:border-slate-800">
+                        <p className="text-[11px] font-medium text-slate-600 dark:text-slate-300">
+                          Using study references:{' '}
+                          {streamingRag.sources
+                            .map((s) =>
+                              s.pageNumber !== null
+                                ? `${s.documentTitle} (Page ${s.pageNumber})`
+                                : s.documentTitle
+                            )
+                            .join(' · ')}
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </div>
               ) : sending ? (
@@ -1187,14 +1362,32 @@ export function AiTutorWorkspace({
             </div>
           )}
 
-          {/* 7 Interactive Tutoring Controls */}
+          {/* Interactive Tutoring Controls */}
           <div className="mb-2.5 flex flex-nowrap items-center gap-1.5 overflow-x-auto pb-1 select-none sm:flex-wrap sm:overflow-visible sm:pb-0">
-            {INTERACTIVE_TUTOR_PROMPTS.map((item) => (
+            {INTERACTIVE_TUTOR_PROMPTS.filter((item) =>
+              messages.length === 0
+                ? item.label === 'Start guided lesson' || item.label === 'Explain like a beginner'
+                : true
+            ).map((item) => (
               <button
                 key={item.label}
                 type="button"
                 disabled={sending}
                 onClick={() => {
+                  const typedTopic = inputText.trim();
+                  if (
+                    messages.length === 0 &&
+                    !typedTopic &&
+                    !activeDocumentContext &&
+                    !pendingImage &&
+                    !activeSessionImage
+                  ) {
+                    setError(
+                      'Enter a topic below, link a study material, or pick a topic starter above to begin your guided lesson.'
+                    );
+                    return;
+                  }
+
                   let overrideMode: TutorMode | undefined;
                   if (item.label === 'Explain like a beginner' || item.label === 'Make it easier') {
                     overrideMode = 'beginner';
@@ -1203,8 +1396,25 @@ export function AiTutorWorkspace({
                     overrideMode = 'standard';
                     handleModeChange('standard');
                   }
+
+                  let commandText = item.command;
+                  if (messages.length === 0) {
+                    if (typedTopic) {
+                      commandText =
+                        item.label === 'Explain like a beginner'
+                          ? `Teach me ${typedTopic} like a complete beginner using a simple analogy.`
+                          : `Start a full guided lesson on ${typedTopic} from the beginning using clear steps.`;
+                      setInputText('');
+                    } else if (activeDocumentContext) {
+                      commandText =
+                        item.label === 'Explain like a beginner'
+                          ? `Teach me "${activeDocumentContext.title}" like a complete beginner using a simple analogy.`
+                          : `Start a full guided lesson on "${activeDocumentContext.title}" from the beginning using clear steps.`;
+                    }
+                  }
+
                   sendTutorTurn({
-                    overrideText: item.command,
+                    overrideText: commandText,
                     quickAction: item.label,
                     overrideMode,
                   });

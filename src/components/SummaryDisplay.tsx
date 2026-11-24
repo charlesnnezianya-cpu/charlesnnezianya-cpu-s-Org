@@ -245,6 +245,16 @@ export function SummaryDisplay({
             <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-slate-500 select-none dark:text-slate-400">
               <span className="text-blue-700 dark:text-cyan-400">{summary.subjectArea}</span>
               <span aria-hidden="true">·</span>
+              <span
+                className={`font-semibold ${
+                  summary.generationMode === 'extractive'
+                    ? 'text-emerald-700 dark:text-emerald-400'
+                    : 'text-indigo-700 dark:text-indigo-300'
+                }`}
+              >
+                {summary.generationMode === 'extractive' ? 'Extractive Summary' : 'AI Summary'}
+              </span>
+              <span aria-hidden="true">·</span>
               <span>{LEVEL_LABELS[summary.summaryLevel]}</span>
               <span aria-hidden="true">·</span>
               <span className="font-mono tabular-nums">
@@ -329,7 +339,27 @@ export function SummaryDisplay({
         {/* Attribution Legend */}
         <div className="border-b border-slate-200 bg-slate-50/70 px-4 py-2.5 text-xs text-slate-600 select-none sm:px-6 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400">
           <span className="font-semibold text-slate-800 dark:text-slate-200">Source Provenance: </span>
-          Direct source extractions are labeled <span className="font-semibold text-blue-700 dark:text-cyan-400">From Source Material</span>; supplemental conceptual explanations are labeled <span className="font-semibold text-indigo-700 dark:text-indigo-400">AI Clarification</span>.
+          {summary.generationMode === 'extractive' ? (
+            <>
+              <span className="font-semibold text-emerald-700 dark:text-emerald-400">
+                Extractive Summary Mode
+              </span>{' '}
+              — all key points, definitions, terminology, and page references are extracted directly
+              from your uploaded study material without generative AI rewriting.
+            </>
+          ) : (
+            <>
+              Direct source extractions are labeled{' '}
+              <span className="font-semibold text-blue-700 dark:text-cyan-400">
+                From Source Material
+              </span>
+              ; supplemental conceptual explanations are labeled{' '}
+              <span className="font-semibold text-indigo-700 dark:text-indigo-400">
+                AI Clarification
+              </span>
+              .
+            </>
+          )}
         </div>
 
         {/* Illustrated Digital Textbook Subject Cover */}

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  BookOpen,
   Check,
   Copy,
   FileText,
@@ -32,6 +33,7 @@ import {
   createAiSession,
   deleteAiSession,
   getMaterialSignedUrl,
+  getOptionalAccessToken,
   isSupabaseConfigured,
   listAiMessages,
   listAiSessions,
@@ -43,6 +45,8 @@ import {
 import type {
   AiMessageRecord,
   AiSessionRecord,
+  ChatRagMeta,
+  ChatRetrievedSource,
   ImageActionType,
   SnapImageAttachment,
   StudyMaterialRecord,
@@ -123,6 +127,16 @@ export function AiChatWorkspace({
   const [activeSessionImage, setActiveSessionImage] = useState<SnapImageAttachment | null>(null);
   const [signedImageUrls, setSignedImageUrls] = useState<Record<string, string>>({});
 
+  // RAG Source References per message (in-memory for active session turns)
+  const [messageRagById, setMessageRagById] = useState<
+    Record<string, { sources: ChatRetrievedSource[]; ragMeta?: ChatRagMeta }>
+  >({});
+  const [streamingRag, setStreamingRag] = useState<{
+    sources: ChatRetrievedSource[];
+    ragMeta?: ChatRagMeta;
+  } | null>(null);
+  const [expandedSourceKey, setExpandedSourceKey] = useState<string | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const inFlightRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -172,6 +186,7 @@ export function AiChatWorkspace({
       const mat = materials.find((m) => m.id === selectedMaterialId);
       if (mat) {
         return {
+          id: mat.id,
           title: mat.title,
           type: `Uploaded ${mat.material_type.toUpperCase()} Material`,
           content: mat.extracted_text,
@@ -182,6 +197,7 @@ export function AiChatWorkspace({
       const sum = summaries.find((s) => s.id === selectedSummaryId);
       if (sum) {
         return {
+          id: sum.id,
           title: sum.title,
           type: 'Saved Study Summary',
           content: sum.markdown_content,
@@ -190,6 +206,18 @@ export function AiChatWorkspace({
     }
     return null;
   }, [materials, summaries, selectedMaterialId, selectedSummaryId]);
+
+  useEffect(() => {
+    if (selectedMaterialId && !materials.some((m) => m.id === selectedMaterialId)) {
+      setSelectedMaterialId(null);
+    }
+  }, [materials, selectedMaterialId]);
+
+  useEffect(() => {
+    if (selectedSummaryId && !summaries.some((s) => s.id === selectedSummaryId)) {
+      setSelectedSummaryId(null);
+    }
+  }, [summaries, selectedSummaryId]);
 
   const loadSessions = useCallback(async () => {
     if (!user || !isSupabaseConfigured) {
@@ -267,6 +295,8 @@ export function AiChatWorkspace({
     inFlightRef.current = false;
     setSending(false);
     setStreamingContent('');
+    setStreamingRag(null);
+    setExpandedSourceKey(null);
     activeSessionIdRef.current = session.id;
     setActiveSessionId(session.id);
     setSelectedMaterialId(session.attached_material_id);
@@ -313,6 +343,9 @@ export function AiChatWorkspace({
     inFlightRef.current = false;
     setSending(false);
     setStreamingContent('');
+    setStreamingRag(null);
+    setExpandedSourceKey(null);
+    setMessageRagById({});
     setActiveSessionId(null);
     setMessages([]);
     setInputText('');
@@ -397,6 +430,7 @@ export function AiChatWorkspace({
     setError(null);
     setSending(true);
     setStreamingContent('');
+    setStreamingRag(null);
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
@@ -442,16 +476,34 @@ export function AiChatWorkspace({
     setMessages((prev) => [...prev, tempUserMsg]);
 
     try {
+      const accessToken = isSupabaseConfigured ? await getOptionalAccessToken() : null;
+      const fallbackLocalMaterials =
+        !accessToken && !activeDocumentContext && materials.length > 0
+          ? materials.slice(0, 10).map((m) => ({
+              id: m.id,
+              userId: m.user_id,
+              title: m.title,
+              materialType: m.material_type,
+              extractedText: m.extracted_text,
+            }))
+          : undefined;
+
       const data = await postSseStream<{
         reply: string;
         suggestedTitle?: string;
         subjectArea?: string;
+        sources?: ChatRetrievedSource[];
+        ragMeta?: ChatRagMeta;
       }>({
         url: '/api/ai/chat/stream',
+        headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
         body: {
           message: displayUserContent,
           history: historyForApi,
           documentContext: activeDocumentContext,
+          attachedDocumentId: selectedMaterialId || selectedSummaryId || null,
+          userId: user?.id || null,
+          ...(fallbackLocalMaterials ? { studyMaterials: fallbackLocalMaterials } : {}),
           image: imageToSend
             ? { data: imageToSend.base64, mimeType: imageToSend.mimeType }
             : null,
@@ -464,6 +516,13 @@ export function AiChatWorkspace({
         fallbackErrorMessage:
           'Unable to get a response from AI Academic Chat. Your message has been preserved—please try again.',
         contextAction: 'generating an AI Academic Chat response',
+        onSources: (payload) => {
+          const srcs = Array.isArray(payload.sources)
+            ? (payload.sources as ChatRetrievedSource[])
+            : [];
+          const meta = (payload.ragMeta as ChatRagMeta | undefined) || undefined;
+          setStreamingRag({ sources: srcs, ragMeta: meta });
+        },
         onChunk: (_delta, accumulated) => {
           setStreamingContent(accumulated);
         },
@@ -472,7 +531,10 @@ export function AiChatWorkspace({
       const assistantReply: string = data.reply || '';
       const suggestedTitle: string | undefined = data.suggestedTitle;
       const subjectArea: string | undefined = data.subjectArea;
+      const finalSources: ChatRetrievedSource[] = Array.isArray(data.sources) ? data.sources : [];
+      const finalRagMeta: ChatRagMeta | undefined = data.ragMeta;
       setStreamingContent('');
+      setStreamingRag(null);
 
       let resolvedSessionId = activeSessionId;
       let uploadedImagePath: string | null = null;
@@ -564,9 +626,16 @@ export function AiChatWorkspace({
             { ...savedUserMsg, localPreviewUrl: outgoingImage?.previewUrl },
             savedAssistantMsg,
           ]);
+          if (finalSources.length > 0 || finalRagMeta) {
+            setMessageRagById((prev) => ({
+              ...prev,
+              [savedAssistantMsg.id]: { sources: finalSources, ragMeta: finalRagMeta },
+            }));
+          }
         } catch (persistErr: unknown) {
+          const localId = `local-ai-${Date.now()}`;
           const localAssistantMsg: AiMessageRecord = {
-            id: `local-ai-${Date.now()}`,
+            id: localId,
             session_id: resolvedSessionId || 'local',
             user_id: user.id,
             role: 'assistant',
@@ -577,6 +646,12 @@ export function AiChatWorkspace({
             created_at: new Date().toISOString(),
           };
           setMessages((prev) => [...prev, localAssistantMsg]);
+          if (finalSources.length > 0 || finalRagMeta) {
+            setMessageRagById((prev) => ({
+              ...prev,
+              [localId]: { sources: finalSources, ragMeta: finalRagMeta },
+            }));
+          }
           setError(
             `Response generated, but could not save to your history right now: ${sanitizeUserErrorMessage(
               persistErr,
@@ -585,8 +660,9 @@ export function AiChatWorkspace({
           );
         }
       } else {
+        const localId = `local-ai-${Date.now()}`;
         const localAssistantMsg: AiMessageRecord = {
-          id: `local-ai-${Date.now()}`,
+          id: localId,
           session_id: 'local',
           user_id: 'local',
           role: 'assistant',
@@ -597,6 +673,12 @@ export function AiChatWorkspace({
           created_at: new Date().toISOString(),
         };
         setMessages((prev) => [...prev, localAssistantMsg]);
+        if (finalSources.length > 0 || finalRagMeta) {
+          setMessageRagById((prev) => ({
+            ...prev,
+            [localId]: { sources: finalSources, ragMeta: finalRagMeta },
+          }));
+        }
       }
     } catch (err: unknown) {
       if ((err as { name?: string })?.name === 'AbortError' && controller.signal.aborted) {
@@ -616,6 +698,7 @@ export function AiChatWorkspace({
       if (abortControllerRef.current === controller) {
         abortControllerRef.current = null;
         setStreamingContent('');
+        setStreamingRag(null);
         setSending(false);
         inFlightRef.current = false;
       }
@@ -974,7 +1057,73 @@ export function AiChatWorkspace({
                           {msg.content}
                         </p>
                       ) : (
-                        <AcademicContentRenderer content={msg.content} />
+                        <>
+                          <AcademicContentRenderer content={msg.content} />
+                          {(() => {
+                            const ragInfo = messageRagById[msg.id];
+                            if (!ragInfo) return null;
+                            if (ragInfo.sources.length > 0) {
+                              return (
+                                <div className="mt-3 border-t border-slate-200/80 pt-2.5 dark:border-slate-800">
+                                  <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                                    <BookOpen className="h-3 w-3 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
+                                    <span>Study Material References</span>
+                                  </p>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {ragInfo.sources.map((src, sIdx) => {
+                                      const srcKey = `${msg.id}-${src.documentId}-${src.chunkPosition}-${sIdx}`;
+                                      const isExpanded = expandedSourceKey === srcKey;
+                                      return (
+                                        <button
+                                          key={srcKey}
+                                          type="button"
+                                          onClick={() =>
+                                            setExpandedSourceKey(isExpanded ? null : srcKey)
+                                          }
+                                          className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200/80 bg-blue-50/70 px-2.5 py-1 text-left text-[11px] font-medium text-blue-900 transition-colors hover:bg-blue-100/80 dark:border-cyan-800/70 dark:bg-cyan-950/35 dark:text-cyan-200 dark:hover:bg-cyan-900/40"
+                                        >
+                                          <FileText className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                          <span className="max-w-[14rem] truncate">
+                                            {src.documentTitle}
+                                          </span>
+                                          {src.pageNumber !== null && (
+                                            <span className="shrink-0 font-semibold">
+                                              · Page {src.pageNumber}
+                                            </span>
+                                          )}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                  {ragInfo.sources.map((src, sIdx) => {
+                                    const srcKey = `${msg.id}-${src.documentId}-${src.chunkPosition}-${sIdx}`;
+                                    if (expandedSourceKey !== srcKey) return null;
+                                    return (
+                                      <div
+                                        key={`${srcKey}-preview`}
+                                        className="mt-2 rounded-lg border border-slate-200 bg-white/90 px-3 py-2 text-xs leading-relaxed text-slate-700 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-300"
+                                      >
+                                        <p className="mb-1 text-[11px] font-semibold text-slate-900 dark:text-white">
+                                          {src.documentTitle}
+                                          {src.pageNumber !== null ? ` · Page ${src.pageNumber}` : ''}
+                                        </p>
+                                        <p className="italic">“{src.excerpt}”</p>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              );
+                            }
+                            if ((ragInfo.ragMeta?.searchedDocumentsCount ?? 0) > 0) {
+                              return (
+                                <p className="mt-3 border-t border-slate-200/80 pt-2 text-[11px] text-slate-500 dark:border-slate-800 dark:text-slate-400">
+                                  General academic knowledge · No matching excerpt found in your uploaded study materials
+                                </p>
+                              );
+                            }
+                            return null;
+                          })()}
+                        </>
                       )}
                     </div>
 
@@ -1131,6 +1280,21 @@ export function AiChatWorkspace({
                       </span>
                     </div>
                     <AcademicContentRenderer content={streamingContent} />
+                    {streamingRag && streamingRag.sources.length > 0 && (
+                      <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-slate-200/80 pt-2 text-[11px] text-slate-600 dark:border-slate-800 dark:text-slate-300">
+                        <BookOpen className="h-3 w-3 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
+                        <span className="font-semibold">Referencing:</span>
+                        {streamingRag.sources.map((src, sIdx) => (
+                          <span
+                            key={`stream-src-${sIdx}`}
+                            className="rounded-md border border-blue-200/80 bg-blue-50/70 px-2 py-0.5 text-[11px] text-blue-900 dark:border-cyan-800/70 dark:bg-cyan-950/35 dark:text-cyan-200"
+                          >
+                            {src.documentTitle}
+                            {src.pageNumber !== null ? ` · Page ${src.pageNumber}` : ''}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               ) : sending ? (
