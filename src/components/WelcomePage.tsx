@@ -241,7 +241,7 @@ export function WelcomePage({ onOpenAuth, onNavigateToPrivacy }: WelcomePageProp
                   AI Quiz &amp; Exam Maker
                 </h3>
                 <p className="mt-2 text-sm leading-relaxed text-slate-600 dark:text-slate-300 academic-selectable">
-                  Generate 5 to 70 objective, theory, or mixed questions in Practice or
+                  Generate 5 to 70 objective multiple-choice questions in Practice or
                   timed Exam mode with instant grading and full answer explanations.
                 </p>
               </article>
