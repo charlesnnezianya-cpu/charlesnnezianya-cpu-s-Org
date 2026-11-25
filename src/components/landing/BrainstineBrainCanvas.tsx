@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
   createBrainstineSceneObjects,
   updateBrainstineAnimation,
@@ -129,12 +128,8 @@ export default function BrainstineBrainCanvas({
     const camera = new THREE.PerspectiveCamera(40, width / height, 0.1, 45);
     camera.position.set(-1.1, 0.35, 2.2);
 
-    // PBR Environment Reflections for sculpted glass-cortex surfaces
-    const pmremGenerator = new THREE.PMREMGenerator(renderer);
-    const roomEnvironment = new RoomEnvironment();
-    const envTarget = pmremGenerator.fromScene(roomEnvironment, 0.04);
-    scene.environment = envTarget.texture;
-    scene.environmentIntensity = 0.85;
+    // Studio Neuroscience Lighting Rig provides sufficient illumination
+    scene.environment = null;
 
     // Cinematic Studio Neuroscience Lighting Rig
     const hemiLight = new THREE.HemisphereLight(0x93c5fd, 0x050914, 0.65);
@@ -366,9 +361,6 @@ export default function BrainstineBrainCanvas({
       resizeObserver.disconnect();
 
       sceneObjects.dispose();
-      envTarget.dispose();
-      roomEnvironment.dispose();
-      pmremGenerator.dispose();
       renderer.dispose();
       if (canvas.parentElement === container) {
         container.removeChild(canvas);
