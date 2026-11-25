@@ -1,5 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { formatClientApiError, parseApiJsonResponse, resolveApiUrl } from '../lib/apiClient';
+import React, { useState } from 'react';
 import {
   AlertCircle,
   BookmarkCheck,
@@ -9,22 +8,15 @@ import {
   ChevronUp,
   Copy,
   FileDown,
-  HelpCircle,
-  Lightbulb,
   ListChecks,
-  Loader2,
-  Send,
-  Sparkles,
 } from 'lucide-react';
 import { exportSummaryToPdf } from '../lib/pdfExport';
-import type { FollowUpItem, StructuredSummary, SummaryLevel } from '../types/brainstine';
+import type { StructuredSummary, SummaryLevel } from '../types/brainstine';
 import { EducationalDiagramRenderer } from './EducationalDiagramRenderer';
-import { SubjectVisualBanner } from './SubjectVisualBanner';
+import { ScientificText } from './ScientificText';
 
 interface SummaryDisplayProps {
   summary: StructuredSummary;
-  sourceText?: string;
-  geminiConfigured?: boolean;
   onSave?: () => Promise<void> | void;
   isSaving?: boolean;
   isSaved?: boolean;
@@ -39,37 +31,41 @@ const LEVEL_LABELS: Record<SummaryLevel, string> = {
 
 type SectionKey =
   | 'overview'
-  | 'diagrams'
   | 'concepts'
-  | 'comparisons'
   | 'definitions'
-  | 'terminology'
-  | 'difficult'
+  | 'processes'
+  | 'formulas'
   | 'facts'
   | 'examples'
-  | 'formulas'
+  | 'distinctions'
+  | 'terminology'
+  | 'recap'
+  | 'comparisons'
+  | 'diagrams'
+  | 'difficult'
   | 'revision'
   | 'takeaways';
 
 const ALL_SECTIONS: SectionKey[] = [
   'overview',
-  'diagrams',
   'concepts',
-  'comparisons',
   'definitions',
-  'terminology',
-  'difficult',
+  'processes',
+  'formulas',
   'facts',
   'examples',
-  'formulas',
+  'distinctions',
+  'terminology',
+  'recap',
+  'comparisons',
+  'diagrams',
+  'difficult',
   'revision',
   'takeaways',
 ];
 
 export function SummaryDisplay({
   summary,
-  sourceText,
-  geminiConfigured = true,
   onSave,
   isSaving = false,
   isSaved = false,
@@ -78,30 +74,21 @@ export function SummaryDisplay({
   const [copied, setCopied] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>({
     overview: true,
-    diagrams: true,
     concepts: true,
-    comparisons: true,
     definitions: true,
-    terminology: true,
-    difficult: true,
+    processes: true,
+    formulas: true,
     facts: true,
     examples: true,
-    formulas: true,
+    distinctions: true,
+    terminology: true,
+    recap: true,
+    comparisons: true,
+    diagrams: true,
+    difficult: true,
     revision: true,
     takeaways: true,
   });
-
-  const [followUps, setFollowUps] = useState<FollowUpItem[]>([]);
-  const [questionInput, setQuestionInput] = useState('');
-  const [followUpLoading, setFollowUpLoading] = useState(false);
-  const [followUpError, setFollowUpError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setFollowUps([]);
-    setQuestionInput('');
-    setFollowUpError(null);
-    setFollowUpLoading(false);
-  }, [summary]);
 
   const allExpanded = ALL_SECTIONS.every((key) => expandedSections[key]);
 
@@ -128,100 +115,22 @@ export function SummaryDisplay({
     }
   };
 
-  const followUpRef = useRef(false);
-
-  const runFollowUp = async (
-    actionType: 'question' | 'simpler_explanation' | 'examples' | 'revision_notes',
-    customQuestion?: string
-  ) => {
-    if (followUpRef.current) return;
-    setFollowUpError(null);
-    if (!geminiConfigured) {
-      setFollowUpError(
-        'Brainstine is temporarily unavailable. Please try again shortly.'
-      );
-      return;
-    }
-    if (actionType === 'question' && (!customQuestion || !customQuestion.trim())) {
-      setFollowUpError('Please type a follow-up question first.');
-      return;
-    }
-
-    followUpRef.current = true;
-    setFollowUpLoading(true);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 75000);
-    try {
-      const res = await fetch(resolveApiUrl('/api/summaries/followup'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
-        body: JSON.stringify({
-          actionType,
-          question: customQuestion?.trim(),
-          summary,
-          sourceText,
-        }),
-      });
-      const data = await parseApiJsonResponse<{ fromSource: string; aiExplanation: string }>(
-        res,
-        'answering your follow-up request'
-      );
-
-      const labelMap = {
-        question: 'Follow-Up Question',
-        simpler_explanation: 'Simpler Explanation',
-        examples: 'Additional Examples',
-        revision_notes: 'Focused Revision Notes',
-      };
-
-      const item: FollowUpItem = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        promptLabel: labelMap[actionType],
-        question:
-          actionType === 'question'
-            ? customQuestion!.trim()
-            : labelMap[actionType],
-        fromSource: data.fromSource,
-        aiExplanation: data.aiExplanation,
-        createdAt: new Date().toISOString(),
-      };
-
-      setFollowUps((prev) => [item, ...prev]);
-      if (actionType === 'question') {
-        setQuestionInput('');
-      }
-    } catch (err: unknown) {
-      setFollowUpError(
-        formatClientApiError(
-          err,
-          'processing your follow-up request',
-          'Follow-up request timed out. Please try again in a moment.'
-        )
-      );
-    } finally {
-      clearTimeout(timer);
-      followUpRef.current = false;
-      setFollowUpLoading(false);
-    }
-  };
-
-  const renderSectionHeader = (key: SectionKey, title: string, originHint?: string) => {
+  const renderSectionHeader = (key: SectionKey, title: string, count?: number) => {
     const isOpen = expandedSections[key];
     return (
       <button
         type="button"
         onClick={() => toggleSection(key)}
         aria-expanded={isOpen}
-        className="flex min-h-11 w-full items-center justify-between gap-4 py-3.5 text-left select-none sm:py-4"
+        className="flex min-h-11 w-full items-center justify-between gap-4 py-3 text-left select-none sm:py-3.5"
       >
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex items-baseline gap-2">
           <h3 className="font-display text-sm font-semibold tracking-wide text-slate-900 dark:text-white">
             {title}
           </h3>
-          {originHint && (
-            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
-              · {originHint}
+          {typeof count === 'number' && count > 0 && (
+            <span className="font-mono text-[11px] text-slate-400 tabular-nums dark:text-slate-500">
+              {count}
             </span>
           )}
         </div>
@@ -236,647 +145,556 @@ export function SummaryDisplay({
     );
   };
 
+  const processes = summary.processesAndMechanisms ?? [];
+  const distinctions = summary.importantDistinctions ?? [];
+  const finalRecap = summary.finalRecap ?? [];
+  const comparisons = summary.comparisonTables ?? [];
+  const diagrams = summary.visualDiagrams ?? [];
+
   return (
-    <div className="space-y-6">
-      <article className="rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0D162B]">
-        {/* Header & Primary Export/Save Controls */}
-        <div className="flex flex-col justify-between gap-4 border-b border-slate-200 px-4 py-5 sm:px-6 lg:flex-row lg:items-start dark:border-slate-800">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-slate-500 select-none dark:text-slate-400">
-              <span className="text-blue-700 dark:text-cyan-400">{summary.subjectArea}</span>
-              <span aria-hidden="true">·</span>
-              <span
-                className={`font-semibold ${
-                  summary.generationMode === 'extractive'
-                    ? 'text-emerald-700 dark:text-emerald-400'
-                    : 'text-indigo-700 dark:text-indigo-300'
-                }`}
-              >
-                {summary.generationMode === 'extractive' ? 'Extractive Summary' : 'AI Summary'}
-              </span>
-              <span aria-hidden="true">·</span>
-              <span>{LEVEL_LABELS[summary.summaryLevel]}</span>
-              <span aria-hidden="true">·</span>
-              <span className="font-mono tabular-nums">
-                {summary.wordCount.toLocaleString()} source words
-              </span>
-              {summary.chunkCount > 1 && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span className="font-mono tabular-nums">{summary.chunkCount} chunks</span>
-                </>
-              )}
-            </div>
-            <h2 className="mt-1.5 font-display text-xl font-bold tracking-tight text-slate-900 academic-selectable sm:text-2xl dark:text-white">
-              {summary.title}
-            </h2>
+    <article className="rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0D162B]">
+      {/* Compact Document Header & Actions */}
+      <header className="flex flex-col justify-between gap-4 border-b border-slate-200 px-4 py-5 sm:px-6 lg:flex-row lg:items-start dark:border-slate-800">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-medium text-slate-500 select-none dark:text-slate-400">
+            <span className="font-semibold text-blue-700 dark:text-cyan-400">
+              {summary.subjectArea}
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>Document Summary</span>
+            <span aria-hidden="true">·</span>
+            <span>{LEVEL_LABELS[summary.summaryLevel]}</span>
+            <span aria-hidden="true">·</span>
+            <span className="font-mono tabular-nums">
+              {summary.wordCount.toLocaleString()} source words
+            </span>
           </div>
-
-          <div className="flex flex-wrap items-center gap-2 shrink-0 select-none">
-            <button
-              type="button"
-              onClick={toggleAllSections}
-              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              {allExpanded ? 'Collapse All' : 'Expand All'}
-            </button>
-
-            <button
-              type="button"
-              onClick={handleCopySummary}
-              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              {copied ? (
-                <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
-              ) : (
-                <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-              )}
-              <span>{copied ? 'Copied' : 'Copy'}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => exportSummaryToPdf(summary)}
-              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              <FileDown className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Export PDF</span>
-            </button>
-
-            {onSave && (
-              <button
-                type="button"
-                onClick={onSave}
-                disabled={isSaving || isSaved}
-                className={`inline-flex min-h-10 items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 sm:min-h-8 ${
-                  isSaved
-                    ? 'border border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300'
-                    : 'bg-[#0F1E3D] text-white hover:bg-[#192F5D] disabled:opacity-60 dark:bg-blue-600 dark:hover:bg-blue-500'
-                }`}
-              >
-                {isSaved ? (
-                  <BookmarkCheck className="h-3.5 w-3.5" aria-hidden="true" />
-                ) : (
-                  <BookmarkPlus className="h-3.5 w-3.5" aria-hidden="true" />
-                )}
-                <span>{isSaved ? 'Saved' : isSaving ? 'Saving...' : 'Save Summary'}</span>
-              </button>
-            )}
-
-            {onCreateQuizFromSummary && (
-              <button
-                type="button"
-                onClick={onCreateQuizFromSummary}
-                className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-800 transition-colors hover:bg-blue-100 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-blue-900/60 dark:bg-blue-950/50 dark:text-cyan-300 dark:hover:bg-blue-950"
-              >
-                <ListChecks className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>Test Myself</span>
-              </button>
-            )}
-          </div>
+          <h2 className="mt-1.5 font-display text-xl font-bold tracking-tight text-slate-900 academic-selectable sm:text-2xl dark:text-white">
+            <ScientificText text={summary.title} />
+          </h2>
         </div>
 
-        {/* Attribution Legend */}
-        <div className="border-b border-slate-200 bg-slate-50/70 px-4 py-2.5 text-xs text-slate-600 select-none sm:px-6 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400">
-          <span className="font-semibold text-slate-800 dark:text-slate-200">Source Provenance: </span>
-          {summary.generationMode === 'extractive' ? (
-            <>
-              <span className="font-semibold text-emerald-700 dark:text-emerald-400">
-                Extractive Summary Mode
-              </span>{' '}
-              — all key points, definitions, terminology, and page references are extracted directly
-              from your uploaded study material without generative AI rewriting.
-            </>
-          ) : (
-            <>
-              Direct source extractions are labeled{' '}
-              <span className="font-semibold text-blue-700 dark:text-cyan-400">
-                From Source Material
-              </span>
-              ; supplemental conceptual explanations are labeled{' '}
-              <span className="font-semibold text-indigo-700 dark:text-indigo-400">
-                AI Clarification
-              </span>
-              .
-            </>
+        <div className="flex flex-wrap items-center gap-2 shrink-0 select-none">
+          <button
+            type="button"
+            onClick={toggleAllSections}
+            className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            {allExpanded ? 'Collapse All' : 'Expand All'}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleCopySummary}
+            className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            {copied ? (
+              <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+            <span>{copied ? 'Copied' : 'Copy'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => exportSummaryToPdf(summary)}
+            className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            <FileDown className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Export PDF</span>
+          </button>
+
+          {onSave && (
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={isSaving || isSaved}
+              className={`inline-flex min-h-10 items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 sm:min-h-8 ${
+                isSaved
+                  ? 'border border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300'
+                  : 'bg-[#0F1E3D] text-white hover:bg-[#192F5D] disabled:opacity-60 dark:bg-blue-600 dark:hover:bg-blue-500'
+              }`}
+            >
+              {isSaved ? (
+                <BookmarkCheck className="h-3.5 w-3.5" aria-hidden="true" />
+              ) : (
+                <BookmarkPlus className="h-3.5 w-3.5" aria-hidden="true" />
+              )}
+              <span>{isSaved ? 'Saved' : isSaving ? 'Saving...' : 'Save Summary'}</span>
+            </button>
+          )}
+
+          {onCreateQuizFromSummary && (
+            <button
+              type="button"
+              onClick={onCreateQuizFromSummary}
+              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-800 transition-colors hover:bg-blue-100 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-blue-900/60 dark:bg-blue-950/50 dark:text-cyan-300 dark:hover:bg-blue-950"
+            >
+              <ListChecks className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Test Myself</span>
+            </button>
           )}
         </div>
+      </header>
 
-        {/* Illustrated Digital Textbook Subject Cover */}
-        <div className="px-4 pt-5 sm:px-6">
-          <SubjectVisualBanner
-            subjectHint={`${summary.subjectArea} ${summary.title}`}
-            fallbackKey="summarizer"
-            title={summary.title}
-            subtitle={summary.topicOverview}
-            variant="textbook"
-          />
+      {/* Honest Notice when source document is brief or fragmented */}
+      {summary.sourceNotice && (
+        <div className="flex items-start gap-2.5 border-b border-slate-200 bg-amber-50/70 px-4 py-3 text-xs text-amber-900 sm:px-6 dark:border-slate-800 dark:bg-amber-950/30 dark:text-amber-200">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+          <span>{summary.sourceNotice}</span>
         </div>
+      )}
 
-        {/* Collapsible Summary Sections */}
-        <div className="divide-y divide-slate-200 px-4 sm:px-6 dark:divide-slate-800">
-          {/* 1. Topic Overview */}
+      {/* Clean Inline Academic Document Body */}
+      <div className="divide-y divide-slate-200 px-4 sm:px-6 dark:divide-slate-800">
+        {/* 1. Topic Overview */}
+        {summary.topicOverview && (
           <section>
-            {renderSectionHeader('overview', 'Topic Overview', 'From Source Material')}
+            {renderSectionHeader('overview', 'Topic Overview')}
             {expandedSections.overview && (
-              <p className="pb-5 max-w-3xl text-base leading-relaxed text-slate-800 academic-selectable dark:text-slate-200">
-                {summary.topicOverview}
+              <p className="pb-4 max-w-3xl text-[15px] leading-relaxed text-slate-800 academic-selectable dark:text-slate-200">
+                <ScientificText text={summary.topicOverview} />
               </p>
             )}
           </section>
+        )}
 
-          {/* 1B. Visual Diagrams & Schematics */}
-          {(summary.visualDiagrams ?? []).length > 0 && (
-            <section>
-              {renderSectionHeader(
-                'diagrams',
-                'Visual Diagrams & Concept Maps',
-                'Interactive Visual Aids'
-              )}
-              {expandedSections.diagrams && (
-                <div className="space-y-4 pb-5">
-                  {(summary.visualDiagrams ?? []).map((diag, idx) => (
-                    <EducationalDiagramRenderer key={idx} spec={diag} />
-                  ))}
-                </div>
-              )}
-            </section>
-          )}
+        {/* 2. Main Concepts (Clean Inline Subsections) */}
+        {summary.mainConcepts.length > 0 && (
+          <section>
+            {renderSectionHeader('concepts', 'Main Concepts', summary.mainConcepts.length)}
+            {expandedSections.concepts && (
+              <div className="space-y-4 pb-5">
+                {summary.mainConcepts.map((concept, idx) => (
+                  <div key={idx}>
+                    <h4 className="font-display text-sm font-semibold text-slate-900 select-text dark:text-white">
+                      <span className="mr-2 font-mono text-xs text-blue-700 select-none tabular-nums dark:text-cyan-400">
+                        {String(idx + 1).padStart(2, '0')}.
+                      </span>
+                      <ScientificText text={concept.heading} />
+                    </h4>
 
-          {/* 2. Main Concepts Arranged Under Headings */}
-          {summary.mainConcepts.length > 0 && (
-            <section>
-              {renderSectionHeader('concepts', 'Main Concepts & Points', 'Structured by Heading')}
-              {expandedSections.concepts && (
-                <div className="divide-y divide-slate-100 pb-5 dark:divide-slate-800/80">
-                  {summary.mainConcepts.map((concept, idx) => (
-                    <div key={idx} className="py-4 first:pt-1 last:pb-0">
-                      <h4 className="font-display text-base font-semibold text-slate-900 select-text dark:text-white">
-                        <span className="mr-2 font-mono text-xs text-blue-700 select-none tabular-nums dark:text-cyan-400">
-                          {String(idx + 1).padStart(2, '0')}.
-                        </span>
-                        {concept.heading}
+                    {concept.sourcePoints.length > 0 && (
+                      <ul className="mt-1.5 space-y-1.5 pl-1">
+                        {concept.sourcePoints.map((pt, pIdx) => (
+                          <li
+                            key={pIdx}
+                            className="flex items-start gap-2.5 text-sm leading-relaxed text-slate-700 academic-selectable dark:text-slate-300"
+                          >
+                            <span
+                              className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-600 dark:bg-cyan-400"
+                              aria-hidden="true"
+                            />
+                            <span>
+                              <ScientificText text={pt} />
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+
+                    {/* Legacy saved summaries compatibility */}
+                    {concept.aiClarification && (
+                      <p className="mt-1.5 pl-4 text-xs leading-relaxed text-slate-600 italic academic-selectable dark:text-slate-400">
+                        <ScientificText text={concept.aiClarification} />
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* 3. Important Definitions (Clean Inline Term — Explanation list) */}
+        {summary.importantDefinitions.length > 0 && (
+          <section>
+            {renderSectionHeader(
+              'definitions',
+              'Important Definitions',
+              summary.importantDefinitions.length
+            )}
+            {expandedSections.definitions && (
+              <dl className="space-y-2.5 pb-5">
+                {summary.importantDefinitions.map((item, idx) => (
+                  <div
+                    key={idx}
+                    className="text-sm leading-relaxed text-slate-700 academic-selectable dark:text-slate-300"
+                  >
+                    <dt className="inline font-semibold text-slate-900 dark:text-white">
+                      <ScientificText text={item.term} />
+                    </dt>
+                    <span className="mx-1.5 text-slate-400" aria-hidden="true">
+                      —
+                    </span>
+                    <dd className="inline">
+                      <ScientificText text={item.definition} />
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+          </section>
+        )}
+
+        {/* 4. Processes & Mechanisms */}
+        {processes.length > 0 && (
+          <section>
+            {renderSectionHeader('processes', 'Processes & Mechanisms', processes.length)}
+            {expandedSections.processes && (
+              <div className="space-y-4 pb-5">
+                {processes.map((proc, idx) => (
+                  <div key={idx}>
+                    {processes.length > 1 && (
+                      <h4 className="mb-1.5 font-display text-sm font-semibold text-slate-900 dark:text-white">
+                        <ScientificText text={proc.heading} />
                       </h4>
+                    )}
+                    <ol className="space-y-1.5">
+                      {proc.steps.map((step, sIdx) => (
+                        <li
+                          key={sIdx}
+                          className="flex items-start gap-2.5 text-sm leading-relaxed text-slate-700 academic-selectable dark:text-slate-300"
+                        >
+                          <span className="mt-0.5 font-mono text-xs font-semibold text-blue-700 select-none tabular-nums dark:text-cyan-400">
+                            {sIdx + 1}.
+                          </span>
+                          <span>
+                            <ScientificText text={step} />
+                          </span>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
 
-                      {concept.sourcePoints.length > 0 && (
-                        <div className="mt-2.5">
-                          <p className="text-[11px] font-semibold tracking-wide text-blue-700 select-none dark:text-cyan-400">
-                            From Source Material
-                          </p>
-                          <ul className="mt-1.5 space-y-1.5">
-                            {concept.sourcePoints.map((pt, pIdx) => (
-                              <li
-                                key={pIdx}
-                                className="flex items-start gap-2.5 text-sm leading-relaxed text-slate-700 select-text dark:text-slate-300"
-                              >
-                                <span
-                                  className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-600 dark:bg-cyan-400"
-                                  aria-hidden="true"
-                                />
-                                <span>{pt}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-
-                      {concept.aiClarification && (
-                        <div className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50/50 p-3.5 dark:border-indigo-900/50 dark:bg-indigo-950/25">
-                          <p className="text-[11px] font-semibold tracking-wide text-indigo-700 select-none dark:text-indigo-300">
-                            AI Clarification
-                          </p>
-                          <p className="mt-1 text-sm leading-relaxed text-slate-700 select-text dark:text-slate-300">
-                            {concept.aiClarification}
-                          </p>
-                        </div>
-                      )}
+        {/* 5. Important Formulas & Equations (Compact equation strip, no cramped pill boxes) */}
+        {summary.formulasOrFrameworks.length > 0 && (
+          <section>
+            {renderSectionHeader(
+              'formulas',
+              'Important Formulas & Equations',
+              summary.formulasOrFrameworks.length
+            )}
+            {expandedSections.formulas && (
+              <div className="space-y-3 pb-5">
+                {summary.formulasOrFrameworks.map((formula, idx) => (
+                  <div
+                    key={idx}
+                    className="rounded-xl border border-slate-200/90 bg-slate-50/70 px-4 py-3 dark:border-slate-800 dark:bg-slate-900/50"
+                  >
+                    <div className="flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
+                      <span className="font-display text-xs font-semibold tracking-wide text-slate-600 select-text dark:text-slate-300">
+                        <ScientificText text={formula.name} />
+                      </span>
+                      <span className="font-sans text-base font-semibold tracking-wide text-slate-900 academic-selectable dark:text-cyan-300">
+                        <ScientificText text={formula.expressionOrStructure} />
+                      </span>
                     </div>
-                  ))}
-                </div>
-              )}
-            </section>
-          )}
+                    {formula.usage && (
+                      <p className="mt-1.5 text-xs leading-relaxed text-slate-600 academic-selectable dark:text-slate-400">
+                        <ScientificText text={formula.usage} />
+                      </p>
+                    )}
+                    {formula.variables && formula.variables.length > 0 && (
+                      <p className="mt-1.5 text-xs leading-relaxed text-slate-600 academic-selectable dark:text-slate-400">
+                        <span className="font-semibold text-slate-700 dark:text-slate-300">
+                          Variables:{' '}
+                        </span>
+                        {formula.variables.map((v, vIdx) => (
+                          <React.Fragment key={vIdx}>
+                            {vIdx > 0 && <span className="mx-1.5 text-slate-400">·</span>}
+                            <strong className="font-semibold text-slate-800 dark:text-slate-200">
+                              <ScientificText text={v.symbol} />
+                            </strong>
+                            {' = '}
+                            <ScientificText text={v.meaning} />
+                          </React.Fragment>
+                        ))}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
 
-          {/* 2B. Comparison Tables */}
-          {(summary.comparisonTables ?? []).length > 0 && (
-            <section>
-              {renderSectionHeader('comparisons', 'Comparison Tables', 'Structured Contrasts')}
-              {expandedSections.comparisons && (
-                <div className="space-y-5 pb-5">
-                  {(summary.comparisonTables ?? []).map((table, tIdx) => (
-                    <div
-                      key={tIdx}
-                      className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/50"
-                    >
-                      <div className="border-b border-slate-200 bg-slate-50/80 px-4 py-2.5 dark:border-slate-800 dark:bg-slate-900">
-                        <h4 className="font-display text-sm font-semibold text-slate-900 dark:text-white">
-                          {table.title}
-                        </h4>
-                      </div>
-                      <div className="overflow-x-auto">
-                        <table className="w-full min-w-[360px] border-collapse text-left text-xs sm:text-sm academic-selectable">
-                          <thead>
-                            <tr className="border-b border-slate-200 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/50">
-                              <th className="px-4 py-2.5 font-display text-xs font-semibold text-slate-900 dark:text-white">
-                                Criterion
+        {/* 6. Key Facts */}
+        {summary.importantFacts.length > 0 && (
+          <section>
+            {renderSectionHeader('facts', 'Key Facts', summary.importantFacts.length)}
+            {expandedSections.facts && (
+              <ul className="space-y-1.5 pb-5">
+                {summary.importantFacts.map((fact, idx) => (
+                  <li
+                    key={idx}
+                    className="flex items-start gap-2.5 text-sm leading-relaxed text-slate-700 academic-selectable dark:text-slate-300"
+                  >
+                    <span
+                      className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-600 dark:bg-cyan-400"
+                      aria-hidden="true"
+                    />
+                    <span>
+                      <ScientificText text={fact} />
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )}
+
+        {/* 7. Examples & Applications */}
+        {summary.relevantExamples.length > 0 && (
+          <section>
+            {renderSectionHeader(
+              'examples',
+              'Examples & Applications',
+              summary.relevantExamples.length
+            )}
+            {expandedSections.examples && (
+              <div className="space-y-2.5 pb-5">
+                {summary.relevantExamples.map((ex, idx) => (
+                  <p
+                    key={idx}
+                    className="text-sm leading-relaxed text-slate-700 academic-selectable dark:text-slate-300"
+                  >
+                    <strong className="font-semibold text-slate-900 dark:text-white">
+                      <ScientificText text={ex.title} />
+                    </strong>
+                    <span className="mx-1.5 text-slate-400" aria-hidden="true">
+                      —
+                    </span>
+                    <ScientificText text={ex.example} />
+                  </p>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* 8. Important Distinctions */}
+        {distinctions.length > 0 && (
+          <section>
+            {renderSectionHeader('distinctions', 'Important Distinctions', distinctions.length)}
+            {expandedSections.distinctions && (
+              <div className="space-y-2.5 pb-5">
+                {distinctions.map((item, idx) => (
+                  <div
+                    key={idx}
+                    className="rounded-xl border border-slate-200/80 bg-slate-50/60 px-3.5 py-2.5 text-sm leading-relaxed text-slate-700 academic-selectable dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300"
+                  >
+                    <span className="font-display font-semibold text-slate-900 dark:text-white">
+                      <ScientificText text={item.pairTitle} />
+                      {': '}
+                    </span>
+                    <ScientificText text={item.comparison} />
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* 9. Key Terminology (Clean inline list separated by middot) */}
+        {summary.keyTerminology.length > 0 && (
+          <section>
+            {renderSectionHeader('terminology', 'Key Terminology', summary.keyTerminology.length)}
+            {expandedSections.terminology && (
+              <p className="pb-5 text-sm leading-relaxed text-slate-700 academic-selectable dark:text-slate-300">
+                {summary.keyTerminology.map((term, idx) => (
+                  <React.Fragment key={idx}>
+                    {idx > 0 && (
+                      <span className="mx-2 text-slate-400 select-none" aria-hidden="true">
+                        ·
+                      </span>
+                    )}
+                    <ScientificText text={term} />
+                  </React.Fragment>
+                ))}
+              </p>
+            )}
+          </section>
+        )}
+
+        {/* 10. Final Recap */}
+        {finalRecap.length > 0 && (
+          <section>
+            {renderSectionHeader('recap', 'Final Recap', finalRecap.length)}
+            {expandedSections.recap && (
+              <ol className="space-y-1.5 pb-5">
+                {finalRecap.map((item, idx) => (
+                  <li
+                    key={idx}
+                    className="flex items-start gap-2.5 text-sm leading-relaxed text-slate-800 academic-selectable dark:text-slate-200"
+                  >
+                    <span className="mt-0.5 font-mono text-xs font-semibold text-blue-700 select-none tabular-nums dark:text-cyan-400">
+                      {String(idx + 1).padStart(2, '0')}.
+                    </span>
+                    <span>
+                      <ScientificText text={item} />
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </section>
+        )}
+
+        {/* Legacy Saved Summary Support (only shown if legacy fields exist on older saved summaries) */}
+        {comparisons.length > 0 && (
+          <section>
+            {renderSectionHeader('comparisons', 'Comparison Tables', comparisons.length)}
+            {expandedSections.comparisons && (
+              <div className="space-y-4 pb-5">
+                {comparisons.map((table, tIdx) => (
+                  <div
+                    key={tIdx}
+                    className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/50"
+                  >
+                    <div className="border-b border-slate-200 bg-slate-50/80 px-4 py-2 dark:border-slate-800 dark:bg-slate-900">
+                      <h4 className="font-display text-xs font-semibold text-slate-900 dark:text-white">
+                        {table.title}
+                      </h4>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[360px] border-collapse text-left text-xs sm:text-sm academic-selectable">
+                        <thead>
+                          <tr className="border-b border-slate-200 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/50">
+                            <th className="px-4 py-2 font-display text-xs font-semibold text-slate-900 dark:text-white">
+                              Criterion
+                            </th>
+                            {table.headers.map((h, hIdx) => (
+                              <th
+                                key={hIdx}
+                                className="px-4 py-2 font-display text-xs font-semibold text-slate-900 dark:text-white"
+                              >
+                                {h}
                               </th>
-                              {table.headers.map((h, hIdx) => (
-                                <th
-                                  key={hIdx}
-                                  className="px-4 py-2.5 font-display text-xs font-semibold text-slate-900 dark:text-white"
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                          {table.rows.map((row, rIdx) => (
+                            <tr key={rIdx}>
+                              <td className="px-4 py-2 font-semibold text-slate-900 dark:text-slate-100">
+                                {row.criterion}
+                              </td>
+                              {row.values.map((val, vIdx) => (
+                                <td
+                                  key={vIdx}
+                                  className="px-4 py-2 text-slate-700 dark:text-slate-300"
                                 >
-                                  {h}
-                                </th>
+                                  <ScientificText text={val} />
+                                </td>
                               ))}
                             </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
-                            {table.rows.map((row, rIdx) => (
-                              <tr
-                                key={rIdx}
-                                className="odd:bg-white even:bg-slate-50/60 dark:odd:bg-transparent dark:even:bg-slate-800/20"
-                              >
-                                <td className="px-4 py-2.5 font-semibold text-slate-900 dark:text-slate-100">
-                                  {row.criterion}
-                                </td>
-                                {row.values.map((val, vIdx) => (
-                                  <td
-                                    key={vIdx}
-                                    className="px-4 py-2.5 text-slate-700 dark:text-slate-300"
-                                  >
-                                    {val}
-                                  </td>
-                                ))}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                      {table.caption && (
-                        <p className="border-t border-slate-200 bg-slate-50/50 px-4 py-2 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400">
-                          {table.caption}
-                        </p>
-                      )}
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
-                  ))}
-                </div>
-              )}
-            </section>
-          )}
-
-          {/* 3. Important Definitions */}
-          {summary.importantDefinitions.length > 0 && (
-            <section>
-              {renderSectionHeader('definitions', 'Important Definitions')}
-              {expandedSections.definitions && (
-                <dl className="grid grid-cols-1 gap-4 pb-5 sm:grid-cols-2">
-                  {summary.importantDefinitions.map((item, idx) => (
-                    <div
-                      key={idx}
-                      className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-900/50"
-                    >
-                      <div className="flex items-baseline justify-between gap-2">
-                        <dt className="font-display text-sm font-semibold text-slate-900 select-text dark:text-white">
-                          {item.term}
-                        </dt>
-                        <span
-                          className={`text-[11px] font-medium select-none shrink-0 ${
-                            item.origin === 'source'
-                              ? 'text-blue-700 dark:text-cyan-400'
-                              : 'text-indigo-700 dark:text-indigo-400'
-                          }`}
-                        >
-                          {item.origin === 'source' ? 'From Source' : 'AI Clarification'}
-                        </span>
-                      </div>
-                      <dd className="mt-1.5 text-sm leading-relaxed text-slate-600 select-text dark:text-slate-300">
-                        {item.definition}
-                      </dd>
-                    </div>
-                  ))}
-                </dl>
-              )}
-            </section>
-          )}
-
-          {/* 4. Key Terminology */}
-          {summary.keyTerminology.length > 0 && (
-            <section>
-              {renderSectionHeader('terminology', 'Key Terminology', 'From Source Material')}
-              {expandedSections.terminology && (
-                <p className="pb-5 text-sm leading-relaxed text-slate-700 select-text dark:text-slate-300">
-                  {summary.keyTerminology.join(' · ')}
-                </p>
-              )}
-            </section>
-          )}
-
-          {/* 5. Explanations of Difficult Concepts */}
-          {summary.difficultConceptExplanations.length > 0 && (
-            <section>
-              {renderSectionHeader(
-                'difficult',
-                'Explanations of Difficult Concepts',
-                'Source Context + AI Clarification'
-              )}
-              {expandedSections.difficult && (
-                <div className="space-y-4 pb-5">
-                  {summary.difficultConceptExplanations.map((item, idx) => (
-                    <div
-                      key={idx}
-                      className="rounded-xl border border-slate-200 bg-slate-50/60 p-4 dark:border-slate-800 dark:bg-slate-900/40"
-                    >
-                      <h4 className="font-display text-sm font-semibold text-slate-900 select-text dark:text-white">
-                        {item.concept}
-                      </h4>
-                      <p className="mt-2 text-xs leading-relaxed text-slate-600 select-text dark:text-slate-400">
-                        <span className="font-semibold text-blue-700 select-none dark:text-cyan-400">
-                          From Source Material:{' '}
-                        </span>
-                        {item.sourceContext}
-                      </p>
-                      <p className="mt-2 text-sm leading-relaxed text-slate-800 select-text dark:text-slate-200">
-                        <span className="font-semibold text-indigo-700 select-none dark:text-indigo-400">
-                          AI Clarification:{' '}
-                        </span>
-                        {item.plainExplanation}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-          )}
-
-          {/* 6. Important Facts */}
-          {summary.importantFacts.length > 0 && (
-            <section>
-              {renderSectionHeader('facts', 'Important Facts', 'From Source Material')}
-              {expandedSections.facts && (
-                <ul className="space-y-2 pb-5">
-                  {summary.importantFacts.map((fact, idx) => (
-                    <li
-                      key={idx}
-                      className="flex items-start gap-2.5 text-sm leading-relaxed text-slate-700 select-text dark:text-slate-300"
-                    >
-                      <span
-                        className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-600 dark:bg-cyan-400"
-                        aria-hidden="true"
-                      />
-                      <span>{fact}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-          )}
-
-          {/* 7. Relevant Examples */}
-          {summary.relevantExamples.length > 0 && (
-            <section>
-              {renderSectionHeader('examples', 'Relevant Examples')}
-              {expandedSections.examples && (
-                <div className="space-y-3 pb-5">
-                  {summary.relevantExamples.map((ex, idx) => (
-                    <div
-                      key={idx}
-                      className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-900/50"
-                    >
-                      <div className="flex items-baseline justify-between gap-2">
-                        <h4 className="font-display text-sm font-semibold text-slate-900 select-text dark:text-white">
-                          {ex.title}
-                        </h4>
-                        <span
-                          className={`text-[11px] font-medium select-none shrink-0 ${
-                            ex.origin === 'source'
-                              ? 'text-blue-700 dark:text-cyan-400'
-                              : 'text-indigo-700 dark:text-indigo-400'
-                          }`}
-                        >
-                          {ex.origin === 'source' ? 'From Source' : 'AI Elaboration'}
-                        </span>
-                      </div>
-                      <p className="mt-1.5 text-sm leading-relaxed text-slate-700 select-text dark:text-slate-300">
-                        {ex.example}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-          )}
-
-          {/* 8. Formulas or Frameworks */}
-          {summary.formulasOrFrameworks.length > 0 && (
-            <section>
-              {renderSectionHeader('formulas', 'Formulas, Equations & Frameworks')}
-              {expandedSections.formulas && (
-                <div className="space-y-3 pb-5">
-                  {summary.formulasOrFrameworks.map((formula, idx) => (
-                    <div
-                      key={idx}
-                      className="rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/60"
-                    >
-                      <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-center">
-                        <span className="font-display text-sm font-semibold text-slate-900 select-text dark:text-white">
-                          {formula.name}
-                        </span>
-                        <code className="max-w-full break-all rounded-md border border-slate-200 bg-white px-2.5 py-1 font-mono text-xs font-medium text-blue-800 select-text dark:border-slate-700 dark:bg-slate-950 dark:text-cyan-300">
-                          {formula.expressionOrStructure}
-                        </code>
-                      </div>
-                      <p className="mt-2 text-xs leading-relaxed text-slate-600 select-text dark:text-slate-400">
-                        {formula.usage}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-          )}
-
-          {/* 9. Revision Notes */}
-          {summary.revisionNotes.length > 0 && (
-            <section>
-              {renderSectionHeader('revision', 'Revision Notes')}
-              {expandedSections.revision && (
-                <ul className="space-y-2 pb-5">
-                  {summary.revisionNotes.map((note, idx) => (
-                    <li
-                      key={idx}
-                      className="flex items-start gap-2.5 text-sm leading-relaxed text-slate-700 select-text dark:text-slate-300"
-                    >
-                      <span className="font-mono text-xs font-semibold text-slate-400 select-none tabular-nums mt-0.5">
-                        {String(idx + 1).padStart(2, '0')}
-                      </span>
-                      <span>{note}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-          )}
-
-          {/* 10. Key Takeaways */}
-          {summary.keyTakeaways.length > 0 && (
-            <section>
-              {renderSectionHeader('takeaways', 'Key Takeaways')}
-              {expandedSections.takeaways && (
-                <div className="grid grid-cols-1 gap-3 pb-5 sm:grid-cols-2">
-                  {summary.keyTakeaways.map((takeaway, idx) => (
-                    <div
-                      key={idx}
-                      className="flex items-start gap-3 rounded-xl border border-sky-200/80 bg-sky-50/60 p-3.5 text-sm leading-relaxed text-slate-800 academic-selectable dark:border-sky-900/50 dark:bg-sky-950/30 dark:text-slate-200"
-                    >
-                      <span className="mt-0.5 font-mono text-xs font-bold text-[#1D4ED8] select-none tabular-nums dark:text-sky-400">
-                        {String(idx + 1).padStart(2, '0')}
-                      </span>
-                      <span>{takeaway}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-          )}
-        </div>
-      </article>
-
-      {/* Summary Interaction & Scoped Follow-up Panel */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
-        <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-4 sm:flex-row sm:items-center dark:border-slate-800">
-          <div>
-            <h3 className="font-display text-base font-bold text-slate-900 select-none dark:text-white">
-              Deepen Your Understanding
-            </h3>
-            <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400">
-              Ask a follow-up question on this summary, or request simpler explanations, examples,
-              or condensed revision notes.
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 select-none">
-            <button
-              type="button"
-              disabled={followUpLoading}
-              onClick={() => runFollowUp('simpler_explanation')}
-              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              <HelpCircle className="h-3.5 w-3.5 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
-              <span>Request Simpler Explanation</span>
-            </button>
-            <button
-              type="button"
-              disabled={followUpLoading}
-              onClick={() => runFollowUp('examples')}
-              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              <Lightbulb className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" aria-hidden="true" />
-              <span>Request Examples</span>
-            </button>
-            <button
-              type="button"
-              disabled={followUpLoading}
-              onClick={() => runFollowUp('revision_notes')}
-              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              <Sparkles className="h-3.5 w-3.5 text-blue-700 dark:text-blue-400" aria-hidden="true" />
-              <span>Generate Revision Notes</span>
-            </button>
-          </div>
-        </div>
-
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            runFollowUp('question', questionInput);
-          }}
-          className="mt-4 flex flex-col gap-2.5 sm:flex-row"
-        >
-          <label htmlFor="summary-followup-input" className="sr-only">
-            Ask a follow-up question about this summary
-          </label>
-          <input
-            id="summary-followup-input"
-            type="text"
-            value={questionInput}
-            onChange={(e) => setQuestionInput(e.target.value)}
-            placeholder="Ask a specific question about a concept, term, or step in this summary..."
-            className="min-h-11 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-          />
-          <button
-            type="submit"
-            disabled={followUpLoading || !questionInput.trim()}
-            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 whitespace-nowrap shrink-0 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
-          >
-            {followUpLoading ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                <span>Thinking...</span>
-              </>
-            ) : (
-              <>
-                <Send className="h-4 w-4" aria-hidden="true" />
-                <span>Ask Follow-up</span>
-              </>
-            )}
-          </button>
-        </form>
-
-        {followUpError && (
-          <div
-            role="alert"
-            className="mt-4 flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 p-3.5 text-sm text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200"
-          >
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
-            <span>{followUpError}</span>
-          </div>
-        )}
-
-        {followUps.length > 0 && (
-          <div className="mt-5 space-y-4">
-            {followUps.map((item) => (
-              <div
-                key={item.id}
-                className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-900/50"
-              >
-                <div className="flex items-center justify-between gap-2 text-xs text-slate-500 select-none dark:text-slate-400">
-                  <span className="font-semibold text-slate-800 dark:text-slate-200">
-                    {item.promptLabel}
-                  </span>
-                  <span className="font-mono tabular-nums">
-                    {new Date(item.createdAt).toLocaleTimeString([], {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}
-                  </span>
-                </div>
-                {item.promptLabel === 'Follow-Up Question' && (
-                  <p className="mt-1.5 text-sm font-medium text-slate-900 select-text dark:text-white">
-                    {item.question}
-                  </p>
-                )}
-                <div className="mt-3 space-y-2.5 border-t border-slate-200 pt-3 dark:border-slate-800">
-                  <div>
-                    <p className="text-[11px] font-semibold tracking-wide text-blue-700 select-none dark:text-cyan-400">
-                      From Source Material
-                    </p>
-                    <p className="mt-1 text-sm leading-relaxed text-slate-700 select-text dark:text-slate-300">
-                      {item.fromSource}
-                    </p>
                   </div>
-                  <div>
-                    <p className="text-[11px] font-semibold tracking-wide text-indigo-700 select-none dark:text-indigo-400">
-                      AI Clarification
-                    </p>
-                    <p className="mt-1 whitespace-pre-line text-sm leading-relaxed text-slate-800 select-text dark:text-slate-200">
-                      {item.aiExplanation}
-                    </p>
-                  </div>
-                </div>
+                ))}
               </div>
-            ))}
-          </div>
+            )}
+          </section>
         )}
-      </section>
-    </div>
+
+        {diagrams.length > 0 && (
+          <section>
+            {renderSectionHeader('diagrams', 'Diagrams & Schematics', diagrams.length)}
+            {expandedSections.diagrams && (
+              <div className="space-y-4 pb-5">
+                {diagrams.map((diag, idx) => (
+                  <EducationalDiagramRenderer key={idx} spec={diag} />
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {summary.difficultConceptExplanations.length > 0 && (
+          <section>
+            {renderSectionHeader(
+              'difficult',
+              'Concept Notes',
+              summary.difficultConceptExplanations.length
+            )}
+            {expandedSections.difficult && (
+              <div className="space-y-2.5 pb-5">
+                {summary.difficultConceptExplanations.map((item, idx) => (
+                  <div
+                    key={idx}
+                    className="text-sm leading-relaxed text-slate-700 academic-selectable dark:text-slate-300"
+                  >
+                    <strong className="font-semibold text-slate-900 dark:text-white">
+                      {item.concept}:{' '}
+                    </strong>
+                    <ScientificText text={item.sourceContext} />{' '}
+                    {item.plainExplanation && (
+                      <span className="text-slate-600 dark:text-slate-400">
+                        (<ScientificText text={item.plainExplanation} />)
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {finalRecap.length === 0 && summary.revisionNotes.length > 0 && (
+          <section>
+            {renderSectionHeader('revision', 'Revision Notes', summary.revisionNotes.length)}
+            {expandedSections.revision && (
+              <ul className="space-y-1.5 pb-5">
+                {summary.revisionNotes.map((note, idx) => (
+                  <li
+                    key={idx}
+                    className="flex items-start gap-2.5 text-sm leading-relaxed text-slate-700 academic-selectable dark:text-slate-300"
+                  >
+                    <span className="font-mono text-xs font-semibold text-slate-400 select-none tabular-nums mt-0.5">
+                      {String(idx + 1).padStart(2, '0')}.
+                    </span>
+                    <span>
+                      <ScientificText text={note} />
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )}
+
+        {finalRecap.length === 0 && summary.keyTakeaways.length > 0 && (
+          <section>
+            {renderSectionHeader('takeaways', 'Key Takeaways', summary.keyTakeaways.length)}
+            {expandedSections.takeaways && (
+              <ul className="space-y-1.5 pb-5">
+                {summary.keyTakeaways.map((takeaway, idx) => (
+                  <li
+                    key={idx}
+                    className="flex items-start gap-2.5 text-sm leading-relaxed text-slate-800 academic-selectable dark:text-slate-200"
+                  >
+                    <span className="font-mono text-xs font-bold text-[#1D4ED8] select-none tabular-nums mt-0.5 dark:text-sky-400">
+                      {String(idx + 1).padStart(2, '0')}.
+                    </span>
+                    <span>
+                      <ScientificText text={takeaway} />
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )}
+      </div>
+    </article>
   );
 }

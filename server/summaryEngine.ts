@@ -1,20 +1,137 @@
 import {
+  analyzeDocumentIntelligence,
+  attachPageCitation,
+  buildSectionClusterHeading,
+  contentTokens,
+  isRedundantAgainstPool,
+  normalizedFingerprint,
   normalizeText,
-  segmentParagraphs,
-  extractKeywords,
-  chunkDocumentText,
-  DocumentChunk,
+  stripBoilerplatePrefix,
+  tokenSimilarity,
+  type AnalyzedUnit,
 } from './documentEngine.ts';
-import type { StructuredSummary, SummaryLevel } from '../src/types/brainstine.ts';
+import { formatScientificText } from '../src/lib/scientificFormatter.ts';
+import type {
+  DefinitionTerm,
+  DistinctionItem,
+  FormulaOrFramework,
+  MainConceptSection,
+  ProcessMechanismGroup,
+  RelevantExample,
+  StructuredSummary,
+  SummaryLevel,
+} from '../src/types/brainstine.ts';
 
-interface ScoredSentence {
-  text: string;
-  score: number;
-  pageNumber: number | null;
+export function buildDocumentSummaryMarkdown(
+  summary: Omit<StructuredSummary, 'markdown'>
+): string {
+  const levelLabel =
+    summary.summaryLevel === 'short'
+      ? 'Short Summary'
+      : summary.summaryLevel === 'detailed'
+        ? 'Detailed Summary'
+        : 'Comprehensive Study Notes';
+
+  const lines: string[] = [
+    `# ${summary.title}`,
+    `**Subject:** ${summary.subjectArea} | **Format:** ${levelLabel} | **Source Length:** ${summary.wordCount.toLocaleString()} words`,
+    '',
+  ];
+
+  if (summary.sourceNotice) {
+    lines.push(`> ${summary.sourceNotice}`);
+    lines.push('');
+  }
+
+  lines.push('## Topic Overview', summary.topicOverview, '');
+
+  if (summary.mainConcepts.length > 0) {
+    lines.push('## Main Concepts');
+    for (const item of summary.mainConcepts) {
+      lines.push(`### ${item.heading}`);
+      for (const pt of item.sourcePoints) {
+        lines.push(`- ${pt}`);
+      }
+      lines.push('');
+    }
+  }
+
+  if (summary.importantDefinitions.length > 0) {
+    lines.push('## Important Definitions');
+    for (const def of summary.importantDefinitions) {
+      lines.push(`- **${def.term}** — ${def.definition}`);
+    }
+    lines.push('');
+  }
+
+  if (summary.processesAndMechanisms && summary.processesAndMechanisms.length > 0) {
+    lines.push('## Processes & Mechanisms');
+    for (const proc of summary.processesAndMechanisms) {
+      lines.push(`### ${proc.heading}`);
+      proc.steps.forEach((step, idx) => {
+        lines.push(`${idx + 1}. ${step}`);
+      });
+      lines.push('');
+    }
+  }
+
+  if (summary.formulasOrFrameworks.length > 0) {
+    lines.push('## Important Formulas & Equations');
+    for (const f of summary.formulasOrFrameworks) {
+      lines.push(`- **${f.name}:** ${f.expressionOrStructure} — ${f.usage}`);
+      if (f.variables && f.variables.length > 0) {
+        lines.push(
+          `  - Variables: ${f.variables.map((v) => `${v.symbol} = ${v.meaning}`).join('; ')}`
+        );
+      }
+    }
+    lines.push('');
+  }
+
+  if (summary.importantFacts.length > 0) {
+    lines.push('## Key Facts');
+    for (const fact of summary.importantFacts) {
+      lines.push(`- ${fact}`);
+    }
+    lines.push('');
+  }
+
+  if (summary.relevantExamples.length > 0) {
+    lines.push('## Examples & Applications');
+    for (const ex of summary.relevantExamples) {
+      lines.push(`- **${ex.title}:** ${ex.example}`);
+    }
+    lines.push('');
+  }
+
+  if (summary.importantDistinctions && summary.importantDistinctions.length > 0) {
+    lines.push('## Important Distinctions');
+    for (const dist of summary.importantDistinctions) {
+      lines.push(`- **${dist.pairTitle}:** ${dist.comparison}`);
+    }
+    lines.push('');
+  }
+
+  if (summary.keyTerminology.length > 0) {
+    lines.push('## Key Terminology');
+    lines.push(summary.keyTerminology.join(' · '));
+    lines.push('');
+  }
+
+  if (summary.finalRecap && summary.finalRecap.length > 0) {
+    lines.push('## Final Recap');
+    for (const r of summary.finalRecap) {
+      lines.push(`- ${r}`);
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n').trim();
 }
 
 /**
- * Generates a fully extractive structured summary from document text without using any LLM/generative API.
+ * Generates an intelligent, deterministic, document-only structured summary without generative AI APIs,
+ * powered directly by the shared Document Intelligence Engine in /server/documentEngine.ts.
  */
 export function generateExtractiveSummary(
   title: string,
@@ -23,12 +140,18 @@ export function generateExtractiveSummary(
   summaryLevel: SummaryLevel = 'detailed'
 ): Omit<StructuredSummary, 'id' | 'userId' | 'materialId' | 'createdAt' | 'updatedAt'> {
   const normalized = normalizeText(extractedText);
-  if (!normalized || normalized.length < 20) {
+  const alphaWordCount = (normalized.match(/[a-zA-Z]{2,}/g) || []).length;
+
+  if (!normalized || normalized.length < 20 || alphaWordCount < 3) {
+    const safeTitle = title || 'Document Summary';
     return {
-      title: title || 'Study Summary',
+      title: safeTitle,
       subjectArea: subjectArea || 'General Studies',
       summaryLevel,
-      topicOverview: 'The provided document contains insufficient text to generate an extractive summary.',
+      topicOverview:
+        'The provided document contains insufficient text to generate a document summary.',
+      sourceNotice:
+        'Upload a readable document or paste at least a few complete sentences to generate a structured summary.',
       mainConcepts: [],
       importantDefinitions: [],
       keyTerminology: [],
@@ -36,6 +159,9 @@ export function generateExtractiveSummary(
       importantFacts: [],
       relevantExamples: [],
       formulasOrFrameworks: [],
+      processesAndMechanisms: [],
+      importantDistinctions: [],
+      finalRecap: [],
       comparisonTables: [],
       visualDiagrams: [],
       revisionNotes: [],
@@ -43,177 +169,363 @@ export function generateExtractiveSummary(
       wordCount: 0,
       chunkCount: 0,
       generatedAt: new Date().toISOString(),
-      markdown: `# ${title}\n\n*Insufficient study material text available for summarization.*`,
+      generationMode: 'extractive',
+      markdown: `# ${safeTitle}\n\n*Insufficient readable source text available for summarization.*`,
     };
   }
 
-  const chunks = chunkDocumentText('doc-temp', 'user-temp', normalized, 1200, 200);
-  const wordCount = normalized.split(/\s+/).length;
+  const resolvedTitle = (title || 'Document Summary').trim();
+  const profile = analyzeDocumentIntelligence(normalized, {
+    title: resolvedTitle,
+    subjectArea,
+  });
 
-  // 1. Sentence splitting & Scoring using Term Frequency (TF)
-  const sentences: ScoredSentence[] = [];
-  const globalTermFreq = new Map<string, number>();
+  const dedupedUnits = profile.units;
+  const wordCount = profile.quality.wordCount;
 
-  // First pass: build global frequency map across all text
-  const rawWords = normalized.toLowerCase().match(/\b[a-z0-9][a-z0-9'-]{2,}\b/g) || [];
-  for (const w of rawWords) {
-    globalTermFreq.set(w, (globalTermFreq.get(w) || 0) + 1);
+  // Honest quality notice when source is short or noisy
+  let sourceNotice: string | undefined;
+  if (profile.quality.isBrief) {
+    sourceNotice =
+      'This source material is brief, so only directly supported summary sections are shown.';
+  } else if (profile.quality.lowClarity) {
+    sourceNotice =
+      'Parts of the source text contain irregular formatting or fragments; only clearly readable statements were included.';
   }
 
-  for (const chunk of chunks) {
-    // Split chunk into sentences
-    const rawSentences = chunk.originalText.split(/(?<=[.!?])\s+(?=[A-Z])/);
-    for (const rs of rawSentences) {
-      const sClean = rs.replace(/\s+/g, ' ').trim();
-      if (sClean.length < 15) continue; // skip too short
+  const limits =
+    summaryLevel === 'short'
+      ? {
+          overview: 1,
+          concepts: 4,
+          pointsPerConcept: 2,
+          defs: 4,
+          procs: 4,
+          formulas: 4,
+          facts: 4,
+          examples: 2,
+          distinctions: 3,
+          terms: 8,
+          recap: 3,
+        }
+      : summaryLevel === 'comprehensive'
+        ? {
+            overview: 3,
+            concepts: 12,
+            pointsPerConcept: 4,
+            defs: 10,
+            procs: 8,
+            formulas: 8,
+            facts: 9,
+            examples: 5,
+            distinctions: 6,
+            terms: 18,
+            recap: 5,
+          }
+        : {
+            overview: 2,
+            concepts: 7,
+            pointsPerConcept: 3,
+            defs: 7,
+            procs: 6,
+            formulas: 6,
+            facts: 6,
+            examples: 4,
+            distinctions: 4,
+            terms: 13,
+            recap: 4,
+          };
 
-      // Score sentence by summing term frequencies of non-stop words
-      const sWords = sClean.toLowerCase().match(/\b[a-z0-9][a-z0-9'-]{2,}\b/g) || [];
-      let score = 0;
-      for (const sw of sWords) {
-        score += globalTermFreq.get(sw) || 0;
+  const usedPool: Array<{ fp: string; tokens: Set<string> }> = [];
+  const markUsed = (text: string, tokens?: Set<string>) => {
+    const t = tokens ?? contentTokens(text);
+    usedPool.push({ fp: normalizedFingerprint(text), tokens: t });
+  };
+
+  // 1. Topic Overview: select high-salience lead/thesis statements
+  const distinctionTexts = new Set(profile.distinctions.map((d) => d.sourceText));
+  const rankedByScore = [...dedupedUnits].sort((a, b) => b.score - a.score);
+  const overviewCandidates = [...dedupedUnits]
+    .filter(
+      (u) =>
+        !/^\s*[A-Za-zΔ]+\s*[=∝]/.test(u.formattedText) &&
+        !u.isStep &&
+        !/^(?:first|initially|second|third|next|then|subsequently|finally)\b/i.test(
+          u.formattedText
+        ) &&
+        !distinctionTexts.has(u.formattedText)
+    )
+    .sort((a, b) => {
+      const aLeadBonus = a.orderIndex <= 2 ? 1.25 : 1;
+      const bLeadBonus = b.orderIndex <= 2 ? 1.25 : 1;
+      return b.score * bLeadBonus - a.score * aLeadBonus;
+    });
+
+  const overviewTarget = dedupedUnits.length <= 7 ? 1 : limits.overview;
+  const selectedOverviewUnits: AnalyzedUnit[] = [];
+  for (const cand of overviewCandidates) {
+    if (selectedOverviewUnits.length >= overviewTarget) break;
+    if (isRedundantAgainstPool(cand.formattedText, cand.tokens, usedPool, 0.52, 0.72)) continue;
+    selectedOverviewUnits.push(cand);
+    markUsed(cand.formattedText, cand.tokens);
+  }
+  if (selectedOverviewUnits.length === 0 && dedupedUnits[0]) {
+    selectedOverviewUnits.push(dedupedUnits[0]);
+    markUsed(dedupedUnits[0].formattedText, dedupedUnits[0].tokens);
+  }
+
+  selectedOverviewUnits.sort((a, b) => a.orderIndex - b.orderIndex);
+  const topicOverview = selectedOverviewUnits
+    .map((u) => attachPageCitation(stripBoilerplatePrefix(u.formattedText), u.pageNumber))
+    .join(' ');
+
+  // 2. Formulas & Equations from shared profile
+  const formulasOrFrameworks: FormulaOrFramework[] = profile.formulas
+    .slice(0, limits.formulas)
+    .map((f) => {
+      if (f.sourceText.length < 95) {
+        markUsed(f.sourceText);
       }
-      // Normalize by sentence length to avoid bias toward very long sentences
-      score = sWords.length > 0 ? score / Math.sqrt(sWords.length) : 0;
+      return {
+        name: f.name,
+        expressionOrStructure: f.expressionOrStructure,
+        usage: f.usage,
+        ...(f.variables.length > 0 ? { variables: f.variables } : {}),
+      };
+    });
 
-      sentences.push({
-        text: sClean,
-        score,
-        pageNumber: chunk.pageNumber,
+  // 3. Important Definitions from shared profile
+  const importantDefinitions: DefinitionTerm[] = profile.definitions
+    .slice(0, limits.defs)
+    .map((d) => {
+      markUsed(d.sourceText);
+      return {
+        term: d.term,
+        definition: d.definition,
+        origin: d.origin,
+      };
+    });
+
+  // 4. Important Distinctions from shared profile
+  const importantDistinctions: DistinctionItem[] = [];
+  for (const dist of profile.distinctions) {
+    if (importantDistinctions.length >= limits.distinctions) break;
+    const distTokens = contentTokens(dist.sourceText);
+    if (isRedundantAgainstPool(dist.sourceText, distTokens, usedPool, 0.56, 0.76)) continue;
+    importantDistinctions.push({
+      pairTitle: dist.pairTitle,
+      comparison: dist.comparison,
+    });
+    markUsed(dist.sourceText, distTokens);
+  }
+
+  // 5. Processes & Mechanisms from shared profile
+  const processesAndMechanisms: ProcessMechanismGroup[] = [];
+  for (const proc of profile.processes) {
+    if (processesAndMechanisms.length >= 3) break;
+    const nonRedundantSteps = proc.steps.filter(
+      (s) => !isRedundantAgainstPool(s.rawText, contentTokens(s.rawText), usedPool, 0.62, 0.8)
+    );
+    if (nonRedundantSteps.length >= 2 || (nonRedundantSteps.length === 1 && proc.steps.length === 1)) {
+      const chosen = nonRedundantSteps.slice(0, limits.procs);
+      processesAndMechanisms.push({
+        heading: proc.heading,
+        steps: chosen.map((s) => s.text),
       });
+      for (const s of chosen) {
+        markUsed(s.rawText);
+      }
     }
   }
 
-  // Deduplicate identical sentences
-  const seenSentences = new Set<string>();
-  const uniqueSentences = sentences.filter((s) => {
-    const key = s.text.toLowerCase();
-    if (seenSentences.has(key)) return false;
-    seenSentences.add(key);
-    return true;
-  });
+  // 6. Examples & Applications from shared profile
+  const relevantExamples: RelevantExample[] = [];
+  for (const ex of profile.examples) {
+    if (relevantExamples.length >= limits.examples) break;
+    const exTokens = contentTokens(ex.example);
+    if (isRedundantAgainstPool(ex.example, exTokens, usedPool, 0.55, 0.76)) continue;
+    relevantExamples.push({
+      title: ex.title,
+      example: ex.example,
+      origin: ex.origin,
+    });
+    markUsed(ex.example, exTokens);
+  }
 
-  // Sort by score descending
-  uniqueSentences.sort((a, b) => b.score - a.score);
+  // 7. Main Concepts (grouped by real document headings or cohesive keyword clusters)
+  const mainConcepts: MainConceptSection[] = [];
+  const conceptPoolCandidates = dedupedUnits.filter(
+    (u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.54, 0.74)
+  );
 
-  const conceptLimit = summaryLevel === 'short' ? 4 : summaryLevel === 'comprehensive' ? 14 : 9;
-  const factLimit = summaryLevel === 'short' ? 4 : summaryLevel === 'comprehensive' ? 12 : 8;
-  const defLimit = summaryLevel === 'short' ? 3 : summaryLevel === 'comprehensive' ? 8 : 5;
+  const effectiveConceptCandidates =
+    conceptPoolCandidates.length > 0
+      ? conceptPoolCandidates
+      : dedupedUnits.filter((u) => !selectedOverviewUnits.includes(u));
 
-  // 2. Extract Topic Overview (top-scoring sentence)
-  const overviewSentence = uniqueSentences[0]?.text || 'Extractive summary generated from uploaded study material.';
-  const overviewPagePrefix = uniqueSentences[0]?.pageNumber ? `(Page ${uniqueSentences[0].pageNumber}) ` : '';
-  const topicOverview = `Based on the study material, ${overviewPagePrefix}${overviewSentence.charAt(0).toLowerCase()}${overviewSentence.slice(1)}`;
+  const explicitHeadingGroups = new Map<string, AnalyzedUnit[]>();
+  const unheadedUnits: AnalyzedUnit[] = [];
 
-  // 3. Extract Main Concepts (Group top sentences into thematic concept blocks)
-  const conceptSentences = uniqueSentences.slice(1, 1 + conceptLimit);
-  const mainConcepts: Array<{ heading: string; sourcePoints: string[]; aiClarification: string }> = [];
+  for (const u of effectiveConceptCandidates) {
+    if (u.sectionHeading) {
+      const arr = explicitHeadingGroups.get(u.sectionHeading) || [];
+      arr.push(u);
+      explicitHeadingGroups.set(u.sectionHeading, arr);
+    } else {
+      unheadedUnits.push(u);
+    }
+  }
 
-  if (conceptSentences.length > 0) {
-    const batchSize = Math.max(2, Math.ceil(conceptSentences.length / 3));
-    for (let i = 0; i < conceptSentences.length; i += batchSize) {
-      const batch = conceptSentences.slice(i, i + batchSize);
-      if (batch.length === 0) continue;
-      const firstKw = extractKeywords(batch[0].text, 1)[0] || 'Core Principle';
-      const heading = `Key Concept: ${firstKw.charAt(0).toUpperCase()}${firstKw.slice(1)}`;
+  if (explicitHeadingGroups.size > 0) {
+    for (const [heading, group] of explicitHeadingGroups.entries()) {
+      if (mainConcepts.length >= limits.concepts) break;
+      const topGroup = [...group]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limits.pointsPerConcept)
+        .sort((a, b) => a.orderIndex - b.orderIndex);
+      if (topGroup.length === 0) continue;
+
       mainConcepts.push({
         heading,
-        sourcePoints: batch.map((b) => (b.pageNumber ? `(Page ${b.pageNumber}) ${b.text}` : b.text)),
+        sourcePoints: topGroup.map((u) =>
+          attachPageCitation(stripBoilerplatePrefix(u.formattedText), u.pageNumber)
+        ),
         aiClarification: '',
       });
+      for (const u of topGroup) markUsed(u.formattedText, u.tokens);
     }
   }
 
-  // 4. Extract Important Definitions (Look for sentences containing 'is defined as', 'refers to', 'means', 'is a')
-  const definitionSentences = uniqueSentences.filter((s) =>
-    /\b(is defined as|refers to|means|is a|are defined as|consists of)\b/i.test(s.text)
+  if (unheadedUnits.length > 0 && mainConcepts.length < limits.concepts) {
+    const remainingSlots = limits.concepts - mainConcepts.length;
+    const topUnheaded = [...unheadedUnits]
+      .filter((u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.54, 0.74))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, remainingSlots * limits.pointsPerConcept);
+
+    const seededUnheaded =
+      topUnheaded.length > 0
+        ? topUnheaded
+        : unheadedUnits.slice(0, remainingSlots * limits.pointsPerConcept);
+
+    const clusters: AnalyzedUnit[][] = [];
+    for (const unit of seededUnheaded) {
+      let bestCluster: AnalyzedUnit[] | null = null;
+      let bestSim = 0;
+
+      for (const cluster of clusters) {
+        if (cluster.length >= limits.pointsPerConcept) continue;
+        const sim = tokenSimilarity(unit.tokens, cluster[0].tokens).jaccard;
+        if (sim > bestSim && sim >= 0.14) {
+          bestSim = sim;
+          bestCluster = cluster;
+        }
+      }
+
+      if (bestCluster) {
+        bestCluster.push(unit);
+      } else if (clusters.length < remainingSlots) {
+        clusters.push([unit]);
+      } else if (clusters.length > 0) {
+        const smallest = clusters.reduce((a, b) => (a.length <= b.length ? a : b));
+        if (smallest.length < limits.pointsPerConcept + 1) smallest.push(unit);
+      }
+    }
+
+    clusters.forEach((cluster, idx) => {
+      cluster.sort((a, b) => a.orderIndex - b.orderIndex);
+      mainConcepts.push({
+        heading: buildSectionClusterHeading(cluster, mainConcepts.length + idx),
+        sourcePoints: cluster.map((u) =>
+          attachPageCitation(stripBoilerplatePrefix(u.formattedText), u.pageNumber)
+        ),
+        aiClarification: '',
+      });
+      for (const u of cluster) markUsed(u.formattedText, u.tokens);
+    });
+  }
+
+  // 8. Key Facts (distinct factual/quantitative/causal points not repeated above)
+  const importantFacts: string[] = [];
+  const factCandidates = rankedByScore.filter(
+    (u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.52, 0.72)
   );
-  const importantDefinitions = definitionSentences.slice(0, defLimit).map((ds) => {
-    const parts = ds.text.split(/\b(is defined as|refers to|means|is a|are defined as)\b/i);
-    const term = (parts[0] || 'Term').trim().replace(/[^a-zA-Z0-9\s-_]/g, '');
-    const definition = ds.pageNumber ? `(Page ${ds.pageNumber}) ${ds.text}` : ds.text;
-    return {
-      term: term.length > 3 && term.length < 35 ? term : 'Key Term',
-      definition,
-      origin: 'source' as const,
-    };
+
+  factCandidates.sort((a, b) => {
+    const aQuant =
+      a.quantitiesUnits.length > 0 ||
+      /\d|%|°|mol|kg|km|nm|atm|pH|ATP|DNA|RNA/i.test(a.formattedText)
+        ? 1.25
+        : 1;
+    const bQuant =
+      b.quantitiesUnits.length > 0 ||
+      /\d|%|°|mol|kg|km|nm|atm|pH|ATP|DNA|RNA/i.test(b.formattedText)
+        ? 1.25
+        : 1;
+    return b.score * bQuant - a.score * aQuant;
   });
 
-  // 5. Extract Key Terminology
-  const termLimit = summaryLevel === 'short' ? 8 : summaryLevel === 'comprehensive' ? 20 : 15;
-  const allKeywords = extractKeywords(normalized, termLimit);
-  const keyTerminology = Array.from(new Set(allKeywords));
+  for (const cand of factCandidates) {
+    if (importantFacts.length >= limits.facts) break;
+    importantFacts.push(
+      attachPageCitation(stripBoilerplatePrefix(cand.formattedText), cand.pageNumber)
+    );
+    markUsed(cand.formattedText, cand.tokens);
+  }
 
-  // 6. Important Facts (preserve page references and cover short texts cleanly)
-  const factPool =
-    uniqueSentences.length > 3 ? uniqueSentences.slice(3, 3 + factLimit) : uniqueSentences.slice(0, factLimit);
-  const importantFacts = factPool.map((s) => (s.pageNumber ? `(Page ${s.pageNumber}) ${s.text}` : s.text));
+  // 9. Key Terminology
+  const keyTerminology = profile.keyTerminology.slice(0, limits.terms);
 
-  // 7. Build Markdown Output
-  const markdownLines: string[] = [
-    `# ${title}`,
-    `**Subject:** ${subjectArea} | **Format:** ${summaryLevel.toUpperCase()} Extractive Summary`,
-    '',
-    '## Topic Overview',
-    topicOverview,
-    '',
-  ];
+  // 10. Final Recap (only when document has >= 4 distinct units and non-redundant takeaways exist)
+  const finalRecap: string[] = [];
+  if (dedupedUnits.length >= 4) {
+    const recapPool = [...dedupedUnits]
+      .filter((u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.54, 0.74))
+      .sort((a, b) => b.score - a.score);
 
-  if (mainConcepts.length > 0) {
-    markdownLines.push('## Main Concepts & Points');
-    for (const c of mainConcepts) {
-      markdownLines.push(`### ${c.heading}`);
-      for (const pt of c.sourcePoints) {
-        markdownLines.push(`- [From Source] ${pt}`);
+    for (const u of recapPool) {
+      if (finalRecap.length >= limits.recap) break;
+      finalRecap.push(attachPageCitation(stripBoilerplatePrefix(u.formattedText), u.pageNumber));
+      markUsed(u.formattedText, u.tokens);
+    }
+
+    if (finalRecap.length === 0 && mainConcepts.length >= 2) {
+      for (const c of mainConcepts.slice(0, limits.recap)) {
+        if (c.sourcePoints.length > 0 && !c.heading.startsWith('Core Concept')) {
+          finalRecap.push(`${c.heading}: ${c.sourcePoints[0]}`);
+        }
       }
-      markdownLines.push('');
     }
   }
 
-  if (importantDefinitions.length > 0) {
-    markdownLines.push('## Important Definitions');
-    for (const def of importantDefinitions) {
-      markdownLines.push(`- **${def.term}** (From Source): ${def.definition}`);
-    }
-    markdownLines.push('');
-  }
-
-  if (keyTerminology.length > 0) {
-    markdownLines.push('## Key Terminology');
-    markdownLines.push(keyTerminology.join(', '));
-    markdownLines.push('');
-  }
-
-  if (importantFacts.length > 0) {
-    markdownLines.push('## Important Facts (From Source)');
-    for (const f of importantFacts) {
-      markdownLines.push(`- ${f}`);
-    }
-    markdownLines.push('');
-  }
-
-  const structuredSummary: Omit<StructuredSummary, 'id' | 'userId' | 'materialId' | 'createdAt' | 'updatedAt'> = {
-    title,
-    subjectArea,
+  const baseSummary: Omit<StructuredSummary, 'markdown'> = {
+    title: resolvedTitle,
+    subjectArea: profile.subjectArea,
     summaryLevel,
-    topicOverview,
+    topicOverview: formatScientificText(topicOverview),
     mainConcepts,
     importantDefinitions,
     keyTerminology,
     difficultConceptExplanations: [],
     importantFacts,
-    relevantExamples: [],
-    formulasOrFrameworks: [],
+    relevantExamples,
+    formulasOrFrameworks,
+    processesAndMechanisms,
+    importantDistinctions,
+    finalRecap,
+    ...(sourceNotice ? { sourceNotice } : {}),
     comparisonTables: [],
     visualDiagrams: [],
-    revisionNotes: importantFacts.slice(0, summaryLevel === 'short' ? 3 : 5),
-    keyTakeaways: mainConcepts.map((m) => m.heading),
+    revisionNotes: [],
+    keyTakeaways: [],
     wordCount,
-    chunkCount: chunks.length,
+    chunkCount: profile.chunks.length,
     generatedAt: new Date().toISOString(),
     generationMode: 'extractive',
-    markdown: markdownLines.join('\n'),
   };
 
-  return structuredSummary;
+  return {
+    ...baseSummary,
+    markdown: buildDocumentSummaryMarkdown(baseSummary),
+  };
 }

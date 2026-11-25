@@ -102,10 +102,26 @@ export interface RelevantExample {
   origin: 'source' | 'ai_elaboration';
 }
 
+export interface FormulaVariableNote {
+  symbol: string;
+  meaning: string;
+}
+
 export interface FormulaOrFramework {
   name: string;
   expressionOrStructure: string;
   usage: string;
+  variables?: FormulaVariableNote[];
+}
+
+export interface ProcessMechanismGroup {
+  heading: string;
+  steps: string[];
+}
+
+export interface DistinctionItem {
+  pairTitle: string;
+  comparison: string;
 }
 
 export interface StructuredSummary {
@@ -120,6 +136,10 @@ export interface StructuredSummary {
   importantFacts: string[];
   relevantExamples: RelevantExample[];
   formulasOrFrameworks: FormulaOrFramework[];
+  processesAndMechanisms?: ProcessMechanismGroup[];
+  importantDistinctions?: DistinctionItem[];
+  finalRecap?: string[];
+  sourceNotice?: string;
   comparisonTables?: ComparisonTable[];
   visualDiagrams?: EducationalDiagramSpec[];
   revisionNotes: string[];
@@ -128,16 +148,7 @@ export interface StructuredSummary {
   wordCount: number;
   chunkCount: number;
   generatedAt: string;
-  generationMode?: 'ai' | 'extractive';
-}
-
-export interface FollowUpItem {
-  id: string;
-  promptLabel: string;
-  question: string;
-  fromSource: string;
-  aiExplanation: string;
-  createdAt: string;
+  generationMode?: 'ai' | 'extractive' | 'document';
 }
 
 export interface ExtractionResult {

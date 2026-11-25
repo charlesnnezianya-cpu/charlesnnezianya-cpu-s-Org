@@ -123,10 +123,21 @@ export function DashboardLayout() {
 
   useEffect(() => {
     fetch(resolveApiUrl('/api/health'))
-      .then((res) => parseApiJsonResponse<{ geminiConfigured?: boolean }>(res, 'checking AI health'))
+      .then((res) =>
+        parseApiJsonResponse<{ aiConfigured?: boolean; geminiConfigured?: boolean }>(
+          res,
+          'checking AI health'
+        )
+      )
       .then((data) => {
-        if (typeof data.geminiConfigured === 'boolean') {
-          setGeminiConfigured(data.geminiConfigured);
+        const ready =
+          typeof data.aiConfigured === 'boolean'
+            ? data.aiConfigured
+            : typeof data.geminiConfigured === 'boolean'
+              ? data.geminiConfigured
+              : undefined;
+        if (typeof ready === 'boolean') {
+          setGeminiConfigured(ready);
         }
       })
       .catch(() => {
@@ -221,7 +232,7 @@ export function DashboardLayout() {
     },
     {
       id: 'summarizer',
-      label: 'AI Summarizer',
+      label: 'Document Summarizer',
       icon: <Sparkles className="h-4 w-4" aria-hidden="true" />,
     },
     {
@@ -259,7 +270,7 @@ export function DashboardLayout() {
   const sectionTitleMap: Record<DashboardSection, string> = {
     overview: 'Dashboard',
     history: 'My Academic History',
-    summarizer: 'AI Study Material Summarizer',
+    summarizer: 'Document Summarizer',
     chat: 'AI Academic Chatbot',
     tutor: 'Personal AI Tutor',
     quizzes: 'Quiz & Examination System',

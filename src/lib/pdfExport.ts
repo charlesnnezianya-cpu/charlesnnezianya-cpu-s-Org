@@ -53,6 +53,29 @@ function sanitizeAscii(text: string): string {
     .replace(/\u03C6/g, 'phi')
     .replace(/\u03C9/g, 'omega')
     .replace(/\u03A9/g, 'Omega')
+    .replace(/\u2080/g, '0')
+    .replace(/\u2081/g, '1')
+    .replace(/\u2082/g, '2')
+    .replace(/\u2083/g, '3')
+    .replace(/\u2084/g, '4')
+    .replace(/\u2085/g, '5')
+    .replace(/\u2086/g, '6')
+    .replace(/\u2087/g, '7')
+    .replace(/\u2088/g, '8')
+    .replace(/\u2089/g, '9')
+    .replace(/\u208A/g, '+')
+    .replace(/\u208B/g, '-')
+    .replace(/\u2070/g, '^0')
+    .replace(/\u00B9/g, '^1')
+    .replace(/\u2074/g, '^4')
+    .replace(/\u2075/g, '^5')
+    .replace(/\u2076/g, '^6')
+    .replace(/\u2077/g, '^7')
+    .replace(/\u2078/g, '^8')
+    .replace(/\u2079/g, '^9')
+    .replace(/\u207A/g, '^+')
+    .replace(/\u207B/g, '^-')
+    .replace(/\u207F/g, '^n')
     .replace(/[^\x20-\x7E]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -135,21 +158,21 @@ export function exportSummaryToPdf(summary: StructuredSummary): void {
     lines.push({ text: wrapped, font: 'F2', size: 17, spacingAfter: 5 });
   }
   pushBody(
-    `Brainstine Study Summary | Subject: ${summary.subjectArea} | Format: ${LEVEL_LABELS[summary.summaryLevel]}`
+    `Brainstine Document Summary | Subject: ${summary.subjectArea} | Format: ${LEVEL_LABELS[summary.summaryLevel]}`
   );
 
   pushHeading('Topic Overview');
   pushBody(summary.topicOverview);
 
   if (summary.mainConcepts.length > 0) {
-    pushHeading('Main Concepts & Points');
+    pushHeading('Main Concepts');
     summary.mainConcepts.forEach((c, idx) => {
       pushSubheading(`${idx + 1}. ${c.heading}`);
       for (const pt of c.sourcePoints) {
-        pushBody(`* [From Source] ${pt}`, true);
+        pushBody(`* ${pt}`, true);
       }
       if (c.aiClarification) {
-        pushBody(`* [AI Clarification] ${c.aiClarification}`, true);
+        pushBody(`* ${c.aiClarification}`, true);
       }
     });
   }
@@ -157,8 +180,50 @@ export function exportSummaryToPdf(summary: StructuredSummary): void {
   if (summary.importantDefinitions.length > 0) {
     pushHeading('Important Definitions');
     for (const d of summary.importantDefinitions) {
-      const origin = d.origin === 'source' ? 'From Source' : 'AI Clarification';
-      pushBody(`* ${d.term} (${origin}): ${d.definition}`, true);
+      pushBody(`* ${d.term} - ${d.definition}`, true);
+    }
+  }
+
+  if (summary.processesAndMechanisms && summary.processesAndMechanisms.length > 0) {
+    pushHeading('Processes & Mechanisms');
+    for (const proc of summary.processesAndMechanisms) {
+      if (summary.processesAndMechanisms.length > 1) {
+        pushSubheading(proc.heading);
+      }
+      proc.steps.forEach((step, idx) => {
+        pushBody(`${idx + 1}. ${step}`, true);
+      });
+    }
+  }
+
+  if (summary.formulasOrFrameworks.length > 0) {
+    pushHeading('Important Formulas & Equations');
+    for (const f of summary.formulasOrFrameworks) {
+      pushBody(`* ${f.name}: ${f.expressionOrStructure} - ${f.usage}`, true);
+      if (f.variables && f.variables.length > 0) {
+        pushBody(`  Variables: ${f.variables.map((v) => `${v.symbol} = ${v.meaning}`).join('; ')}`, true);
+      }
+    }
+  }
+
+  if (summary.importantFacts.length > 0) {
+    pushHeading('Key Facts');
+    for (const fact of summary.importantFacts) {
+      pushBody(`* ${fact}`, true);
+    }
+  }
+
+  if (summary.relevantExamples.length > 0) {
+    pushHeading('Examples & Applications');
+    for (const ex of summary.relevantExamples) {
+      pushBody(`* ${ex.title}: ${ex.example}`, true);
+    }
+  }
+
+  if (summary.importantDistinctions && summary.importantDistinctions.length > 0) {
+    pushHeading('Important Distinctions');
+    for (const d of summary.importantDistinctions) {
+      pushBody(`* ${d.pairTitle}: ${d.comparison}`, true);
     }
   }
 
@@ -167,35 +232,11 @@ export function exportSummaryToPdf(summary: StructuredSummary): void {
     pushBody(summary.keyTerminology.join(', '));
   }
 
-  if (summary.difficultConceptExplanations.length > 0) {
-    pushHeading('Explanations of Difficult Concepts');
-    for (const item of summary.difficultConceptExplanations) {
-      pushSubheading(item.concept);
-      pushBody(`In source material: ${item.sourceContext}`, true);
-      pushBody(`AI plain explanation: ${item.plainExplanation}`, true);
-    }
-  }
-
-  if (summary.importantFacts.length > 0) {
-    pushHeading('Important Facts (From Source)');
-    for (const fact of summary.importantFacts) {
-      pushBody(`* ${fact}`, true);
-    }
-  }
-
-  if (summary.relevantExamples.length > 0) {
-    pushHeading('Relevant Examples');
-    for (const ex of summary.relevantExamples) {
-      const tag = ex.origin === 'source' ? 'From Source' : 'AI Elaboration';
-      pushBody(`* ${ex.title} (${tag}): ${ex.example}`, true);
-    }
-  }
-
-  if (summary.formulasOrFrameworks.length > 0) {
-    pushHeading('Formulas & Frameworks');
-    for (const f of summary.formulasOrFrameworks) {
-      pushBody(`* ${f.name}: ${f.expressionOrStructure} - ${f.usage}`, true);
-    }
+  if (summary.finalRecap && summary.finalRecap.length > 0) {
+    pushHeading('Final Recap');
+    summary.finalRecap.forEach((r, idx) => {
+      pushBody(`${idx + 1}. ${r}`, true);
+    });
   }
 
   if (summary.comparisonTables && summary.comparisonTables.length > 0) {
@@ -225,14 +266,14 @@ export function exportSummaryToPdf(summary: StructuredSummary): void {
     }
   }
 
-  if (summary.revisionNotes.length > 0) {
+  if ((!summary.finalRecap || summary.finalRecap.length === 0) && summary.revisionNotes.length > 0) {
     pushHeading('Revision Notes');
     for (const note of summary.revisionNotes) {
       pushBody(`* ${note}`, true);
     }
   }
 
-  if (summary.keyTakeaways.length > 0) {
+  if ((!summary.finalRecap || summary.finalRecap.length === 0) && summary.keyTakeaways.length > 0) {
     pushHeading('Key Takeaways');
     for (const t of summary.keyTakeaways) {
       pushBody(`* ${t}`, true);
@@ -253,7 +294,7 @@ export function exportSummaryToPdf(summary: StructuredSummary): void {
   const flushPage = () => {
     const pageNum = pagesContent.length + 1;
     currentOps.push(
-      `BT /F1 8 Tf 50 32 Td (Brainstine - Your Personal AI-Powered Academic Companion | Page ${pageNum}) Tj ET`
+      `BT /F1 8 Tf 50 32 Td (Brainstine Document Summary | Page ${pageNum}) Tj ET`
     );
     pagesContent.push(currentOps.join('\n'));
     currentOps = [];

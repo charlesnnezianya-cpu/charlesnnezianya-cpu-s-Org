@@ -4,12 +4,14 @@ interface BrandLogoProps {
   showTagline?: boolean;
   size?: 'sm' | 'md' | 'lg';
   variant?: 'full' | 'mark';
+  tone?: 'auto' | 'light';
 }
 
 export function BrandLogo({
   showTagline = false,
   size = 'md',
   variant = 'full',
+  tone = 'auto',
 }: BrandLogoProps) {
   const uid = useId().replace(/:/g, '');
   const bgId = `bs_bg_${uid}`;
@@ -104,12 +106,31 @@ export function BrandLogo({
       {variant === 'full' && (
         <div className="flex flex-col leading-none">
           <span
-            className={`font-display font-bold tracking-tight text-[#0F172A] dark:text-white ${textSize}`}
+            className={`font-display font-bold tracking-tight ${
+              tone === 'light'
+                ? 'text-white'
+                : 'text-[#0F172A] dark:text-white'
+            } ${textSize}`}
           >
-            Brain<span className="text-[#1D4ED8] dark:text-[#38BDF8]">stine</span>
+            Brain
+            <span
+              className={
+                tone === 'light'
+                  ? 'text-[#38BDF8]'
+                  : 'text-[#1D4ED8] dark:text-[#38BDF8]'
+              }
+            >
+              stine
+            </span>
           </span>
           {showTagline && (
-            <span className="mt-1 text-xs font-medium text-slate-500 dark:text-slate-400">
+            <span
+              className={`mt-1 text-xs font-medium ${
+                tone === 'light'
+                  ? 'text-slate-300'
+                  : 'text-slate-500 dark:text-slate-400'
+              }`}
+            >
               AI-Powered Academic Companion
             </span>
           )}

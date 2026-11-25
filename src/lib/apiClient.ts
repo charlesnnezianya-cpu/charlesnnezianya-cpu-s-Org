@@ -223,9 +223,16 @@ export function extractErrorFromHttpBody(
     }
   }
 
-  if (status === 404 || looksLikeHtmlOrStaticNotFound(trimmed, contentType)) {
+  if (looksLikeHtmlOrStaticNotFound(trimmed, contentType)) {
     return appendReferenceId(
       'Brainstine is temporarily unavailable. Please try again shortly.',
+      refId
+    );
+  }
+
+  if (status === 404) {
+    return appendReferenceId(
+      'The requested resource could not be found.',
       refId
     );
   }
@@ -251,9 +258,16 @@ export function extractErrorFromHttpBody(
     );
   }
 
-  if (status === 502 || status === 504) {
+  if (status === 502) {
     return appendReferenceId(
-      'Brainstine is temporarily unavailable. Please try again shortly.',
+      'Network connection error. Please check your internet connection and try again.',
+      refId
+    );
+  }
+
+  if (status === 504) {
+    return appendReferenceId(
+      'This request took too long to complete. Your input has been preserved—please try again.',
       refId
     );
   }

@@ -225,10 +225,10 @@ export function PrivacyPolicyPage({
               </li>
               <li>
                 <strong className="font-semibold text-slate-900 dark:text-white">
-                  AI Study Summarizer:
+                  Document Summarizer:
                 </strong>{' '}
                 We process your uploaded notes, PDFs, audio transcripts, and JPG, PNG, or WEBP photos to generate
-                detailed summaries, definitions, comparison tables, and study diagrams that you can reopen anytime.
+                structured document summaries, definitions, formulas, and study notes that you can reopen anytime.
               </li>
               <li>
                 <strong className="font-semibold text-slate-900 dark:text-white">

@@ -1,10 +1,16 @@
 import crypto from 'crypto';
 import {
-  chunkDocumentText,
   extractKeywords,
+  extractMatchingStructuredHighlights,
+  fetchAuthorizedUserMaterials,
+  getOrBuildDocumentChunks,
+  getSupabaseServerConfig,
   normalizeText,
+  resolveAuthorizedUserFromBearer,
   retrieveRelevantPassages,
+  setBoundedCacheEntry,
   type DocumentChunk,
+  type IndexedDocumentRecord,
   type RetrievalResult,
 } from './documentEngine.ts';
 import type { TutorMode } from '../src/types/brainstine.ts';
@@ -67,14 +73,6 @@ export interface TutorRagContextResult {
   hasAttachedDocument: boolean;
 }
 
-interface IndexedDocumentRecord {
-  id: string;
-  userId: string;
-  title: string;
-  type: string;
-  extractedText: string;
-}
-
 const TUTOR_FILLER_WORDS = new Set([
   'teach', 'learn', 'lesson', 'guided', 'beginning', 'start', 'step', 'steps',
   'explain', 'describe', 'define', 'compare', 'compares', 'comparing', 'compared',
@@ -91,156 +89,7 @@ const TUTOR_FILLER_WORDS = new Set([
   'did', 'what', 'which', 'how', 'why',
 ]);
 
-const MAX_CACHE_ENTRIES = 120;
-const tokenVerifyCache = new Map<string, { userId: string; expiresAt: number }>();
-const materialsCache = new Map<string, { docs: IndexedDocumentRecord[]; expiresAt: number }>();
-const chunkCache = new Map<string, DocumentChunk[]>();
-
-function setBounded<K, V>(map: Map<K, V>, key: K, value: V) {
-  if (map.size >= MAX_CACHE_ENTRIES) {
-    const firstKey = map.keys().next().value;
-    if (firstKey !== undefined) map.delete(firstKey);
-  }
-  map.set(key, value);
-}
-
-function getSupabaseServerConfig(): { url: string; anonKey: string } | null {
-  const url = (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '').trim().replace(/\/$/, '');
-  const anonKey = (process.env.VITE_SUPABASE_ANON_KEY || '').trim();
-  if (!url || !anonKey) return null;
-  return { url, anonKey };
-}
-
-function extractBearerToken(authHeader?: string | string[]): string | null {
-  if (!authHeader) return null;
-  const headerStr = Array.isArray(authHeader) ? authHeader[0] : authHeader;
-  if (!headerStr) return null;
-  const match = headerStr.trim().match(/^Bearer\s+(.+)$/i);
-  return match ? match[1].trim() : null;
-}
-
-async function resolveAuthorizedUserFromBearer(
-  authHeader?: string | string[]
-): Promise<{ userId: string; accessToken: string } | null> {
-  const token = extractBearerToken(authHeader);
-  if (!token) return null;
-
-  const cfg = getSupabaseServerConfig();
-  if (!cfg) return null;
-
-  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-  const cached = tokenVerifyCache.get(tokenHash);
-  if (cached && cached.expiresAt > Date.now()) {
-    return { userId: cached.userId, accessToken: token };
-  }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 6000);
-  try {
-    const res = await fetch(`${cfg.url}/auth/v1/user`, {
-      headers: {
-        apikey: cfg.anonKey,
-        Authorization: `Bearer ${token}`,
-      },
-      signal: controller.signal,
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { id?: string };
-    if (!data?.id || typeof data.id !== 'string') return null;
-
-    setBounded(tokenVerifyCache, tokenHash, {
-      userId: data.id,
-      expiresAt: Date.now() + 60_000,
-    });
-    return { userId: data.id, accessToken: token };
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function fetchAuthorizedUserMaterials(
-  accessToken: string,
-  verifiedUserId: string,
-  bypassCache = false
-): Promise<IndexedDocumentRecord[]> {
-  const cfg = getSupabaseServerConfig();
-  if (!cfg) return [];
-
-  const cached = !bypassCache ? materialsCache.get(verifiedUserId) : undefined;
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.docs;
-  }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
-  try {
-    const url = `${cfg.url}/rest/v1/study_materials?select=id,user_id,title,material_type,extracted_text,created_at&user_id=eq.${encodeURIComponent(
-      verifiedUserId
-    )}&order=created_at.desc&limit=25`;
-
-    const res = await fetch(url, {
-      headers: {
-        apikey: cfg.anonKey,
-        Authorization: `Bearer ${accessToken}`,
-        Accept: 'application/json',
-      },
-      signal: controller.signal,
-    });
-    if (!res.ok) return [];
-
-    const rows = (await res.json()) as Array<{
-      id?: string;
-      user_id?: string;
-      title?: string;
-      material_type?: string;
-      extracted_text?: string;
-    }>;
-    if (!Array.isArray(rows)) return [];
-
-    const docs: IndexedDocumentRecord[] = rows
-      .filter(
-        (r) =>
-          typeof r?.id === 'string' &&
-          r.user_id === verifiedUserId &&
-          typeof r?.extracted_text === 'string' &&
-          r.extracted_text.trim().length > 0
-      )
-      .map((r) => ({
-        id: r.id as string,
-        userId: verifiedUserId,
-        title: (r.title || 'Uploaded Study Material').trim(),
-        type: `Uploaded ${(r.material_type || 'document').toUpperCase()} Material`,
-        extractedText: r.extracted_text as string,
-      }));
-
-    setBounded(materialsCache, verifiedUserId, {
-      docs,
-      expiresAt: Date.now() + 45_000,
-    });
-    return docs;
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function getOrBuildChunks(doc: IndexedDocumentRecord): DocumentChunk[] {
-  const textHash = crypto
-    .createHash('sha256')
-    .update(doc.extractedText)
-    .digest('hex')
-    .slice(0, 16);
-  const key = `${doc.userId}:${doc.id}:${textHash}`;
-  const cached = chunkCache.get(key);
-  if (cached) return cached;
-
-  const built = chunkDocumentText(doc.id, doc.userId, doc.extractedText, 1200, 200);
-  setBounded(chunkCache, key, built);
-  return built;
-}
+const tutorRagCache = new Map<string, { result: TutorRagContextResult; expiresAt: number }>();
 
 function extractTutorTopicKeywords(text: string, max = 10): string[] {
   const raw = extractKeywords(text, 24);
@@ -320,9 +169,8 @@ export function analyzeTutorPedagogicalState(params: {
   const combinedInput = `${cleanQuick} ${cleanMsg}`.trim();
   const lower = combinedInput.toLowerCase();
 
-  const lastAssistantMsg = [...params.history]
-    .reverse()
-    .find((h) => h.role === 'assistant')?.content || '';
+  const lastAssistantMsg =
+    [...params.history].reverse().find((h) => h.role === 'assistant')?.content || '';
   const prevAskedCheckQuestion =
     params.history.length > 0 &&
     /\?/.test(lastAssistantMsg.slice(-500)) &&
@@ -362,7 +210,13 @@ export function analyzeTutorPedagogicalState(params: {
       lower
     );
 
-  if (explicitlyWantsGuidedLesson || (params.history.length === 0 && !wantsSimplify && !wantsUnderstandingCheck && !wantsSummary)) {
+  if (
+    explicitlyWantsGuidedLesson ||
+    (params.history.length === 0 &&
+      !wantsSimplify &&
+      !wantsUnderstandingCheck &&
+      !wantsSummary)
+  ) {
     pedagogicalAction = 'guided_full_lesson';
     useStructuredLessonPlan = explicitlyWantsGuidedLesson || params.history.length === 0;
   } else if (wantsSummary) {
@@ -377,7 +231,12 @@ export function analyzeTutorPedagogicalState(params: {
     pedagogicalAction = cleanQuick.toLowerCase().includes('continue')
       ? 'continue_lesson'
       : 'advance_next';
-  } else if (prevAskedCheckQuestion && !cleanQuick && cleanMsg.length > 0 && !cleanMsg.endsWith('?')) {
+  } else if (
+    prevAskedCheckQuestion &&
+    !cleanQuick &&
+    cleanMsg.length > 0 &&
+    !cleanMsg.endsWith('?')
+  ) {
     pedagogicalAction = 'answer_evaluation';
   } else {
     pedagogicalAction = 'concept_question';
@@ -390,7 +249,6 @@ export function analyzeTutorPedagogicalState(params: {
       lower
     );
 
-  // Extract topic keywords from message + currentTopic + recent conversation context
   const msgKeywords = extractTutorTopicKeywords(cleanMsg, 8);
   const topicKeywordsFromTitle = extractTutorTopicKeywords(params.currentTopic || '', 5);
   const recentHistoryText = params.history
@@ -411,7 +269,6 @@ export function analyzeTutorPedagogicalState(params: {
       ? `${cleanMsg} ${topicKeywordsFromTitle.join(' ')}`.trim()
       : `${cleanMsg} ${params.currentTopic || ''} ${mergedKeywords.join(' ')}`.trim();
 
-  // Build focused pedagogical directive matching the student's current learning moment
   let tutorPromptDirective = '';
   switch (pedagogicalAction) {
     case 'guided_full_lesson':
@@ -495,9 +352,9 @@ Answer the student's specific question thoroughly like a patient academic instru
 }
 
 /**
- * Main RAG orchestrator for Brainstine's Personal AI Tutor.
- * Connects /server/documentEngine.ts to /api/ai/tutor and /api/ai/tutor/stream,
- * preserving user isolation, page citations, and dual-source teaching.
+ * Main RAG orchestrator for Brainstine's Personal AI Tutor (Layer B Hybrid AI Learning Engine).
+ * Connects the shared /server/documentEngine.ts intelligence + caching to /api/ai/tutor and /api/ai/tutor/stream,
+ * preserving user isolation, page citations, structured highlights, and dual-source teaching.
  */
 export async function buildTutorRagContext(params: {
   message: string;
@@ -599,6 +456,29 @@ export async function buildTutorRagContext(params: {
   }
 
   const allDocs = Array.from(docsMap.values());
+  const cacheKey = crypto
+    .createHash('sha256')
+    .update(
+      JSON.stringify({
+        uid: effectiveUserId,
+        msg: normalizeText(params.message || ''),
+        quick: normalizeText(params.quickAction || ''),
+        topic: params.currentTopic || '',
+        step: params.currentStep || 0,
+        mode: params.tutorMode,
+        hist: params.history.slice(-3),
+        attachedDocId: attachedDocId || '',
+        hasImg: params.hasImage,
+        docs: allDocs.map((d) => `${d.id}:${d.extractedText.length}:${d.extractedText.slice(0, 64)}`),
+      })
+    )
+    .digest('hex');
+
+  const cachedRag = tutorRagCache.get(cacheKey);
+  if (cachedRag && cachedRag.expiresAt > Date.now()) {
+    return cachedRag.result;
+  }
+
   const analysis = analyzeTutorPedagogicalState({
     message: params.message,
     quickAction: params.quickAction,
@@ -610,7 +490,7 @@ export async function buildTutorRagContext(params: {
   });
 
   if (allDocs.length === 0) {
-    return {
+    const emptyResult: TutorRagContextResult = {
       pedagogicalAction: analysis.pedagogicalAction,
       useStructuredLessonPlan: analysis.useStructuredLessonPlan,
       retrievalQuery: analysis.retrievalQuery,
@@ -627,16 +507,23 @@ export async function buildTutorRagContext(params: {
         '\n\nTEACHING KNOWLEDGE SOURCE:\nNo uploaded study document is linked or available for this lesson. Teach accurately using General Academic Knowledge. Do NOT claim to have read any uploaded file or fabricate document citations.',
       hasAttachedDocument,
     };
+    setBoundedCacheEntry(tutorRagCache, cacheKey, {
+      result: emptyResult,
+      expiresAt: Date.now() + 30_000,
+    });
+    return emptyResult;
   }
 
   const allChunks: DocumentChunk[] = [];
   const docTitleById = new Map<string, string>();
+  const docById = new Map<string, IndexedDocumentRecord>();
   let totalRawDocumentChars = 0;
 
   for (const doc of allDocs) {
     docTitleById.set(doc.id, doc.title);
+    docById.set(doc.id, doc);
     totalRawDocumentChars += doc.extractedText.length;
-    allChunks.push(...getOrBuildChunks(doc));
+    allChunks.push(...getOrBuildDocumentChunks(doc));
   }
 
   const candidatePoolSize = 6;
@@ -658,7 +545,6 @@ export async function buildTutorRagContext(params: {
     ).filter((r) => isTutorPassageRelevant(r, analysis.topicKeywords));
   }
 
-  // Fallback for "teach from beginning" on an explicitly linked document when query terms are generic
   if (
     candidates.length === 0 &&
     attachedDocId &&
@@ -674,7 +560,6 @@ export async function buildTutorRagContext(params: {
     }));
   }
 
-  // Initial topK = 3, expanding up to 5 when full guided lesson / synthesis requires broader coverage
   const defaultLimit = 3;
   let targetLimit = defaultLimit;
   if (analysis.needsMultiPassageSynthesis && candidates.length > defaultLimit) {
@@ -742,10 +627,21 @@ export async function buildTutorRagContext(params: {
       })
       .join('\n\n---\n\n');
 
+    const matchedDocIds = Array.from(new Set(selectedResults.map((r) => r.chunk.documentId)));
+    const matchedDocs = matchedDocIds
+      .map((id) => docById.get(id))
+      .filter((d): d is IndexedDocumentRecord => Boolean(d));
+    const highlights = extractMatchingStructuredHighlights(matchedDocs, analysis.retrievalQuery, 2);
+    const highlightsText = highlights.join('\n');
+    const highlightBlock =
+      highlights.length > 0 && runningChars + highlightsText.length + 60 <= MAX_TOTAL_PASSAGE_CHARS
+        ? `\n\nKEY DOCUMENT DEFINITIONS & FORMULAS:\n${highlights.map((h) => `- ${h}`).join('\n')}`
+        : '';
+
     documentContextPromptBlock = `\n\nRETRIEVED STUDY MATERIAL PASSAGES (${selectedResults.length} excerpt${
       selectedResults.length === 1 ? '' : 's'
     } from ${searchedTitles.length} searchable material${searchedTitles.length === 1 ? '' : 's'}):
-${passageBlocks}
+${passageBlocks}${highlightBlock}
 
 DOCUMENT GROUNDING & CITATION RULES FOR TUTORING:
 1. Anchor your lesson in the retrieved study material passages above and cite the Document Title and Page reference inline (e.g., *(From "${
@@ -765,7 +661,7 @@ RULES:
 3. NEVER fabricate document citations or page numbers.`;
   }
 
-  return {
+  const finalResult: TutorRagContextResult = {
     pedagogicalAction: analysis.pedagogicalAction,
     useStructuredLessonPlan: analysis.useStructuredLessonPlan,
     retrievalQuery: analysis.retrievalQuery,
@@ -781,4 +677,11 @@ RULES:
     documentContextPromptBlock,
     hasAttachedDocument,
   };
+
+  setBoundedCacheEntry(tutorRagCache, cacheKey, {
+    result: finalResult,
+    expiresAt: Date.now() + 30_000,
+  });
+
+  return finalResult;
 }

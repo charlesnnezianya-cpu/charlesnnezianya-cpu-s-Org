@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import multer from 'multer';
@@ -15,7 +16,6 @@ import type {
   QuizGradingResponse,
   QuizQuestion,
   QuizSourceMode,
-  StructuredSummary,
   StudentAnswer,
   SummaryLevel,
   TutorMode,
@@ -53,6 +53,13 @@ import {
   getGroqServiceDiagnostics,
   GROQ_MODEL,
 } from './groqService.ts';
+import {
+  analyzeDocumentIntelligence,
+  fetchAuthorizedUserMaterials,
+  getOrBuildDocumentChunks,
+  retrieveRelevantPassages,
+  setBoundedCacheEntry,
+} from './documentEngine.ts';
 import { generateGroundedQuizQuestions } from './quizEngine.ts';
 import { generateExtractiveSummary } from './summaryEngine.ts';
 import {
@@ -64,6 +71,7 @@ import {
   AssessmentHttpError,
   checkPracticeQuestionAnswer,
   createServerAssessmentSession,
+  getAssessmentSealKey,
   getSupabaseAssessmentConfig,
   listActiveAssessmentSessions,
   restoreServerAssessmentSession,
@@ -95,6 +103,8 @@ async function mapWithConcurrency<T, R>(
 }
 
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB
+const EXTRACTION_CACHE_TTL_MS = 15 * 60 * 1000;
+const extractionCache = new Map<string, { result: ExtractionResult; expiresAt: number }>();
 
 const ALLOWED_IMAGE_MIMES = new Set([
   'image/png',
@@ -234,129 +244,6 @@ function normalizeMimeType(
   return 'text/plain';
 }
 
-function buildMarkdownSummary(summary: Omit<StructuredSummary, 'markdown'>): string {
-  const levelLabel =
-    summary.summaryLevel === 'short'
-      ? 'Short Summary'
-      : summary.summaryLevel === 'detailed'
-        ? 'Detailed Summary'
-        : 'Comprehensive Study Notes';
-
-  const lines: string[] = [
-    `# ${summary.title}`,
-    `**Subject:** ${summary.subjectArea} | **Format:** ${levelLabel}`,
-    '',
-    '## Topic Overview',
-    summary.topicOverview,
-    '',
-  ];
-
-  if (summary.mainConcepts.length > 0) {
-    lines.push('## Main Concepts & Points');
-    for (const item of summary.mainConcepts) {
-      lines.push(`### ${item.heading}`);
-      for (const pt of item.sourcePoints) {
-        lines.push(`- [From Source] ${pt}`);
-      }
-      if (item.aiClarification) {
-        lines.push(`- [AI Clarification] ${item.aiClarification}`);
-      }
-      lines.push('');
-    }
-  }
-
-  if (summary.importantDefinitions.length > 0) {
-    lines.push('## Important Definitions');
-    for (const def of summary.importantDefinitions) {
-      const originLabel = def.origin === 'source' ? 'From Source' : 'AI Clarification';
-      lines.push(`- **${def.term}** (${originLabel}): ${def.definition}`);
-    }
-    lines.push('');
-  }
-
-  if (summary.keyTerminology.length > 0) {
-    lines.push('## Key Terminology');
-    lines.push(summary.keyTerminology.join(', '));
-    lines.push('');
-  }
-
-  if (summary.difficultConceptExplanations.length > 0) {
-    lines.push('## Explanations of Difficult Concepts');
-    for (const item of summary.difficultConceptExplanations) {
-      lines.push(`### ${item.concept}`);
-      lines.push(`- **In the material:** ${item.sourceContext}`);
-      lines.push(`- **AI Plain-Language Explanation:** ${item.plainExplanation}`);
-      lines.push('');
-    }
-  }
-
-  if (summary.importantFacts.length > 0) {
-    lines.push('## Important Facts (From Source)');
-    for (const fact of summary.importantFacts) {
-      lines.push(`- ${fact}`);
-    }
-    lines.push('');
-  }
-
-  if (summary.relevantExamples.length > 0) {
-    lines.push('## Relevant Examples');
-    for (const ex of summary.relevantExamples) {
-      const tag = ex.origin === 'source' ? 'From Source' : 'AI Elaboration';
-      lines.push(`- **${ex.title}** (${tag}): ${ex.example}`);
-    }
-    lines.push('');
-  }
-
-  if (summary.formulasOrFrameworks.length > 0) {
-    lines.push('## Formulas & Frameworks');
-    for (const f of summary.formulasOrFrameworks) {
-      lines.push(`- **${f.name}:** \`${f.expressionOrStructure}\` — ${f.usage}`);
-    }
-    lines.push('');
-  }
-
-  if (summary.comparisonTables && summary.comparisonTables.length > 0) {
-    const escCell = (val: unknown) =>
-      String(val ?? '')
-        .replace(/\|/g, '\\|')
-        .replace(/\r?\n/g, ' ')
-        .trim();
-
-    lines.push('## Comparison Tables');
-    for (const table of summary.comparisonTables) {
-      lines.push(`### ${table.title}`);
-      const headers = ['Criterion', ...table.headers].map(escCell);
-      lines.push(`| ${headers.join(' | ')} |`);
-      lines.push(`| ${headers.map(() => '---').join(' | ')} |`);
-      for (const row of table.rows) {
-        lines.push(`| ${escCell(row.criterion)} | ${row.values.map(escCell).join(' | ')} |`);
-      }
-      if (table.caption) {
-        lines.push(`*${table.caption}*`);
-      }
-      lines.push('');
-    }
-  }
-
-  if (summary.revisionNotes.length > 0) {
-    lines.push('## Revision Notes');
-    for (const note of summary.revisionNotes) {
-      lines.push(`- ${note}`);
-    }
-    lines.push('');
-  }
-
-  if (summary.keyTakeaways.length > 0) {
-    lines.push('## Key Takeaways');
-    for (const t of summary.keyTakeaways) {
-      lines.push(`- ${t}`);
-    }
-    lines.push('');
-  }
-
-  return lines.join('\n').trim();
-}
-
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -405,8 +292,14 @@ function validateVisionImage(image?: {
     );
   }
   const cleanBase64 = image.data.replace(/^data:[^;]+;base64,/, '').trim();
-  const approxBytes = Math.ceil((cleanBase64.length * 3) / 4);
-  if (approxBytes > 15 * 1024 * 1024) {
+  const decodedBytes = Buffer.from(cleanBase64, 'base64');
+  if (decodedBytes.byteLength < 16) {
+    throw Object.assign(
+      new Error('Attached image appears invalid or empty. Please attach a valid JPG, PNG, or WEBP image.'),
+      { statusCode: 400 }
+    );
+  }
+  if (decodedBytes.byteLength > 15 * 1024 * 1024) {
     throw Object.assign(
       new Error('Attached image exceeds the 15 MB limit. Please choose a smaller image.'),
       { statusCode: 400 }
@@ -933,7 +826,14 @@ export function createApiApp() {
       }
 
       let listedCount = 0;
-      let probeResults: Array<{ ok: boolean; latencyMs: number; status?: number; quotaHit?: boolean }> = [];
+      const probeResults: Array<{
+        ok: boolean;
+        latencyMs: number;
+        status?: number;
+        quotaHit?: boolean;
+        error?: string;
+        modelTested?: string;
+      }> = [];
 
       if (geminiConfigured) {
         const ai = getGeminiClient();
@@ -948,33 +848,87 @@ export function createApiApp() {
         }
 
         try {
-          const singleProbe = await probeSingleModelQuick(ai, activeModel, 6000);
+          const singleProbe = await probeSingleModelQuick(ai, activeModel, 15000);
           probeResults.push({
             ok: singleProbe.ok,
             latencyMs: singleProbe.latencyMs,
             status: singleProbe.status,
             quotaHit: singleProbe.quotaHit,
+            ...(singleProbe.ok ? {} : { error: singleProbe.error || singleProbe.upstreamError }),
             modelTested: activeModel,
-          } as any);
-        } catch {}
+          });
+        } catch (probeErr: unknown) {
+          probeResults.push({
+            ok: false,
+            latencyMs: 0,
+            error: probeErr instanceof Error ? probeErr.message : String(probeErr),
+            modelTested: activeModel,
+          });
+        }
       }
 
       let supabaseHealthy: boolean | null = null;
+      const supabaseSchema: {
+        quizzesBase?: { ok: boolean; status: number };
+        quizzesSealedColumn?: { ok: boolean; status: number };
+        assessmentSessionsTable?: { ok: boolean; status: number };
+        quizAttemptsTable?: { ok: boolean; status: number };
+        studyMaterialsTable?: { ok: boolean; status: number };
+        studySummariesTable?: { ok: boolean; status: number };
+      } = {};
       if (supabaseConfigured) {
+        const baseSbUrl = supabaseUrl.replace(/\/$/, '');
         try {
-          const sbRes = await fetch(`${supabaseUrl.replace(/\/$/, '')}/auth/v1/health`, {
+          const sbRes = await fetch(`${baseSbUrl}/auth/v1/health`, {
             headers: { apikey: supabaseAnonKey },
           });
           supabaseHealthy = sbRes.ok;
         } catch {
           supabaseHealthy = false;
         }
+
+        const checkRestTable = async (tablePath: string): Promise<{ ok: boolean; status: number }> => {
+          try {
+            const tRes = await fetch(`${baseSbUrl}/rest/v1/${tablePath}`, {
+              headers: {
+                apikey: supabaseAnonKey,
+                Authorization: `Bearer ${supabaseAnonKey}`,
+              },
+            });
+            return { ok: tRes.status !== 404 && tRes.status !== 400, status: tRes.status };
+          } catch {
+            return { ok: false, status: 0 };
+          }
+        };
+
+        const [quizzesBase, quizzesSealedColumn, assessmentSessionsTable, quizAttemptsTable, studyMaterialsTable, studySummariesTable] = await Promise.all([
+          checkRestTable('quizzes?select=id&limit=1'),
+          checkRestTable('quizzes?select=id,sealed_answer_key&limit=1'),
+          checkRestTable('assessment_sessions?select=id&limit=1'),
+          checkRestTable('quiz_attempts?select=id&limit=1'),
+          checkRestTable('study_materials?select=id&limit=1'),
+          checkRestTable('study_summaries?select=id&limit=1'),
+        ]);
+        supabaseSchema.quizzesBase = quizzesBase;
+        supabaseSchema.quizzesSealedColumn = quizzesSealedColumn;
+        supabaseSchema.assessmentSessionsTable = assessmentSessionsTable;
+        supabaseSchema.quizAttemptsTable = quizAttemptsTable;
+        supabaseSchema.studyMaterialsTable = studyMaterialsTable;
+        supabaseSchema.studySummariesTable = studySummariesTable;
+      }
+
+      let assessmentSecretConfigured = false;
+      try {
+        getAssessmentSealKey();
+        assessmentSecretConfigured = true;
+      } catch {
+        assessmentSecretConfigured = false;
       }
 
       return res.json({
         ok: true,
         aiConfigured,
-        geminiConfigured: aiConfigured,
+        geminiConfigured,
         groqConfigured,
         groqKeys: {
           key1: Boolean(groqKeyConfig.key1),
@@ -985,8 +939,10 @@ export function createApiApp() {
         groqIndividualProbes: individualKeyProbes,
         keyFailoverTest: keyFailoverTestResult,
         groqDiagnostics: getGroqServiceDiagnostics(),
+        assessmentSecretConfigured,
         supabaseConfigured,
         supabaseHealthy,
+        supabaseSchema,
         listedCount,
         probeResults,
       });
@@ -995,7 +951,7 @@ export function createApiApp() {
     res.json({
       ok: true,
       aiConfigured,
-      geminiConfigured: aiConfigured,
+      geminiConfigured,
       groqConfigured,
       groqKeys: {
         key1: Boolean(groqKeyConfig.key1),
@@ -1313,9 +1269,19 @@ export function createApiApp() {
             });
           }
 
+          const resolvedTextTitle = titleInput || 'Pasted Study Notes';
+          const textCacheKey = `text:${crypto
+            .createHash('sha256')
+            .update(`${resolvedTextTitle}\0${rawText}`)
+            .digest('hex')}`;
+          const cachedTextResult = extractionCache.get(textCacheKey);
+          if (cachedTextResult && cachedTextResult.expiresAt > Date.now()) {
+            return res.json(cachedTextResult.result);
+          }
+
           const chunks = chunkText(rawText);
           const result: ExtractionResult = {
-            title: titleInput || 'Pasted Study Notes',
+            title: resolvedTextTitle,
             materialType: 'text',
             fileName: null,
             fileSizeBytes: Buffer.byteLength(rawText, 'utf8'),
@@ -1328,6 +1294,12 @@ export function createApiApp() {
             pageCount: null,
             extractionMethod: 'direct-text',
           };
+          setBoundedCacheEntry(
+            extractionCache,
+            textCacheKey,
+            { result, expiresAt: Date.now() + EXTRACTION_CACHE_TTL_MS },
+            60
+          );
           return res.json(result);
         }
 
@@ -1345,6 +1317,13 @@ export function createApiApp() {
           typeof req.body?.title === 'string' && req.body.title.trim()
             ? req.body.title.trim()
             : baseTitle;
+
+        const fileHash = crypto.createHash('sha256').update(file.buffer).digest('hex');
+        const fileCacheKey = `file:${materialType}:${fileHash}:${requestedTitle}:${file.originalname}`;
+        const cachedFileResult = extractionCache.get(fileCacheKey);
+        if (cachedFileResult && cachedFileResult.expiresAt > Date.now()) {
+          return res.json(cachedFileResult.result);
+        }
 
         let extractedText = '';
         let pageCount: number | null = null;
@@ -1452,7 +1431,7 @@ export function createApiApp() {
                       },
                     },
                     {
-                      text: 'Perform high-accuracy academic OCR on this image of notes or textbook pages. Transcribe all printed or handwritten text, bullet lists, definitions, tables, and mathematical equations in exact top-to-bottom, left-to-right reading order. If a diagram has labels or callouts, include them cleanly under a [Diagram Labels] subheading. Output only the extracted text.',
+                      text: 'Perform high-accuracy academic OCR on this image of notes or textbook pages. Transcribe all printed or handwritten text, bullet lists, definitions, tables, and mathematical equations in exact top-to-bottom, left-to-right reading order. If a diagram has labels or callouts, include them cleanly under a [Diagram Labels] subheading. If the image contains no legible text (e.g., blank image, solid color, or illegible blur), output strictly: [NO_TEXT_DETECTED]. Output ONLY the extracted text or [NO_TEXT_DETECTED], with no thinking notes or commentary.',
                     },
                   ],
                 },
@@ -1463,10 +1442,17 @@ export function createApiApp() {
               }),
             { maxRetries: 2, timeoutMs: 55000 }
           );
-          extractedText = (ocrResponse.text ?? '').trim();
+          extractedText = (ocrResponse.text ?? '')
+            .replace(/^Thinking Process:[\s\S]*?(?:\n\n|$)/i, '')
+            .trim();
           extractionMethod = 'image-ocr';
 
-          if (!extractedText || extractedText.length < 10) {
+          if (
+            !extractedText ||
+            /\[NO_TEXT_DETECTED\]/i.test(extractedText) ||
+            /^Thinking Process:/i.test(extractedText) ||
+            extractedText.length < 10
+          ) {
             return res.status(422).json({
               error:
                 'No legible text could be detected in this image. Please upload a clearer, well-lit photo or scan.',
@@ -1494,7 +1480,7 @@ export function createApiApp() {
                       },
                     },
                     {
-                      text: 'Transcribe this academic lecture or study voice note accurately with proper punctuation, paragraph breaks by topic, and clear academic terminology.',
+                      text: 'Transcribe this academic lecture or study voice note accurately with proper punctuation, paragraph breaks by topic, and clear academic terminology. If the audio contains only silence, background noise, or no intelligible speech, output strictly: [NO_SPEECH_DETECTED]. Never ask the user to upload a file or emit conversational filler.',
                     },
                   ],
                 },
@@ -1508,7 +1494,12 @@ export function createApiApp() {
           extractedText = (transcriptResponse.text ?? '').trim();
           extractionMethod = 'audio-transcription';
 
-          if (!extractedText || extractedText.length < 10) {
+          if (
+            !extractedText ||
+            /\[NO_SPEECH_DETECTED\]/i.test(extractedText) ||
+            /please provide the audio file/i.test(extractedText) ||
+            extractedText.length < 10
+          ) {
             return res.status(422).json({
               error:
                 'Could not transcribe speech from this audio file. Please verify the recording contains audible speech.',
@@ -1532,495 +1523,19 @@ export function createApiApp() {
           extractionMethod,
         };
 
+        setBoundedCacheEntry(
+          extractionCache,
+          fileCacheKey,
+          { result, expiresAt: Date.now() + EXTRACTION_CACHE_TTL_MS },
+          60
+        );
+
         return res.json(result);
       } catch (err: unknown) {
         return sendSafeApiError(res, 'materials.extract', err);
       }
     }
   );
-
-  app.post('/api/summaries/generate', async (req: Request, res: Response) => {
-    try {
-      const { extractedText, title, materialType, summaryLevel } = (req.body || {}) as {
-        extractedText?: string;
-        title?: string;
-        materialType?: MaterialSourceType;
-        summaryLevel?: SummaryLevel;
-      };
-
-      if (!extractedText || typeof extractedText !== 'string' || extractedText.trim().length < 20) {
-        return res.status(400).json({
-          error:
-            'Insufficient study material text. Please extract or paste at least 20 characters before summarizing.',
-        });
-      }
-
-      const level: SummaryLevel =
-        summaryLevel === 'short' || summaryLevel === 'detailed' || summaryLevel === 'comprehensive'
-          ? summaryLevel
-          : 'detailed';
-
-      const chunks = chunkText(extractedText.trim(), 18000, 350);
-
-      let synthesisSource = extractedText.trim();
-
-      if (chunks.length > 2) {
-        const chunkNotes: string[] = [];
-        for (let i = 0; i < chunks.length; i++) {
-          if (i > 0) {
-            await new Promise((resolve) => setTimeout(resolve, 600));
-          }
-          const chunkTextItem = chunks[i];
-          const chunkPrompt = `Extract all essential academic concepts, facts, definitions, formulas/frameworks, and examples strictly from Section ${i + 1} of ${chunks.length} of "${title || 'Study Material'}". Preserve exact order and accuracy without inventing external claims.\n\n---\n${chunkTextItem}`;
-          const { text: textPart } = await runMasterAiGeneration({
-            systemInstruction:
-              'You are a rigorous academic research assistant. Distill each document section faithfully from the provided text without inventing facts.',
-            userPrompt: chunkPrompt,
-            maxTokens: 1536,
-            geminiFallback: async () => {
-              const ai = getGeminiClient();
-              const { result: partRes } = await runWithGeminiModel(
-                (model, signal) =>
-                  ai.models.generateContent({
-                    model,
-                    contents: chunkPrompt,
-                    config: {
-                      systemInstruction:
-                        'You are a rigorous academic research assistant. Distill each document section faithfully from the provided text without inventing facts.',
-                      ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-                      abortSignal: signal,
-                    },
-                  }),
-                { maxRetries: 1, timeoutMs: 50000 }
-              );
-              return partRes.text ?? '';
-            },
-          });
-          const trimmedPart = textPart.trim();
-          if (!trimmedPart) {
-            throw new AiInvalidResponseError(
-              `The AI returned an empty response while processing section ${i + 1}. Please try again.`
-            );
-          }
-          chunkNotes.push(`[Section ${i + 1}]\n${trimmedPart}`);
-        }
-        synthesisSource = chunkNotes.join('\n\n');
-      }
-
-      const cappedSynthesisSource = synthesisSource.slice(0, 14000);
-
-      const depthInstructions =
-        level === 'short'
-          ? 'Produce a SHORT SUMMARY: concise 1-paragraph topic overview, 3 to 5 main concept headings (each with 2-3 sourcePoints and a brief aiClarification), up to 5 important definitions, 5 to 8 key terms, 1 to 2 difficult concept explanations if needed, 3 to 5 important facts, 1 to 2 relevant examples, essential formulas if present, 4 concise revision notes, and 3 to 4 key takeaways.'
-          : level === 'detailed'
-            ? 'Produce a DETAILED SUMMARY: thorough 2-paragraph topic overview, 5 to 8 main concept headings in document order (with grounded sourcePoints and helpful aiClarification), all key definitions, 8 to 14 key terminology entries, 2 to 4 difficult concept explanations, 5 to 8 important facts, 2 to 4 relevant examples, all relevant formulas/frameworks, 5 to 8 revision notes, and 5 to 7 key takeaways.'
-            : 'Produce COMPREHENSIVE STUDY NOTES: rich multi-paragraph topic overview, 7 to 12 deeply structured main concept headings preserving exact progression of the uploaded material (each with exhaustive sourcePoints and dedicated aiClarification), complete important definitions, 12 to 20 key terminology items, 3 to 6 detailed difficult concept explanations, 8 to 12 important facts, 3 to 6 concrete examples, all relevant formulas/frameworks, 8 to 12 exam-ready revision notes, and 6 to 10 key takeaways.';
-
-      const summarySystemInstruction =
-        `You are Brainstine, an academic study companion. Prioritize the uploaded material strictly. Never fabricate facts or claim unsupported information came from the source. Clearly separate facts directly extracted from the material (sourcePoints, origin: "source", importantFacts) from helpful AI explanations/elaborations (aiClarification, plainExplanation, origin: "ai_clarification" or "ai_elaboration"). If no formulas or frameworks appear in the material, return an empty array for formulasOrFrameworks. Also generate comparisonTables whenever contrasting 2+ concepts/methods/entities (or empty array if unnecessary), and 1 to 2 visualDiagrams (process_flow, concept_map, scientific_system, or cartesian_plot) when a visual schematic helps students understand relationships, sequences, or systems cleanly.
-
-CRITICAL JSON FORMAT REQUIREMENT:
-You must respond strictly with a valid JSON object matching this schema:
-{
-  "title": "string",
-  "subjectArea": "string",
-  "topicOverview": "string",
-  "mainConcepts": [
-    {
-      "heading": "string",
-      "sourcePoints": ["string"],
-      "aiClarification": "string"
-    }
-  ],
-  "importantDefinitions": [
-    {
-      "term": "string",
-      "definition": "string",
-      "origin": "source"
-    }
-  ],
-  "keyTerminology": ["string"],
-  "difficultConceptExplanations": [
-    {
-      "concept": "string",
-      "sourceContext": "string",
-      "plainExplanation": "string"
-    }
-  ],
-  "importantFacts": ["string"],
-  "relevantExamples": [
-    {
-      "title": "string",
-      "example": "string",
-      "origin": "source"
-    }
-  ],
-  "formulasOrFrameworks": [
-    {
-      "name": "string",
-      "expressionOrStructure": "string",
-      "usage": "string"
-    }
-  ],
-  "comparisonTables": [
-    {
-      "title": "string",
-      "headers": ["string"],
-      "rows": [
-        {
-          "criterion": "string",
-          "values": ["string"]
-        }
-      ],
-      "caption": "string"
-    }
-  ],
-  "visualDiagrams": [],
-  "revisionNotes": ["string"],
-  "keyTakeaways": ["string"]
-}`;
-      const summaryUserPrompt = `Material Title: ${title || 'Academic Study Material'}\nSource Format: ${materialType || 'text'}\n\n${depthInstructions}\n\nUploaded Source Content:\n${cappedSynthesisSource}\n\nRespond with a valid JSON object matching the requested schema.`;
-
-      const targetSummaryMaxTokens = level === 'short' ? 2048 : level === 'detailed' ? 3000 : 3600;
-
-      const { text: summaryResponseText } = await runMasterAiGeneration({
-        systemInstruction: summarySystemInstruction,
-        userPrompt: summaryUserPrompt,
-        jsonMode: true,
-        maxTokens: targetSummaryMaxTokens,
-        temperature: 0.3,
-        geminiFallback: async () => {
-          const ai = getGeminiClient();
-          const { result: response } = await runWithGeminiModel(
-            (model, signal) =>
-              ai.models.generateContent({
-                model,
-                contents: summaryUserPrompt,
-                config: {
-                  systemInstruction: summarySystemInstruction,
-                  ...getModelThinkingConfig(
-                    level === 'comprehensive' ? ThinkingLevel.LOW : ThinkingLevel.MINIMAL
-                  ),
-                  abortSignal: signal,
-                  responseMimeType: 'application/json',
-                  responseSchema: {
-                    type: Type.OBJECT,
-                    properties: {
-                      title: { type: Type.STRING },
-                      subjectArea: { type: Type.STRING },
-                      topicOverview: { type: Type.STRING },
-                      mainConcepts: {
-                        type: Type.ARRAY,
-                        items: {
-                          type: Type.OBJECT,
-                          properties: {
-                            heading: { type: Type.STRING },
-                            sourcePoints: {
-                              type: Type.ARRAY,
-                              items: { type: Type.STRING },
-                              description: 'Main points drawn directly from the uploaded material.',
-                            },
-                            aiClarification: {
-                              type: Type.STRING,
-                              description:
-                                'Brief AI-authored explanation or bridge clarifying why/how these source points connect.',
-                            },
-                          },
-                          required: ['heading', 'sourcePoints', 'aiClarification'],
-                        },
-                      },
-                      importantDefinitions: {
-                        type: Type.ARRAY,
-                        items: {
-                          type: Type.OBJECT,
-                          properties: {
-                            term: { type: Type.STRING },
-                            definition: { type: Type.STRING },
-                            origin: {
-                              type: Type.STRING,
-                              description:
-                                '"source" if defined in material, or "ai_clarification" if AI supplemented.',
-                            },
-                          },
-                          required: ['term', 'definition', 'origin'],
-                        },
-                      },
-                      keyTerminology: {
-                        type: Type.ARRAY,
-                        items: { type: Type.STRING },
-                      },
-                      difficultConceptExplanations: {
-                        type: Type.ARRAY,
-                        items: {
-                          type: Type.OBJECT,
-                          properties: {
-                            concept: { type: Type.STRING },
-                            sourceContext: {
-                              type: Type.STRING,
-                              description: 'What the uploaded material states about this concept.',
-                            },
-                            plainExplanation: {
-                              type: Type.STRING,
-                              description:
-                                'Clear AI-authored breakdown explaining the difficult concept step by step.',
-                            },
-                          },
-                          required: ['concept', 'sourceContext', 'plainExplanation'],
-                        },
-                      },
-                      importantFacts: {
-                        type: Type.ARRAY,
-                        items: { type: Type.STRING },
-                        description: 'Key verifiable facts extracted directly from the uploaded material.',
-                      },
-                      relevantExamples: {
-                        type: Type.ARRAY,
-                        items: {
-                          type: Type.OBJECT,
-                          properties: {
-                            title: { type: Type.STRING },
-                            example: { type: Type.STRING },
-                            origin: {
-                              type: Type.STRING,
-                              description:
-                                '"source" if present in uploaded material, or "ai_elaboration" if generated to illustrate.',
-                            },
-                          },
-                          required: ['title', 'example', 'origin'],
-                        },
-                      },
-                      formulasOrFrameworks: {
-                        type: Type.ARRAY,
-                        items: {
-                          type: Type.OBJECT,
-                          properties: {
-                            name: { type: Type.STRING },
-                            expressionOrStructure: { type: Type.STRING },
-                            usage: { type: Type.STRING },
-                          },
-                          required: ['name', 'expressionOrStructure', 'usage'],
-                        },
-                      },
-                      comparisonTables: {
-                        type: Type.ARRAY,
-                        description: 'Optional comparison matrices contrasting key concepts/processes.',
-                        items: {
-                          type: Type.OBJECT,
-                          properties: {
-                            title: { type: Type.STRING },
-                            headers: {
-                              type: Type.ARRAY,
-                              items: { type: Type.STRING },
-                            },
-                            rows: {
-                              type: Type.ARRAY,
-                              items: {
-                                type: Type.OBJECT,
-                                properties: {
-                                  criterion: { type: Type.STRING },
-                                  values: {
-                                    type: Type.ARRAY,
-                                    items: { type: Type.STRING },
-                                  },
-                                },
-                                required: ['criterion', 'values'],
-                              },
-                            },
-                            caption: { type: Type.STRING },
-                          },
-                          required: ['title', 'headers', 'rows'],
-                        },
-                      },
-                      visualDiagrams: {
-                        type: Type.ARRAY,
-                        description:
-                          '1-2 clear educational schematics/diagrams clarifying stages, concept maps, or quantitative trends.',
-                        items: {
-                          type: Type.OBJECT,
-                          properties: {
-                            type: {
-                              type: Type.STRING,
-                              description:
-                                '"process_flow" | "concept_map" | "scientific_system" | "cartesian_plot"',
-                            },
-                            title: { type: Type.STRING },
-                            subject: { type: Type.STRING },
-                            caption: { type: Type.STRING },
-                            nodes: {
-                              type: Type.ARRAY,
-                              items: {
-                                type: Type.OBJECT,
-                                properties: {
-                                  id: { type: Type.STRING },
-                                  label: { type: Type.STRING },
-                                  sublabel: { type: Type.STRING },
-                                  detail: { type: Type.STRING },
-                                  x: { type: Type.NUMBER },
-                                  y: { type: Type.NUMBER },
-                                  tone: { type: Type.STRING },
-                                },
-                                required: ['id', 'label'],
-                              },
-                            },
-                            edges: {
-                              type: Type.ARRAY,
-                              items: {
-                                type: Type.OBJECT,
-                                properties: {
-                                  from: { type: Type.STRING },
-                                  to: { type: Type.STRING },
-                                  label: { type: Type.STRING },
-                                },
-                                required: ['from', 'to'],
-                              },
-                            },
-                            xAxisLabel: { type: Type.STRING },
-                            yAxisLabel: { type: Type.STRING },
-                            series: {
-                              type: Type.ARRAY,
-                              items: {
-                                type: Type.OBJECT,
-                                properties: {
-                                  name: { type: Type.STRING },
-                                  color: { type: Type.STRING },
-                                  points: {
-                                    type: Type.ARRAY,
-                                    items: {
-                                      type: Type.OBJECT,
-                                      properties: {
-                                        x: { type: Type.NUMBER },
-                                        y: { type: Type.NUMBER },
-                                        label: { type: Type.STRING },
-                                      },
-                                      required: ['x', 'y'],
-                                    },
-                                  },
-                                },
-                                required: ['name', 'points'],
-                              },
-                            },
-                          },
-                          required: ['type', 'title', 'caption'],
-                        },
-                      },
-                      revisionNotes: {
-                        type: Type.ARRAY,
-                        items: { type: Type.STRING },
-                      },
-                      keyTakeaways: {
-                        type: Type.ARRAY,
-                        items: { type: Type.STRING },
-                      },
-                    },
-                    required: [
-                      'title',
-                      'subjectArea',
-                      'topicOverview',
-                      'mainConcepts',
-                      'importantDefinitions',
-                      'keyTerminology',
-                      'difficultConceptExplanations',
-                      'importantFacts',
-                      'relevantExamples',
-                      'formulasOrFrameworks',
-                      'comparisonTables',
-                      'visualDiagrams',
-                      'revisionNotes',
-                      'keyTakeaways',
-                    ],
-                  },
-                },
-              }),
-            { maxRetries: 1, timeoutMs: 75000 }
-          );
-          return response.text ?? '';
-        },
-      });
-      const response = { text: summaryResponseText };
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const parsed = parseAiJsonResponse<Record<string, any>>(response.text, 'generating the study summary');
-      if (!parsed.topicOverview && !Array.isArray(parsed.mainConcepts)) {
-        throw new AiInvalidResponseError(
-          'The AI returned an incomplete study summary. Please try again.'
-        );
-      }
-
-      const validDiagramTypes = new Set([
-        'process_flow',
-        'concept_map',
-        'comparison_matrix',
-        'cartesian_plot',
-        'scientific_system',
-      ]);
-
-      const baseSummary: Omit<StructuredSummary, 'markdown'> = {
-        title: parsed.title || title || 'Study Summary',
-        subjectArea: parsed.subjectArea || 'General Studies',
-        summaryLevel: level,
-        topicOverview: parsed.topicOverview || '',
-        mainConcepts: Array.isArray(parsed.mainConcepts) ? parsed.mainConcepts : [],
-        importantDefinitions: Array.isArray(parsed.importantDefinitions)
-          ? parsed.importantDefinitions.map(
-              (d: { term: string; definition: string; origin?: string }) => ({
-                term: d.term,
-                definition: d.definition,
-                origin: d.origin === 'ai_clarification' ? 'ai_clarification' : 'source',
-              })
-            )
-          : [],
-        keyTerminology: Array.isArray(parsed.keyTerminology) ? parsed.keyTerminology : [],
-        difficultConceptExplanations: Array.isArray(parsed.difficultConceptExplanations)
-          ? parsed.difficultConceptExplanations
-          : [],
-        importantFacts: Array.isArray(parsed.importantFacts) ? parsed.importantFacts : [],
-        relevantExamples: Array.isArray(parsed.relevantExamples)
-          ? parsed.relevantExamples.map(
-              (e: { title: string; example: string; origin?: string }) => ({
-                title: e.title,
-                example: e.example,
-                origin: e.origin === 'source' ? 'source' : 'ai_elaboration',
-              })
-            )
-          : [],
-        formulasOrFrameworks: Array.isArray(parsed.formulasOrFrameworks)
-          ? parsed.formulasOrFrameworks
-          : [],
-        comparisonTables: Array.isArray(parsed.comparisonTables)
-          ? parsed.comparisonTables.filter(
-              (t: { title?: string; headers?: unknown[]; rows?: unknown[] }) =>
-                t && t.title && Array.isArray(t.headers) && Array.isArray(t.rows) && t.rows.length > 0
-            )
-          : [],
-        visualDiagrams: Array.isArray(parsed.visualDiagrams)
-          ? parsed.visualDiagrams.filter(
-              (d: { type?: string; title?: string; nodes?: unknown[]; series?: unknown[] }) =>
-                d &&
-                d.title &&
-                typeof d.type === 'string' &&
-                validDiagramTypes.has(d.type) &&
-                ((Array.isArray(d.nodes) && d.nodes.length >= 2) ||
-                  (Array.isArray(d.series) && d.series.length >= 1))
-            )
-          : [],
-        revisionNotes: Array.isArray(parsed.revisionNotes) ? parsed.revisionNotes : [],
-        keyTakeaways: Array.isArray(parsed.keyTakeaways) ? parsed.keyTakeaways : [],
-        wordCount: countWords(extractedText),
-        chunkCount: chunks.length,
-        generatedAt: new Date().toISOString(),
-        generationMode: 'ai',
-      };
-
-      const fullSummary: StructuredSummary = {
-        ...baseSummary,
-        markdown: buildMarkdownSummary(baseSummary),
-      };
-
-      return res.json(fullSummary);
-    } catch (err: unknown) {
-      return sendSafeApiError(res, 'summaries.generate', err);
-    }
-  });
 
   app.post('/api/summaries/extractive', (req: Request, res: Response) => {
     try {
@@ -2044,7 +1559,7 @@ You must respond strictly with a valid JSON object matching this schema:
           : 'detailed';
 
       const summary = generateExtractiveSummary(
-        (title || 'Study Summary').trim(),
+        (title || 'Document Summary').trim(),
         (subjectArea || 'General Studies').trim(),
         extractedText.trim(),
         level
@@ -2055,105 +1570,7 @@ You must respond strictly with a valid JSON object matching this schema:
         generationMode: 'extractive' as const,
       });
     } catch (err: unknown) {
-      return sendSafeApiError(res, 'summaries.generate', err);
-    }
-  });
-
-  app.post('/api/summaries/followup', async (req: Request, res: Response) => {
-    try {
-      const { actionType, question, summary, sourceText } = (req.body || {}) as {
-        actionType?: 'question' | 'simpler_explanation' | 'examples' | 'revision_notes';
-        question?: string;
-        summary?: StructuredSummary;
-        sourceText?: string;
-      };
-
-      if (!summary) {
-        return res
-          .status(400)
-          .json({ error: 'A generated summary is required for follow-up queries.' });
-      }
-
-      const mode = actionType || 'question';
-      if (mode === 'question' && (!question || !question.trim())) {
-        return res
-          .status(400)
-          .json({ error: 'Please enter a follow-up question about the summary.' });
-      }
-
-      const promptTask =
-        mode === 'simpler_explanation'
-          ? 'Provide a much simpler, intuitive explanation of the core concepts in this study summary as if explaining to a beginner student.'
-          : mode === 'examples'
-            ? 'Provide 3 concrete, relatable academic or real-world examples illustrating the key concepts in this study summary.'
-            : mode === 'revision_notes'
-              ? 'Generate a focused, high-yield bulleted set of exam revision notes based directly on this summary and material.'
-              : `Answer the student's follow-up question clearly: "${question?.trim()}"`;
-
-      const contextSnippet = sourceText
-        ? sourceText.slice(0, 8000)
-        : (summary.markdown || '').slice(0, 6000);
-
-      const followUpSystemInstruction =
-        'You are Brainstine answering a scoped follow-up request on a specific study summary. You must respond with a valid JSON object strictly matching this schema: {"fromSource": "string", "aiExplanation": "string"}. Strictly separate what is explicitly stated in the uploaded source material ("fromSource") from any supplemental AI explanation, analogy, or examples ("aiExplanation"). Never claim AI-generated examples or clarifications came from the source text if they did not.';
-      const followUpUserPrompt = `Study Summary Title: ${summary.title}\nSubject: ${summary.subjectArea}\n\nSummary Content:\n${summary.markdown || ''}\n\nUploaded Source Excerpt:\n${contextSnippet}\n\nStudent Request: ${promptTask}\n\nRespond with a valid JSON object matching the requested schema.`;
-
-      const { text: followUpResponseText } = await runMasterAiGeneration({
-        systemInstruction: followUpSystemInstruction,
-        userPrompt: followUpUserPrompt,
-        jsonMode: true,
-        maxTokens: 1536,
-        geminiFallback: async () => {
-          const ai = getGeminiClient();
-          const { result: response } = await runWithGeminiModel(
-            (model, signal) =>
-              ai.models.generateContent({
-                model,
-                contents: followUpUserPrompt,
-                config: {
-                  systemInstruction: followUpSystemInstruction,
-                  ...getModelThinkingConfig(ThinkingLevel.MINIMAL),
-                  abortSignal: signal,
-                  responseMimeType: 'application/json',
-                  responseSchema: {
-                    type: Type.OBJECT,
-                    properties: {
-                      fromSource: {
-                        type: Type.STRING,
-                        description:
-                          'Facts, statements, or context drawn directly from the uploaded material/summary (or "Not explicitly stated in the source material" if the question asks for outside elaboration).',
-                      },
-                      aiExplanation: {
-                        type: Type.STRING,
-                        description:
-                          'Clear, helpful AI-authored explanation, simplification, examples, or revision notes addressing the student request.',
-                      },
-                    },
-                    required: ['fromSource', 'aiExplanation'],
-                  },
-                },
-              }),
-            { maxRetries: 2, timeoutMs: 45000 }
-          );
-          return response.text ?? '';
-        },
-      });
-
-      const parsed = parseAiJsonResponse<{ fromSource?: string; aiExplanation?: string }>(
-        followUpResponseText,
-        'answering the summary follow-up'
-      );
-      if (!parsed.aiExplanation && !parsed.fromSource) {
-        throw new AiInvalidResponseError(
-          'The AI returned an incomplete follow-up answer. Please try again.'
-        );
-      }
-      return res.json({
-        fromSource: parsed.fromSource || 'Grounded in the uploaded summary.',
-        aiExplanation: parsed.aiExplanation || '',
-      });
-    } catch (err: unknown) {
-      return sendSafeApiError(res, 'summaries.followup', err);
+      return sendSafeApiError(res, 'summaries.document', err);
     }
   });
 
@@ -2253,8 +1670,46 @@ You must respond strictly with a valid JSON object matching this schema:
           ? Math.min(180, Math.max(5, Number(timeLimitMinutes) || 20))
           : null;
 
-      const sourceContent = mode === 'topic' ? `Study topic: ${cleanTitle}` : cleanSource;
-      const rawQuestions = generateGroundedQuizQuestions(sourceContent, totalCount, validDifficulty);
+      let sourceContent = cleanSource;
+      if (mode === 'topic' && sourceContent.length < 30 && caller.accessToken) {
+        const userDocs = await fetchAuthorizedUserMaterials(caller.accessToken, caller.userId);
+        if (userDocs.length > 0) {
+          const allChunks = userDocs.flatMap((doc) => getOrBuildDocumentChunks(doc));
+          const hits = retrieveRelevantPassages(
+            cleanTitle,
+            allChunks,
+            caller.userId,
+            undefined,
+            8
+          );
+          if (hits.length > 0) {
+            sourceContent = hits
+              .map((h) =>
+                h.chunk.pageNumber !== null
+                  ? `[Page ${h.chunk.pageNumber}]\n${h.chunk.originalText}`
+                  : h.chunk.originalText
+              )
+              .join('\n\n');
+          }
+        }
+      }
+
+      if (mode === 'topic' && sourceContent.length < 30) {
+        return res.status(400).json({
+          error: `No uploaded study material or pasted notes covering "${cleanTitle}" were found. Upload a document, select a saved summary, or paste study text to generate grounded questions.`,
+        });
+      }
+
+      const safeTitle = cleanTitle || 'Document Assessment';
+      const rawQuestions = generateGroundedQuizQuestions(
+        sourceContent,
+        totalCount,
+        validDifficulty,
+        {
+          assessmentMode: resolvedAssessmentMode,
+          title: safeTitle,
+        }
+      );
 
       if (rawQuestions.length === 0) {
         return res.status(400).json({
@@ -2263,12 +1718,15 @@ You must respond strictly with a valid JSON object matching this schema:
         });
       }
 
-      const safeTitle = cleanTitle || 'Document Assessment';
+      const inferredSubject = analyzeDocumentIntelligence(sourceContent, {
+        title: safeTitle,
+      }).subjectArea;
+
       const { session, sanitizedQuestions } = await createServerAssessmentSession({
         userId: caller.userId,
         accessToken: caller.accessToken,
         title: safeTitle,
-        subjectArea: 'General Studies',
+        subjectArea: inferredSubject,
         sourceMode: mode,
         materialId: typeof materialId === 'string' && materialId.trim() ? materialId.trim() : null,
         summaryId: typeof summaryId === 'string' && summaryId.trim() ? summaryId.trim() : null,

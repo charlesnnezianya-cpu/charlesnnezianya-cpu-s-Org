@@ -1,12 +1,21 @@
 import crypto from 'crypto';
 import {
-  chunkDocumentText,
+  extractBearerToken,
   extractKeywords,
+  extractMatchingStructuredHighlights,
+  fetchAuthorizedUserMaterials,
+  getOrBuildDocumentChunks,
+  getSupabaseServerConfig,
   normalizeText,
+  resolveAuthorizedUserFromBearer,
   retrieveRelevantPassages,
+  setBoundedCacheEntry,
   type DocumentChunk,
+  type IndexedDocumentRecord,
   type RetrievalResult,
 } from './documentEngine.ts';
+
+export { extractBearerToken, resolveAuthorizedUserFromBearer };
 
 export type ChatIntent =
   | 'document_specific'
@@ -60,14 +69,6 @@ export interface ChatRagContextResult {
   hasAttachedDocument: boolean;
 }
 
-interface IndexedDocumentRecord {
-  id: string;
-  userId: string;
-  title: string;
-  type: string;
-  extractedText: string;
-}
-
 // Conversational / question verbs that should not dilute topic-specific retrieval gating
 const QUERY_FILLER_WORDS = new Set([
   'explain', 'describe', 'define', 'compare', 'contrast', 'summarize', 'summary',
@@ -82,165 +83,10 @@ const QUERY_FILLER_WORDS = new Set([
   'longer', 'key', 'points', 'point', 'discuss', 'mention', 'stated', 'says',
   'say', 'know', 'anything', 'something', 'everything', 'nothing', 'exact',
   'exactly', 'specifically', 'specific', 'does', 'do', 'did',
+  'briefly', 'overview', 'recap', 'highlights', 'takeaways',
 ]);
 
-// Caches (bounded in memory to prevent unbounded growth in long-running Node processes)
-const MAX_CACHE_ENTRIES = 120;
-const tokenVerifyCache = new Map<string, { userId: string; expiresAt: number }>();
-const materialsCache = new Map<string, { docs: IndexedDocumentRecord[]; expiresAt: number }>();
-const chunkCache = new Map<string, DocumentChunk[]>();
-
-function setBounded<K, V>(map: Map<K, V>, key: K, value: V) {
-  if (map.size >= MAX_CACHE_ENTRIES) {
-    const firstKey = map.keys().next().value;
-    if (firstKey !== undefined) map.delete(firstKey);
-  }
-  map.set(key, value);
-}
-
-function getSupabaseServerConfig(): { url: string; anonKey: string } | null {
-  const url = (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '').trim().replace(/\/$/, '');
-  const anonKey = (process.env.VITE_SUPABASE_ANON_KEY || '').trim();
-  if (!url || !anonKey) return null;
-  return { url, anonKey };
-}
-
-export function extractBearerToken(authHeader?: string | string[]): string | null {
-  if (!authHeader) return null;
-  const headerStr = Array.isArray(authHeader) ? authHeader[0] : authHeader;
-  if (!headerStr) return null;
-  const match = headerStr.trim().match(/^Bearer\s+(.+)$/i);
-  return match ? match[1].trim() : null;
-}
-
-/**
- * Verifies a Supabase user access token against Supabase Auth and returns the verified user ID.
- */
-export async function resolveAuthorizedUserFromBearer(
-  authHeader?: string | string[]
-): Promise<{ userId: string; accessToken: string } | null> {
-  const token = extractBearerToken(authHeader);
-  if (!token) return null;
-
-  const cfg = getSupabaseServerConfig();
-  if (!cfg) return null;
-
-  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-  const cached = tokenVerifyCache.get(tokenHash);
-  if (cached && cached.expiresAt > Date.now()) {
-    return { userId: cached.userId, accessToken: token };
-  }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 6000);
-  try {
-    const res = await fetch(`${cfg.url}/auth/v1/user`, {
-      headers: {
-        apikey: cfg.anonKey,
-        Authorization: `Bearer ${token}`,
-      },
-      signal: controller.signal,
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { id?: string };
-    if (!data?.id || typeof data.id !== 'string') return null;
-
-    setBounded(tokenVerifyCache, tokenHash, {
-      userId: data.id,
-      expiresAt: Date.now() + 60_000,
-    });
-    return { userId: data.id, accessToken: token };
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * Queries the student's study_materials from Supabase under their own RLS-scoped JWT.
- */
-async function fetchAuthorizedUserMaterials(
-  accessToken: string,
-  verifiedUserId: string,
-  bypassCache = false
-): Promise<IndexedDocumentRecord[]> {
-  const cfg = getSupabaseServerConfig();
-  if (!cfg) return [];
-
-  const cached = !bypassCache ? materialsCache.get(verifiedUserId) : undefined;
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.docs;
-  }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
-  try {
-    const url = `${cfg.url}/rest/v1/study_materials?select=id,user_id,title,material_type,extracted_text,created_at&user_id=eq.${encodeURIComponent(
-      verifiedUserId
-    )}&order=created_at.desc&limit=25`;
-
-    const res = await fetch(url, {
-      headers: {
-        apikey: cfg.anonKey,
-        Authorization: `Bearer ${accessToken}`,
-        Accept: 'application/json',
-      },
-      signal: controller.signal,
-    });
-    if (!res.ok) return [];
-
-    const rows = (await res.json()) as Array<{
-      id?: string;
-      user_id?: string;
-      title?: string;
-      material_type?: string;
-      extracted_text?: string;
-    }>;
-    if (!Array.isArray(rows)) return [];
-
-    const docs: IndexedDocumentRecord[] = rows
-      .filter(
-        (r) =>
-          typeof r?.id === 'string' &&
-          r.user_id === verifiedUserId &&
-          typeof r?.extracted_text === 'string' &&
-          r.extracted_text.trim().length > 0
-      )
-      .map((r) => ({
-        id: r.id as string,
-        userId: verifiedUserId,
-        title: (r.title || 'Uploaded Study Material').trim(),
-        type: `Uploaded ${(r.material_type || 'document').toUpperCase()} Material`,
-        extractedText: r.extracted_text as string,
-      }));
-
-    setBounded(materialsCache, verifiedUserId, {
-      docs,
-      expiresAt: Date.now() + 45_000,
-    });
-    return docs;
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function getOrBuildChunks(doc: IndexedDocumentRecord): DocumentChunk[] {
-  const textHash = crypto
-    .createHash('sha256')
-    .update(doc.extractedText)
-    .digest('hex')
-    .slice(0, 16);
-  const key = `${doc.userId}:${doc.id}:${textHash}`;
-  const cached = chunkCache.get(key);
-  if (cached) return cached;
-
-  const built = chunkDocumentText(doc.id, doc.userId, doc.extractedText, 1200, 200);
-  setBounded(chunkCache, key, built);
-  return built;
-}
+const chatRagCache = new Map<string, { result: ChatRagContextResult; expiresAt: number }>();
 
 function extractTopicKeywords(text: string, max = 10): string[] {
   const raw = extractKeywords(text, 24);
@@ -363,7 +209,6 @@ function isPassageRelevant(
     result.chunk.keywords.includes(t)
   ).length;
 
-  // Check if any adjacent pair of query topic terms appears together in the passage
   const textLower = result.chunk.originalText.toLowerCase();
   let hasTopicBigram = false;
   for (let i = 0; i < topicKeywords.length - 1; i++) {
@@ -374,12 +219,10 @@ function isPassageRelevant(
     }
   }
 
-  // If the question only had 1-2 substantive topic words, require strong keyword or exact match
   if (topicKeywords.length <= 2) {
     return result.score >= 2.0 && (keywordHitCount >= 1 || matchedTopicTerms.length >= 2 || result.score >= 2.8);
   }
 
-  // For 3-4 topic terms
   if (topicKeywords.length <= 4) {
     if (matchedTopicTerms.length >= 2 && result.score >= 2.4) return true;
     if (keywordHitCount >= 1 && matchedTopicTerms.length / topicKeywords.length >= 0.33 && result.score >= 2.8) {
@@ -388,7 +231,6 @@ function isPassageRelevant(
     return false;
   }
 
-  // For long queries (5+ topic terms), reject scattered generic overlaps (e.g. "reactions" + "organic" in unrelated bio notes)
   const coverage = matchedTopicTerms.length / topicKeywords.length;
   if (matchedTopicTerms.length >= 3 && result.score >= 2.8) {
     return true;
@@ -403,9 +245,9 @@ function isPassageRelevant(
 }
 
 /**
- * Main RAG orchestrator for the Academic AI Chatbot.
- * Combines query intent extraction, user-isolated document chunk retrieval (top 3 by default),
- * and dual-source prompting (Uploaded Study Materials vs. General Academic Knowledge).
+ * Main RAG orchestrator for the Academic AI Chatbot (Layer B Hybrid AI Learning Engine).
+ * Combines shared Document Intelligence Engine retrieval + structured highlights + caching
+ * with Groq/Gemini academic reasoning.
  */
 export async function buildChatRagContext(params: {
   message: string;
@@ -467,7 +309,6 @@ export async function buildChatRagContext(params: {
       ) {
         continue;
       }
-      // Enforce strict user isolation if userId is specified on the material
       if (mat.userId && mat.userId !== effectiveUserId) {
         continue;
       }
@@ -485,7 +326,7 @@ export async function buildChatRagContext(params: {
     }
   }
 
-  // 3. Register explicitly attached documentContext (takes precedence for attached document ID)
+  // 3. Register explicitly attached documentContext
   let attachedDocId: string | undefined;
 
   if (hasAttachedDocument && params.documentContext) {
@@ -508,6 +349,26 @@ export async function buildChatRagContext(params: {
   }
 
   const allDocs = Array.from(docsMap.values());
+  const docDigest = crypto
+    .createHash('sha256')
+    .update(
+      JSON.stringify({
+        uid: effectiveUserId,
+        msg: normalizeText(params.message),
+        hist: params.history.slice(-2),
+        attachedDocId: attachedDocId || '',
+        hasImg: params.hasImage,
+        style: params.explanationStyle || 'default',
+        docs: allDocs.map((d) => `${d.id}:${d.extractedText.length}:${d.extractedText.slice(0, 64)}`),
+      })
+    )
+    .digest('hex');
+
+  const cachedRag = chatRagCache.get(docDigest);
+  if (cachedRag && cachedRag.expiresAt > Date.now()) {
+    return cachedRag.result;
+  }
+
   const analysis = analyzeQuestionIntentAndTopic({
     message: params.message,
     history: params.history,
@@ -521,7 +382,7 @@ export async function buildChatRagContext(params: {
       ? '\n\nCLARIFICATION STATUS:\nThe student query is very short or underspecified and no study document or image is attached. Ask a concise, friendly clarifying question (or offer 2 brief interpretations and ask which one they mean).'
       : '\n\nKNOWLEDGE SOURCE STATUS:\nNo uploaded study document is currently available for this query. Answer accurately using General Academic Knowledge. Do NOT claim or imply that you read any uploaded file or fabricate document citations.';
 
-    return {
+    const emptyResult: ChatRagContextResult = {
       intent: analysis.intent,
       topicSummary: analysis.topicSummary,
       retrievalQuery: analysis.retrievalQuery,
@@ -536,21 +397,26 @@ export async function buildChatRagContext(params: {
       documentContextPromptBlock: promptBlock,
       hasAttachedDocument,
     };
+    setBoundedCacheEntry(chatRagCache, docDigest, {
+      result: emptyResult,
+      expiresAt: Date.now() + 30_000,
+    });
+    return emptyResult;
   }
 
-  // Index documents into chunks (via cached deterministic documentEngine chunking)
+  // Index documents into chunks via shared Document Intelligence Engine cache
   const allChunks: DocumentChunk[] = [];
   const docTitleById = new Map<string, string>();
+  const docById = new Map<string, IndexedDocumentRecord>();
   let totalRawDocumentChars = 0;
 
   for (const doc of allDocs) {
     docTitleById.set(doc.id, doc.title);
+    docById.set(doc.id, doc);
     totalRawDocumentChars += doc.extractedText.length;
-    const chunks = getOrBuildChunks(doc);
-    allChunks.push(...chunks);
+    allChunks.push(...getOrBuildDocumentChunks(doc));
   }
 
-  // Retrieve candidate passages: prioritize attached doc if specified; fall back to full user library if doc-specific query misses attached doc
   const candidatePoolSize = 6;
   let candidates = retrieveRelevantPassages(
     analysis.retrievalQuery,
@@ -575,7 +441,24 @@ export async function buildChatRagContext(params: {
     ).filter((r) => isPassageRelevant(r, analysis.topicKeywords));
   }
 
-  // Initial topK = 3, expanding up to 5 only when multi-passage synthesis is needed and scores stay strong
+  // If a document is explicitly attached and the user asked a generic overview/summary question
+  // whose verbs were all filtered as query filler (no off-topic keywords), anchor on the document's opening passages.
+  if (
+    candidates.length === 0 &&
+    attachedDocId &&
+    analysis.topicKeywords.length === 0 &&
+    !analysis.needsClarification
+  ) {
+    candidates = allChunks
+      .filter((c) => c.documentId === attachedDocId)
+      .slice(0, 3)
+      .map((chunk) => ({
+        chunk,
+        score: 1.5,
+        matchedKeywords: ['overview'],
+      }));
+  }
+
   const defaultLimit = 3;
   let targetLimit = defaultLimit;
   if (analysis.needsMultiPassageSynthesis && candidates.length > defaultLimit) {
@@ -622,7 +505,6 @@ export async function buildChatRagContext(params: {
 
   if (selectedResults.length > 0) {
     knowledgeSource = 'study_materials';
-    // Sort retrieved passages cleanly by document/page/chunk order for coherent reading
     const orderedForPrompt = [...selectedResults].sort((a, b) => {
       if (a.chunk.documentId !== b.chunk.documentId) {
         return a.chunk.documentId.localeCompare(b.chunk.documentId);
@@ -644,10 +526,22 @@ export async function buildChatRagContext(params: {
       })
       .join('\n\n---\n\n');
 
+    // Enrich compactly with extracted definitions/formulas only from the matched documents when budget allows
+    const matchedDocIds = Array.from(new Set(selectedResults.map((r) => r.chunk.documentId)));
+    const matchedDocs = matchedDocIds
+      .map((id) => docById.get(id))
+      .filter((d): d is IndexedDocumentRecord => Boolean(d));
+    const highlights = extractMatchingStructuredHighlights(matchedDocs, analysis.retrievalQuery, 2);
+    const highlightsText = highlights.join('\n');
+    const highlightBlock =
+      highlights.length > 0 && runningChars + highlightsText.length + 60 <= MAX_TOTAL_PASSAGE_CHARS
+        ? `\n\nKEY DOCUMENT DEFINITIONS & FORMULAS:\n${highlights.map((h) => `- ${h}`).join('\n')}`
+        : '';
+
     documentContextPromptBlock = `\n\nRETRIEVED STUDY MATERIAL PASSAGES (${selectedResults.length} relevant excerpt${
       selectedResults.length === 1 ? '' : 's'
     } from ${searchedTitles.length} searchable material${searchedTitles.length === 1 ? '' : 's'}):
-${passageBlocks}
+${passageBlocks}${highlightBlock}
 
 STRICT GROUNDING & CITATION RULES FOR THESE PASSAGES:
 1. Prioritize the retrieved passages above when answering the student's question.
@@ -675,7 +569,7 @@ RULES FOR ANSWERING:
 4. NEVER claim or fabricate page citations from any uploaded document.`;
   }
 
-  return {
+  const finalResult: ChatRagContextResult = {
     intent: analysis.intent,
     topicSummary: analysis.topicSummary,
     retrievalQuery: analysis.retrievalQuery,
@@ -690,4 +584,11 @@ RULES FOR ANSWERING:
     documentContextPromptBlock,
     hasAttachedDocument,
   };
+
+  setBoundedCacheEntry(chatRagCache, docDigest, {
+    result: finalResult,
+    expiresAt: Date.now() + 30_000,
+  });
+
+  return finalResult;
 }

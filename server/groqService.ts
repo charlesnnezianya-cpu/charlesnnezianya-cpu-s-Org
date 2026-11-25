@@ -1,7 +1,9 @@
 import crypto from 'crypto';
-import { runWithGeminiModel } from './geminiService.ts';
+import { formatGeminiError, runWithGeminiModel } from './geminiService.ts';
+import { logServerError, logServerWarn } from './errorHandler.ts';
 
 export const GROQ_MODEL = 'openai/gpt-oss-20b';
+const GROQ_SAFE_INPUT_TOKEN_LIMIT = 5600;
 
 export interface GroqMessage {
   role: 'system' | 'user' | 'assistant';
@@ -118,6 +120,12 @@ function normalizeMessagesForGroq(
   return result;
 }
 
+function estimateGroqInputTokens(messages: GroqMessage[]): number {
+  const totalChars = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+  // Conservative estimate (~3.5 chars/token plus per-message framing overhead)
+  return Math.ceil(totalChars / 3.5) + messages.length * 8;
+}
+
 // ============================================================================
 // IN-FLIGHT DEDUPLICATION & CACHE
 // ============================================================================
@@ -228,15 +236,23 @@ export async function callGroqChatCompletionSequence(
       const status = res.status;
       const lowerErr = errBody.toLowerCase();
 
+      const isPayloadOrClientError =
+        status === 413 ||
+        status === 400 ||
+        status === 422 ||
+        lowerErr.includes('request too large') ||
+        lowerErr.includes('context_length_exceeded');
+
       const isExhausted =
-        status === 429 ||
-        status === 402 ||
-        lowerErr.includes('429') ||
-        lowerErr.includes('rate_limit') ||
-        lowerErr.includes('quota') ||
-        lowerErr.includes('tpm') ||
-        lowerErr.includes('exceeded') ||
-        lowerErr.includes('too many requests');
+        !isPayloadOrClientError &&
+        (status === 429 ||
+          status === 402 ||
+          lowerErr.includes('429') ||
+          lowerErr.includes('rate_limit') ||
+          lowerErr.includes('quota') ||
+          lowerErr.includes('tpm') ||
+          lowerErr.includes('exceeded') ||
+          lowerErr.includes('too many requests'));
 
       if (isExhausted) {
         markKeyExhausted(step.id);
@@ -251,30 +267,39 @@ export async function callGroqChatCompletionSequence(
         continue;
       }
 
-      console.warn(`[Groq Error] ${step.name} failed with HTTP ${status}: ${errBody.slice(0, 150)}`);
-      markKeyExhausted(step.id);
-      if (step.id === 'groq-key1') {
-        console.log('Groq Key 1 exhausted, switching to Groq Key 2');
-      } else if (step.id === 'groq-key2') {
-        console.log('Groq Key 2 exhausted, switching to Groq Key 3');
-      } else {
-        console.log('Groq Key 3 exhausted, switching to Gemini');
+      logServerWarn('groq.completion', `${step.name} failed with HTTP ${status}`, {
+        status,
+        reason: errBody.slice(0, 160),
+      });
+
+      if (isPayloadOrClientError) {
+        // Do not poison Groq keys globally on payload/context-size errors; fail over to Gemini directly
+        lastGroqError = Object.assign(
+          new Error(`${step.name} rejected payload with HTTP ${status}`),
+          { statusCode: status === 413 ? 413 : status }
+        );
+        break;
       }
-      lastGroqError = new Error(`${step.name} failed with status ${status}`);
+
+      if (status === 401 || status === 403 || status >= 500) {
+        markKeyExhausted(step.id);
+      }
+      lastGroqError = Object.assign(new Error(`${step.name} failed with status ${status}`), {
+        statusCode: status,
+      });
       continue;
     } catch (err: unknown) {
       const errStr = err instanceof Error ? err.message : String(err);
-      console.warn(`[Groq Network Error] ${step.name} caught: ${errStr}`);
+      logServerWarn('groq.completion.network', `${step.name} network/timeout error`, errStr);
       markKeyExhausted(step.id);
-      console.log(`${step.name} network error, switching to ${step.nextName}`);
       lastGroqError = err;
     } finally {
       clearTimeout(timer);
     }
   }
 
-  // All 3 Groq keys exhausted/failed -> Trigger mandatory console log before Gemini
-  console.log('All Groq keys exhausted, switching to Gemini');
+  // All 3 Groq keys exhausted/skipped -> Fail over to Gemini
+  console.log('Groq sequence completed without response, switching to Gemini');
   throw lastGroqError || new Error('All Groq keys exhausted.');
 }
 
@@ -335,15 +360,25 @@ export async function callGroqChatStreamSequence(
 
       if (!res.ok) {
         const errText = await res.text().catch(() => '');
+        const status = res.status;
         const lowerErr = errText.toLowerCase();
+
+        const isPayloadOrClientError =
+          status === 413 ||
+          status === 400 ||
+          status === 422 ||
+          lowerErr.includes('request too large') ||
+          lowerErr.includes('context_length_exceeded');
+
         const isExhausted =
-          res.status === 429 ||
-          res.status === 402 ||
-          lowerErr.includes('429') ||
-          lowerErr.includes('rate_limit') ||
-          lowerErr.includes('quota') ||
-          lowerErr.includes('tpm') ||
-          lowerErr.includes('exceeded');
+          !isPayloadOrClientError &&
+          (status === 429 ||
+            status === 402 ||
+            lowerErr.includes('429') ||
+            lowerErr.includes('rate_limit') ||
+            lowerErr.includes('quota') ||
+            lowerErr.includes('tpm') ||
+            lowerErr.includes('exceeded'));
 
         if (isExhausted) {
           markKeyExhausted(step.id);
@@ -358,21 +393,30 @@ export async function callGroqChatStreamSequence(
           continue;
         }
 
-        markKeyExhausted(step.id);
-        if (step.id === 'groq-key1') {
-          console.log('Groq Key 1 exhausted, switching to Groq Key 2');
-        } else if (step.id === 'groq-key2') {
-          console.log('Groq Key 2 exhausted, switching to Groq Key 3');
-        } else {
-          console.log('Groq Key 3 exhausted, switching to Gemini');
+        logServerWarn('groq.stream', `${step.name} stream failed with HTTP ${status}`, {
+          status,
+          reason: errText.slice(0, 160),
+        });
+
+        if (isPayloadOrClientError) {
+          lastGroqError = Object.assign(
+            new Error(`${step.name} stream rejected payload with HTTP ${status}`),
+            { statusCode: status === 413 ? 413 : status }
+          );
+          break;
         }
-        lastGroqError = new Error(`${step.name} stream error`);
+
+        if (status === 401 || status === 403 || status >= 500) {
+          markKeyExhausted(step.id);
+        }
+        lastGroqError = Object.assign(new Error(`${step.name} stream error (${status})`), {
+          statusCode: status,
+        });
         continue;
       }
 
       if (!res.body) {
         markKeyExhausted(step.id);
-        console.log(`${step.name} empty body, switching to ${step.nextName}`);
         lastGroqError = new Error(`${step.name} empty stream body`);
         continue;
       }
@@ -409,6 +453,12 @@ export async function callGroqChatStreamSequence(
         }
       }
 
+      if (!chunkEmitted) {
+        logServerWarn('groq.stream.empty', `${step.name} closed with 0 streamed tokens`);
+        lastGroqError = new Error(`${step.name} returned an empty stream.`);
+        continue;
+      }
+
       console.log(`[Groq Stream Success] ${step.name} worked successfully. Keeping active.`);
       return { provider: step.id };
     } catch (err: unknown) {
@@ -416,14 +466,13 @@ export async function callGroqChatStreamSequence(
         throw err; // Do not switch if streaming already started
       }
       markKeyExhausted(step.id);
-      console.log(`${step.name} caught error, switching to ${step.nextName}`);
       lastGroqError = err;
     } finally {
       clearTimeout(timer);
     }
   }
 
-  console.log('All Groq keys exhausted, switching to Gemini');
+  console.log('Groq stream sequence completed without response, switching to Gemini');
   throw lastGroqError || new Error('All Groq keys exhausted.');
 }
 
@@ -469,20 +518,30 @@ export async function runMasterAiGeneration(params: {
 
   const executionPromise = (async () => {
     let groqError: unknown = null;
+    const estTokens = estimateGroqInputTokens(messages);
 
-    try {
-      const result = await callGroqChatCompletionSequence(messages, {
-        jsonMode: params.jsonMode,
-        maxTokens: params.maxTokens,
-        temperature: params.temperature,
-      });
+    if (isGroqConfigured() && estTokens <= GROQ_SAFE_INPUT_TOKEN_LIMIT) {
+      try {
+        const result = await callGroqChatCompletionSequence(messages, {
+          jsonMode: params.jsonMode,
+          maxTokens: params.maxTokens,
+          temperature: params.temperature,
+        });
 
-      const output = { text: result.text, provider: result.provider, modelId: GROQ_MODEL };
-      generationCache.set(reqHash, { result: output, expiresAt: Date.now() + CACHE_TTL_MS });
-      return output;
-    } catch (err: unknown) {
-      groqError = err;
-      console.warn('[Master AI Sequence] All Groq keys exhausted, falling back to Gemini API...');
+        const output = { text: result.text, provider: result.provider, modelId: GROQ_MODEL };
+        generationCache.set(reqHash, { result: output, expiresAt: Date.now() + CACHE_TTL_MS });
+        return output;
+      } catch (err: unknown) {
+        groqError = err;
+        logServerWarn('ai.master_generation', 'Groq sequence failed, falling back to Gemini', {
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } else if (isGroqConfigured() && estTokens > GROQ_SAFE_INPUT_TOKEN_LIMIT) {
+      logServerWarn(
+        'ai.master_generation',
+        `Bypassing Groq (~${estTokens} estimated tokens exceeds 8k TPM cap); routing directly to Gemini`
+      );
     }
 
     // FINAL FALLBACK: Gemini API
@@ -496,9 +555,16 @@ export async function runMasterAiGeneration(params: {
       generationCache.set(reqHash, { result: output, expiresAt: Date.now() + CACHE_TTL_MS });
       return output;
     } catch (geminiErr: unknown) {
-      // Only if GROQ 1 + 2 + 3 + GEMINI all fail simultaneously, show the exact required message
+      logServerError('ai.master_generation.fallback_failed', geminiErr, {
+        groqError: groqError instanceof Error ? groqError.message : groqError ? String(groqError) : 'bypassed_or_unconfigured',
+        estimatedInputTokens: estTokens,
+      });
+      const formattedGemini = formatGeminiError(geminiErr);
+      if (formattedGemini.status !== 503 && formattedGemini.status !== 500) {
+        throw geminiErr;
+      }
       throw Object.assign(
-        new Error('Brainstine is currently unavailable. Please check back later.'),
+        new Error('Brainstine is temporarily unavailable. Please try again shortly.'),
         { statusCode: 503 }
       );
     }
@@ -541,23 +607,42 @@ export async function runMasterAiStream(params: {
     }
   }
 
-  try {
-    const res = await callGroqChatStreamSequence(msgs, params.onChunk, {
-      temperature: params.temperature,
-      maxTokens: params.maxTokens,
-    });
-    return { provider: res.provider, modelId: GROQ_MODEL };
-  } catch (err: unknown) {
-    groqError = err;
-    console.warn('[Master AI Sequence] All Groq streams failed, falling back to Gemini stream...');
+  const estTokens = estimateGroqInputTokens(msgs);
+
+  if (isGroqConfigured() && estTokens <= GROQ_SAFE_INPUT_TOKEN_LIMIT) {
+    try {
+      const res = await callGroqChatStreamSequence(msgs, params.onChunk, {
+        temperature: params.temperature,
+        maxTokens: params.maxTokens,
+      });
+      return { provider: res.provider, modelId: GROQ_MODEL };
+    } catch (err: unknown) {
+      groqError = err;
+      logServerWarn('ai.master_stream', 'Groq stream failed, falling back to Gemini stream', {
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  } else if (isGroqConfigured() && estTokens > GROQ_SAFE_INPUT_TOKEN_LIMIT) {
+    logServerWarn(
+      'ai.master_stream',
+      `Bypassing Groq stream (~${estTokens} estimated tokens exceeds 8k TPM cap); routing directly to Gemini`
+    );
   }
 
   try {
     await params.geminiFallback();
     return { provider: 'gemini-fallback', modelId: 'gemini-3.1-flash-lite' };
   } catch (geminiErr: unknown) {
+    logServerError('ai.master_stream.fallback_failed', geminiErr, {
+      groqError: groqError instanceof Error ? groqError.message : groqError ? String(groqError) : 'bypassed_or_unconfigured',
+      estimatedInputTokens: estTokens,
+    });
+    const formattedGemini = formatGeminiError(geminiErr);
+    if (formattedGemini.status !== 503 && formattedGemini.status !== 500) {
+      throw geminiErr;
+    }
     throw Object.assign(
-      new Error('Brainstine is currently unavailable. Please check back later.'),
+      new Error('Brainstine is temporarily unavailable. Please try again shortly.'),
       { statusCode: 503 }
     );
   }

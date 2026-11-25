@@ -333,9 +333,9 @@ async function runQaIntegrationTests() {
       console.log('PASS [5/12] /api/summaries/extractive returns grounded extractive mode & terminology');
     }
 
-    // 6. AI Summary validation (/api/summaries/generate)
+    // 6. Document Summarizer input validation & AI summary endpoint removal check
     {
-      const shortRes = await fetch(`${baseUrl}/api/summaries/generate`, {
+      const shortRes = await fetch(`${baseUrl}/api/summaries/extractive`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -344,7 +344,14 @@ async function runQaIntegrationTests() {
         }),
       });
       assert.equal(shortRes.status, 400);
-      console.log('PASS [6/12] /api/summaries/generate validates insufficient source input');
+
+      const removedGenerate = await fetch(`${baseUrl}/api/summaries/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ extractedText: 'Sample academic text for route removal test.' }),
+      });
+      assert.equal(removedGenerate.status, 404);
+      console.log('PASS [6/12] Document summarizer validates short input & AI summary route is removed');
     }
 
     // Clear Supabase env vars for local HTTP assessment session tests

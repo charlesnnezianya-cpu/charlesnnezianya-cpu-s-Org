@@ -128,8 +128,8 @@ export function DashboardOverview({
           {[
             {
               section: 'summarizer' as DashboardSection,
-              title: 'AI Study Summarizer',
-              desc: 'Upload PDFs, images, audio, or notes for diagrams, tables, and structured revision.',
+              title: 'Document Summarizer',
+              desc: 'Upload PDFs, images, audio, or notes for concise concepts, formulas, definitions, and page citations.',
               icon: <Sparkles className="h-4 w-4" aria-hidden="true" />,
               iconBg: 'bg-[#0F1E3D] dark:bg-[#1D4ED8]',
               visual: EDUCATIONAL_VISUALS.summarizer,

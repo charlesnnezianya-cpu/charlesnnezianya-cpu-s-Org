@@ -5,7 +5,6 @@ import {
   FileAudio,
   FileText,
   Image as ImageIcon,
-  KeyRound,
   Layers,
   Loader2,
   RefreshCw,
@@ -41,7 +40,7 @@ import { SummaryDisplay } from './SummaryDisplay';
 interface StudySummarizerProps {
   initialMaterial?: StudyMaterialRecord | null;
   onConsumeInitialMaterial?: () => void;
-  geminiConfigured: boolean;
+  geminiConfigured?: boolean;
   onActivityRecorded?: () => void;
   onGenerateQuizFromSummary?: (summary: StructuredSummary) => void;
 }
@@ -115,7 +114,6 @@ function formatBytes(bytes: number | null): string {
 export function StudySummarizer({
   initialMaterial,
   onConsumeInitialMaterial,
-  geminiConfigured,
   onActivityRecorded,
   onGenerateQuizFromSummary,
 }: StudySummarizerProps) {
@@ -139,7 +137,6 @@ export function StudySummarizer({
   const [editableTitle, setEditableTitle] = useState('');
   const [savedMaterialId, setSavedMaterialId] = useState<string | null>(null);
 
-  const [summaryMode, setSummaryMode] = useState<'ai' | 'extractive'>('ai');
   const [summaryLevel, setSummaryLevel] = useState<SummaryLevel>('detailed');
   const [generating, setGenerating] = useState(false);
   const [summary, setSummary] = useState<StructuredSummary | null>(null);
@@ -601,13 +598,6 @@ export function StudySummarizer({
     setErrorMsg(null);
     setNoticeMsg(null);
 
-    if (summaryMode === 'ai' && !geminiConfigured) {
-      setErrorMsg(
-        'AI Summary is temporarily unavailable. Switch to Extractive Summary below to summarize directly from your study text.'
-      );
-      return;
-    }
-
     const sourceText = editableExtractedText.trim();
     if (sourceText.length < 20) {
       setErrorMsg('Extracted content is too short or unreadable. Please provide at least 20 characters.');
@@ -618,29 +608,27 @@ export function StudySummarizer({
     setGenerating(true);
     setSummarySaved(false);
 
-    const endpoint =
-      summaryMode === 'extractive' ? '/api/summaries/extractive' : '/api/summaries/generate';
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 150000);
+    const timer = setTimeout(() => controller.abort(), 60000);
     try {
-      const res = await fetch(resolveApiUrl(endpoint), {
+      const res = await fetch(resolveApiUrl('/api/summaries/extractive'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
         body: JSON.stringify({
           extractedText: sourceText,
-          title: editableTitle.trim() || extraction?.title || 'Study Material',
+          title: editableTitle.trim() || extraction?.title || 'Document Summary',
           materialType: extraction?.materialType || 'text',
           summaryLevel,
         }),
       });
       const generatedRaw = await parseApiJsonResponse<StructuredSummary>(
         res,
-        'generating your study summary'
+        'generating your document summary'
       );
       const generated: StructuredSummary = {
         ...generatedRaw,
-        generationMode: generatedRaw.generationMode ?? summaryMode,
+        generationMode: generatedRaw.generationMode ?? 'extractive',
       };
       setSummary(generated);
 
@@ -653,9 +641,7 @@ export function StudySummarizer({
           });
           setSummarySaved(true);
           setNoticeMsg(
-            `${
-              summaryMode === 'extractive' ? 'Extractive Summary' : 'AI Summary'
-            } generated and automatically saved to your Academic History.`
+            'Document Summary generated and automatically saved to your Academic History.'
           );
         } catch (autoSaveErr) {
           console.warn('Automatic summary save warning:', autoSaveErr);
@@ -674,7 +660,7 @@ export function StudySummarizer({
               : summaryLevel === 'detailed'
                 ? 'Detailed Summary'
                 : 'Comprehensive Study Notes'
-          } (${summaryMode === 'extractive' ? 'Extractive' : 'AI'})`,
+          }`,
           materialType: extraction?.materialType || 'text',
           summaryLevel,
         });
@@ -684,8 +670,8 @@ export function StudySummarizer({
       setErrorMsg(
         formatClientApiError(
           err,
-          'generating your study summary',
-          'Summary generation timed out while waiting for the AI service. Please try again or use Extractive Summary.'
+          'generating your document summary',
+          'Document summary generation timed out. Please try again.'
         )
       );
     } finally {
@@ -727,30 +713,12 @@ export function StudySummarizer({
 
   return (
     <div className="space-y-6">
-      {!geminiConfigured && (
-        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
-          <div className="flex items-start gap-3">
-            <KeyRound className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
-            <div>
-              <h3 className="font-display font-semibold select-none">
-                AI Summarization Temporarily Unavailable — Extractive Summary Ready
-              </h3>
-              <p className="mt-1 text-xs leading-relaxed">
-                AI Summary, image OCR, and audio transcription are temporarily unavailable right now.
-                You can still extract PDF or pasted text and select <strong>Extractive Summary</strong>{' '}
-                below to build grounded key points, definitions, terminology, and page references.
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Input Workspace Card */}
       <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
         <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-5 sm:flex-row sm:items-center dark:border-slate-800">
           <div>
             <h2 className="font-display text-xl font-bold text-slate-900 select-none dark:text-white">
-              AI Study Material Summarizer
+              Document Summarizer
             </h2>
             <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
               Upload a PDF, photo of notes, or lecture audio, or paste study text directly.
@@ -794,8 +762,8 @@ export function StudySummarizer({
         <SubjectVisualBanner
           visualKey="summarizer"
           variant="compact"
-          title="Digital Textbook Synthesis Engine"
-          subtitle="Structured chapters, definitions, comparison tables, and interactive schematics from your course notes."
+          title="Document Intelligence Summarizer"
+          subtitle="Structured concepts, definitions, processes, formulas, and page-grounded study notes extracted directly from your material."
           className="mt-5"
         />
 
@@ -1095,55 +1063,6 @@ export function StudySummarizer({
               />
             </div>
 
-            {/* Summary Mode Selector (AI Summary vs Extractive Summary) */}
-            <div className="pt-2">
-              <p className="mb-2.5 text-xs font-semibold text-slate-700 select-none dark:text-slate-300">
-                Select Summary Mode
-              </p>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                {(
-                  [
-                    {
-                      id: 'ai' as const,
-                      title: 'AI Summary',
-                      desc: 'AI-synthesized explanations, examples, diagrams & structured notes',
-                    },
-                    {
-                      id: 'extractive' as const,
-                      title: 'Extractive Summary',
-                      desc: 'Direct document sentences, definitions, terminology & page citations (works without AI)',
-                    },
-                  ] as const
-                ).map((opt) => {
-                  const active = summaryMode === opt.id;
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => setSummaryMode(opt.id)}
-                      className={`rounded-xl border p-3.5 text-left transition-colors select-none ${
-                        active
-                          ? 'border-blue-600 bg-blue-50/70 dark:border-cyan-400 dark:bg-blue-950/40'
-                          : 'border-slate-200 bg-white hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900/50 dark:hover:bg-slate-900'
-                      }`}
-                    >
-                      <p
-                        className={`font-display text-sm font-semibold ${
-                          active
-                            ? 'text-blue-800 dark:text-cyan-300'
-                            : 'text-slate-900 dark:text-white'
-                        }`}
-                      >
-                        {opt.title}
-                      </p>
-                      <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
-                        {opt.desc}
-                      </p>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
 
             {/* Summary Depth Selector */}
             <div className="pt-2">
@@ -1204,24 +1123,16 @@ export function StudySummarizer({
               <button
                 type="button"
                 onClick={handleGenerateSummary}
-                disabled={generating || (summaryMode === 'ai' && !geminiConfigured)}
+                disabled={generating}
                 className="inline-flex min-h-11 w-full justify-center sm:w-auto items-center gap-2 rounded-xl bg-[#0F1E3D] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500"
               >
                 {generating ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                    <span>
-                      {summaryMode === 'extractive'
-                        ? 'Building Extractive Summary...'
-                        : 'Generating AI Summary...'}
-                    </span>
+                    <span>Building Document Summary...</span>
                   </>
                 ) : (
-                  <span>
-                    {summaryMode === 'extractive'
-                      ? 'Generate Extractive Summary'
-                      : 'Generate AI Summary'}
-                  </span>
+                  <span>Generate Document Summary</span>
                 )}
               </button>
             </div>
@@ -1233,8 +1144,6 @@ export function StudySummarizer({
       {summary && (
         <SummaryDisplay
           summary={summary}
-          sourceText={editableExtractedText}
-          geminiConfigured={geminiConfigured}
           onSave={user && isConfigured ? handleSaveSummary : undefined}
           isSaving={savingSummary}
           isSaved={summarySaved}

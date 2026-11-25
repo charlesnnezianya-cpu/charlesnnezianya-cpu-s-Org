@@ -23,7 +23,7 @@ import { SummaryDisplay } from './SummaryDisplay';
 interface SavedSummariesViewProps {
   summaries: StudySummaryRecord[];
   materials: StudyMaterialRecord[];
-  geminiConfigured: boolean;
+  geminiConfigured?: boolean;
   initialSummaryId?: string | null;
   onConsumeInitialSummary?: () => void;
   onRefresh: () => void;
@@ -33,8 +33,6 @@ interface SavedSummariesViewProps {
 
 export function SavedSummariesView({
   summaries,
-  materials,
-  geminiConfigured,
   initialSummaryId,
   onConsumeInitialSummary,
   onRefresh,
@@ -129,10 +127,6 @@ export function SavedSummariesView({
   };
 
   if (selectedSummary) {
-    const linkedMaterial = selectedSummary.material_id
-      ? materials.find((m) => m.id === selectedSummary.material_id)
-      : undefined;
-
     return (
       <div className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3 select-none">
@@ -213,8 +207,6 @@ export function SavedSummariesView({
 
         <SummaryDisplay
           summary={selectedSummary.structured_content}
-          sourceText={linkedMaterial?.extracted_text}
-          geminiConfigured={geminiConfigured}
           isSaved
           onCreateQuizFromSummary={() => onCreateQuizFromSummary(selectedSummary)}
         />
@@ -240,7 +232,7 @@ export function SavedSummariesView({
             Saved Summaries
           </h2>
           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-            Reopen, rename, review, ask follow-up questions, or export any saved study guide.
+            Reopen, rename, review, quiz yourself, or export any saved document summary.
           </p>
         </div>
 
@@ -315,7 +307,7 @@ export function SavedSummariesView({
           </p>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
             {summaries.length === 0
-              ? 'Generate a study summary in the AI Summarizer and it will appear here automatically.'
+              ? 'Generate a document summary in the Document Summarizer and it will appear here automatically.'
               : 'Try adjusting your search keywords or summary depth filter.'}
           </p>
         </div>

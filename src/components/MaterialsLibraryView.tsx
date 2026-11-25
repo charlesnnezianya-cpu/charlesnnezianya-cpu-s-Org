@@ -114,7 +114,7 @@ export function MaterialsLibraryView({
             No uploaded materials yet
           </p>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            Upload PDFs, handwritten notes, or lecture audio in the AI Summarizer to store them
+            Upload PDFs, handwritten notes, or lecture audio in the Document Summarizer to store them
             here securely.
           </p>
         </div>

@@ -529,8 +529,30 @@ export function QuizExamSystem({
         summaryId: null,
       };
     }
+    const topicWords = topicTitle
+      .toLowerCase()
+      .split(/\s+/)
+      .map((w) => w.replace(/[^a-z0-9-]/g, ''))
+      .filter((w) => w.length >= 3);
+    let matchedTopicText = '';
+    if (topicWords.length > 0) {
+      const matMatches = materials
+        .filter((m) => {
+          const hay = `${m.title} ${m.extracted_text}`.toLowerCase();
+          return topicWords.some((w) => hay.includes(w));
+        })
+        .map((m) => m.extracted_text);
+      const sumMatches = summaries
+        .filter((s) => {
+          const hay = `${s.title} ${s.subject_area} ${s.markdown_content}`.toLowerCase();
+          return topicWords.some((w) => hay.includes(w));
+        })
+        .map((s) => s.markdown_content);
+      matchedTopicText = [...matMatches, ...sumMatches].slice(0, 3).join('\n\n');
+    }
+
     return {
-      text: '',
+      text: matchedTopicText,
       title: topicTitle,
       materialId: null,
       summaryId: null,
@@ -606,7 +628,7 @@ export function QuizExamSystem({
 
       let extractRes: Response;
       const shouldUseStorageStaging =
-        (user && isConfigured) || (!isLocalOrigin && preparedFile.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES);
+        !isLocalOrigin && preparedFile.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES;
 
       if (shouldUseStorageStaging) {
         if (!user || !isConfigured) {
@@ -2570,7 +2592,7 @@ export function QuizExamSystem({
                   <div>
                     {materials.length === 0 ? (
                       <p className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400">
-                        No uploaded study materials found yet. Upload a document in the AI
+                        No uploaded study materials found yet. Upload a document in the Document
                         Summarizer first, or switch to Paste Text or Subject / Topic.
                       </p>
                     ) : (
@@ -2632,13 +2654,18 @@ export function QuizExamSystem({
                 )}
 
                 {sourceMode === 'topic' && (
-                  <input
-                    type="text"
-                    value={topicTitle}
-                    onChange={(e) => setTopicTitle(e.target.value)}
-                    placeholder="Enter subject or topic (e.g., Keynesian Macroeconomics, Cellular Mitosis, Thermodynamics)"
-                    className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-                  />
+                  <div className="space-y-2">
+                    <input
+                      type="text"
+                      value={topicTitle}
+                      onChange={(e) => setTopicTitle(e.target.value)}
+                      placeholder="Enter subject or topic (e.g., Calvin Cycle, Thermodynamics, Acid-Base Chemistry)"
+                      className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                    />
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Searches your uploaded study materials and saved summaries to build document-grounded questions on this topic.
+                    </p>
+                  </div>
                 )}
 
                 {sourceMode === 'upload' && (
