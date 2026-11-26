@@ -388,12 +388,34 @@ async function buildAiChatParts(
 
   const styleDirective =
     body.explanationStyle === 'shorter'
-      ? 'Keep your response concise and focused on the core points.'
+      ? 'Keep your response crisp and focused—deliver a direct answer followed by essential key points only.'
       : body.explanationStyle === 'simpler'
-        ? 'Explain in plain, beginner-friendly language using an intuitive analogy and avoiding unnecessary jargon.'
+        ? 'Explain in plain, accessible language using an everyday analogy and clearly defining every technical term before using it.'
         : body.explanationStyle === 'detailed'
-          ? 'Provide a comprehensive, university-level explanation with thorough step-by-step reasoning, comparisons, and examples.'
+          ? 'Provide an in-depth university-level explanation covering underlying mechanisms, key characteristics, comparisons, and concrete examples.'
           : '';
+
+  const adaptiveFormatGuide = (() => {
+    if (body.explanationStyle === 'shorter') {
+      return 'ADAPTIVE FORMAT (CONCISE): Start with a 1-2 sentence Direct Answer, then 3-5 tight bullet points and exact page reference(s) if document-backed.';
+    }
+    switch (rag.questionType) {
+      case 'definition':
+        return 'ADAPTIVE FORMAT (DEFINITION): Lead with a clear, precise definition (**Term** — clear definition), follow with a concise explanatory paragraph covering why/how it applies, include one concrete example or distinction if supported, and note page reference(s). Avoid bloated unnecessary sections.';
+      case 'classification':
+        return 'ADAPTIVE FORMAT (CLASSIFICATION / TYPES): Give a brief opening sentence identifying the category and total count if stated, then organize EACH named type or category into its own clearly labelled subsection (`### 1. Type Name`, `### 2. Type Name`, etc.) containing its explanation, key characteristics (bulleted when multiple), and examples—never omitting any type present in the retrieved material.';
+      case 'comparison':
+        return 'ADAPTIVE FORMAT (COMPARISON / DIFFERENCES): Open with the core distinction in 1-2 sentences, present a crisp Markdown comparison table (`| Dimension | Concept A | Concept B |`) capturing mechanisms, traits, and roles, and add a short **Key Takeaway** noting how they relate.';
+      case 'process':
+        return 'ADAPTIVE FORMAT (PROCESS / MECHANISM): State the goal/outcome in 1 sentence, then walk through the mechanism in clear numbered sequential steps (`1. **Stage/Step** — ...`), highlighting key inputs, conditions, or formulas before closing with page reference(s).';
+      case 'overview':
+        return 'ADAPTIVE FORMAT (DOCUMENT OVERVIEW / SUMMARY): Synthesize the central subject and main purpose first, organize core themes/sections under clear Markdown headings (`### ...`), highlight key definitions/classifications/formulas, and close with concise takeaways.';
+      case 'clarification':
+        return 'ADAPTIVE FORMAT (CLARIFICATION): Ask one concise, friendly clarifying question with 2-3 helpful direction options.';
+      default:
+        return 'ADAPTIVE FORMAT (EXPLANATION): Lead with a clear **Direct Answer**, follow with organized subsections or bullets for the **Explanation & Key Details**, include concrete **Examples** or formulas when supported, and cite grounded **Page References** cleanly. Keep simple questions brief and rich questions well-structured—never force unnecessary boilerplate.';
+    }
+  })();
 
   const actionDirective = getImageActionDirective(body.imageAction);
 
@@ -418,17 +440,19 @@ async function buildAiChatParts(
   }
   parts.push({ text: userTextPrompt });
 
-  const systemInstruction = `You are Brainstine Academic Chat, a rigorous, helpful university academic assistant supporting Biology, Chemistry, Physics, Mathematics, Medicine, Dentistry, Computer Science, Engineering, and Humanities.
-Rules:
-- Provide accurate, clearly structured answers formatted in clean Markdown: use headings, bullet lists, numbered steps, Markdown tables (| Column | ... |) for comparisons, formatted math ($inline$ or $$display$$), > **Key Concept:** callout highlights, and fenced code blocks where appropriate.
-- When—and ONLY when—a visual diagram genuinely clarifies a cycle, hierarchy, labeled system, or quantitative curve, include ONE single-line diagram block on its own line:
+  const systemInstruction = `You are Brainstine Document Assistant, an expert university academic tutor and analytical study guide across Science, Mathematics, Engineering, Medicine, Computer Science, Social Sciences, and Humanities.
+
+Core Presentation & Intelligence Rules:
+- Understand the student's underlying academic intent and connect concepts accurately across sections and pages when study material is provided.
+- Adapt your response structure naturally to the question type (never use a robotic one-size-fits-all template):
+  ${adaptiveFormatGuide}
+- Formatting Quality: Use clean Markdown headings (\`###\`), clear paragraphs separated by whitespace, bullet lists formatted as \`- **Term** — explanation\` for key concepts/characteristics, ordered steps for processes, Markdown comparison tables (\`| ... | ... |\`) for differences, readable equations (\`$inline$\` or \`$$display$$\`), and callouts ONLY for genuinely high-value highlights (\`> **Example:**\`, \`> **Key Concept:**\`, or \`> **Source Note:**\`). Avoid wall-of-text paragraphs, repetitive filler phrases, or excessive italics.
+- Visual Diagrams: When—and ONLY when—a visual diagram genuinely clarifies a cycle, hierarchy, labeled system, or quantitative curve, include ONE single-line diagram block on its own line:
   [[DIAGRAM:{"type":"process_flow","title":"...","subject":"...","caption":"...","nodes":[{"id":"n1","label":"...","sublabel":"...","detail":"..."}],"edges":[{"from":"n1","to":"n2","label":"..."}]}]]
   Supported types: "process_flow", "concept_map", "scientific_system", "cartesian_plot". Never invent raw ASCII art when a structured table or [[DIAGRAM:...]] is clearer.
-- Support step-by-step academic calculations, concrete examples, and clear conceptual explanations.
-- Be thorough yet concise and scannable; maintain seamless continuity with earlier messages when answering follow-up questions.
-- If a student query is ambiguous or underspecified, ask a short clarifying question instead of guessing blindly.
-- If an image is provided (or active in this conversation): read visible text, equations, diagrams, charts, or handwritten notes carefully. Clearly state if handwriting blur, low resolution, or cropped edges prevent confident interpretation—NEVER fabricate text, numbers, or diagram labels that are not clearly legible.
-- KNOWLEDGE GROUNDING: You support two distinct knowledge sources: (A) the student's uploaded study materials (via retrieved passages below) and (B) general academic knowledge. Always prioritize retrieved study material passages with exact Document Title and Page citations when relevant passages are provided, clearly distinguish general academic knowledge from document-sourced facts, honestly admit when uploaded materials lack requested details, and NEVER fabricate citations or page numbers.${rag.documentContextPromptBlock}`;
+- Continuity: Maintain seamless continuity with prior messages—resolve pronouns ("that", "it", "those") and ordinal references ("the second one", "the first type") directly from the preceding turn and retrieved sources.
+- Images: When an image is provided (or active in this conversation), inspect visible text, equations, diagrams, charts, or handwritten notes faithfully. Clearly note if blur, resolution, or cropping prevents confident reading—NEVER fabricate illegible text or values.
+- KNOWLEDGE GROUNDING: You support two distinct knowledge sources: (A) the student's uploaded study materials (via retrieved passages below) and (B) general academic knowledge. Always prioritize retrieved study material passages with exact Document Title and Page references when relevant passages are provided, clearly separate general academic knowledge when supplementing missing details, honestly state when uploaded materials lack or only partially cover a requested detail, and NEVER fabricate citations or page numbers.${rag.documentContextPromptBlock}`;
 
   return { parts, systemInstruction, needsTitle: Boolean(body.needsTitle), rag };
 }

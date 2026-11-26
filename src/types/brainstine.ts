@@ -82,6 +82,40 @@ export interface MainConceptSection {
   heading: string;
   sourcePoints: string[];
   aiClarification: string;
+  examples?: string[];
+  subsections?: Array<{
+    heading: string;
+    points: string[];
+  }>;
+}
+
+export interface ClassificationTypeEntry {
+  name: string;
+  explanation: string;
+  characteristics?: string[];
+  examples?: string[];
+  pageNumber?: number | null;
+}
+
+export interface ClassificationGroup {
+  topic: string;
+  overviewStatement: string;
+  types: ClassificationTypeEntry[];
+  comparisonNote?: string;
+}
+
+export interface StructuredCharacteristicItem {
+  topic: string;
+  points: string[];
+}
+
+export interface SummaryValidationReport {
+  isComplete: boolean;
+  sectionsConsidered: number;
+  sectionsCovered: number;
+  classificationsCovered: number;
+  missingTopics: string[];
+  notes: string[];
 }
 
 export interface DefinitionTerm {
@@ -131,6 +165,8 @@ export interface StructuredSummary {
   topicOverview: string;
   mainConcepts: MainConceptSection[];
   importantDefinitions: DefinitionTerm[];
+  classificationsAndTypes?: ClassificationGroup[];
+  characteristicsAndExplanations?: StructuredCharacteristicItem[];
   keyTerminology: string[];
   difficultConceptExplanations: DifficultConceptExplanation[];
   importantFacts: string[];
@@ -144,6 +180,7 @@ export interface StructuredSummary {
   visualDiagrams?: EducationalDiagramSpec[];
   revisionNotes: string[];
   keyTakeaways: string[];
+  validationReport?: SummaryValidationReport;
   markdown: string;
   wordCount: number;
   chunkCount: number;

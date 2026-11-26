@@ -200,13 +200,27 @@ function replaceLatexCommands(text: string): string {
 }
 
 /**
+ * Strips Private Use Area glyphs (e.g. Wingdings/Symbol PDF bullets like U+F0B7),
+ * geometric empty-box tofu characters, replacement glyphs (U+FFFD), and zero-width characters
+ * so academic summaries never display corrupted characters or empty squares.
+ */
+export function stripUnsupportedDisplaySymbols(input: string): string {
+  if (!input || typeof input !== 'string') return '';
+  return input
+    .replace(/[\uE000-\uF8FF\uFFFD\u25A0-\u25FF\u2700-\u27BF]/g, ' ')
+    .replace(/[\u200B-\u200F\uFEFF\u2028\u2029]/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
+
+/**
  * Formats chemical formulas, ionic charges, physical units, exponents, and mathematical operators
  * into crisp Unicode notation without altering prose numbers, page numbers, or scientific meaning.
  */
 export function formatScientificText(input: string): string {
   if (!input || typeof input !== 'string') return '';
 
-  let text = input;
+  let text = stripUnsupportedDisplaySymbols(input);
 
   // Unwrap inline LaTeX delimiters $...$ while preserving currency like $50 or $12.50
   text = text.replace(/\$(?!\d[\d,.]*(?:\s|$|[,.;:!?)]))(?!\s)([^$\n]{1,140}?)\$/g, '$1');

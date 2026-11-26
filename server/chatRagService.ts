@@ -1,8 +1,9 @@
 import crypto from 'crypto';
 import {
+  buildStructuredRagIntelligence,
   extractBearerToken,
+  extractDocumentQueryExpansionTerms,
   extractKeywords,
-  extractMatchingStructuredHighlights,
   fetchAuthorizedUserMaterials,
   getOrBuildDocumentChunks,
   getSupabaseServerConfig,
@@ -22,6 +23,15 @@ export type ChatIntent =
   | 'follow_up'
   | 'general_academic'
   | 'ambiguous';
+
+export type QuestionType =
+  | 'definition'
+  | 'classification'
+  | 'comparison'
+  | 'process'
+  | 'overview'
+  | 'explanation'
+  | 'clarification';
 
 export type KnowledgeSourceMode =
   | 'study_materials'
@@ -55,6 +65,7 @@ export interface ChatRetrievedSource {
 
 export interface ChatRagContextResult {
   intent: ChatIntent;
+  questionType: QuestionType;
   topicSummary: string;
   retrievalQuery: string;
   searchedDocumentsCount: number;
@@ -84,6 +95,9 @@ const QUERY_FILLER_WORDS = new Set([
   'say', 'know', 'anything', 'something', 'everything', 'nothing', 'exact',
   'exactly', 'specifically', 'specific', 'does', 'do', 'did',
   'briefly', 'overview', 'recap', 'highlights', 'takeaways',
+  'type', 'types', 'category', 'categories', 'kind', 'kinds', 'form', 'forms',
+  'characteristic', 'characteristics', 'feature', 'features', 'property', 'properties',
+  'first', 'second', 'third', 'fourth', 'last', 'one', 'ones',
 ]);
 
 const chatRagCache = new Map<string, { result: ChatRagContextResult; expiresAt: number }>();
@@ -94,8 +108,88 @@ function extractTopicKeywords(text: string, max = 10): string[] {
   return filtered.slice(0, max);
 }
 
+/**
+ * Resolves ordinal or listed-item references (e.g., "explain the second type") against
+ * headings, numbered list items, or bold concepts in the immediately preceding assistant message.
+ */
+function extractOrdinalReferencedEntity(
+  messageLower: string,
+  lastAssistantContent: string
+): string | null {
+  if (!lastAssistantContent) return null;
+
+  const ordinalMap: Array<[RegExp, number]> = [
+    [/\b(?:first|1st)\b/, 0],
+    [/\b(?:second|2nd)\b/, 1],
+    [/\b(?:third|3rd)\b/, 2],
+    [/\b(?:fourth|4th)\b/, 3],
+    [/\b(?:fifth|5th)\b/, 4],
+  ];
+
+  let targetIdx: number | null = null;
+  let isLast = false;
+  for (const [pat, idx] of ordinalMap) {
+    if (pat.test(messageLower)) {
+      targetIdx = idx;
+      break;
+    }
+  }
+  if (targetIdx === null && /\b(?:last one|final type|last type|final one)\b/.test(messageLower)) {
+    isLast = true;
+  }
+  if (targetIdx === null && !isLast) return null;
+
+  const listedItems: string[] = [];
+  const lines = lastAssistantContent.split('\n');
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    const numOrHeading =
+      line.match(/^(?:#{2,4}\s*)?(?:\d+[.)]|[-*])\s+\*{0,2}([^:*\n(]{3,60})\*{0,2}(?:\s*[:—-]|$)/) ||
+      line.match(/^#{2,4}\s+\d+[.)]\s+([^(\n]{3,60})$/);
+    if (numOrHeading) {
+      const candidate = numOrHeading[1].trim();
+      if (!/^(direct answer|explanation|key details|examples?|page references?|summary|overview)$/i.test(candidate)) {
+        listedItems.push(candidate);
+      }
+    }
+  }
+
+  if (listedItems.length === 0) return null;
+  if (isLast) return listedItems[listedItems.length - 1];
+  if (targetIdx !== null && targetIdx < listedItems.length) {
+    return listedItems[targetIdx];
+  }
+  return null;
+}
+
+export function classifyQuestionType(params: {
+  cleanMessage: string;
+  needsClarification: boolean;
+}): QuestionType {
+  if (params.needsClarification) return 'clarification';
+  const lower = params.cleanMessage.toLowerCase();
+
+  if (/\b(compare|contrast|difference|differences|versus|vs\.?|distinguish|similarities|differ)\b/i.test(lower)) {
+    return 'comparison';
+  }
+  if (/\b(types?|categories|kinds|forms|classes|classification|classified into|subtypes?)\b/i.test(lower)) {
+    return 'classification';
+  }
+  if (/\b(steps?|stages?|phases?|process|mechanism|pathway|procedure|sequence|how does .+ work|how is .+ made|how are .+ formed)\b/i.test(lower)) {
+    return 'process';
+  }
+  if (/\b(summarize|summary|overview|main ideas?|central message|key takeaways|what is this document about|what does this (?:document|pdf|file) cover|topics? covered|recap)\b/i.test(lower)) {
+    return 'overview';
+  }
+  if (/^(?:what (?:is|are)|define|definition of|meaning of)\b/i.test(lower) || /\b(is defined as|meaning of|what does .+ mean)\b/i.test(lower)) {
+    return 'definition';
+  }
+  return 'explanation';
+}
+
 export interface QuestionAnalysis {
   intent: ChatIntent;
+  questionType: QuestionType;
   topicKeywords: string[];
   topicSummary: string;
   retrievalQuery: string;
@@ -121,7 +215,7 @@ export function analyzeQuestionIntentAndTopic(params: {
 
   const hasPronounOrFollowUpCue =
     params.explanationStyle !== 'default' ||
-    /\b(that|this|it|they|them|those|these|previous|earlier|above|step|next|more|simpler|shorter|detail|elaborate|expand|clarify|why does|how does that|what happens next|what about|again|analogy|summarize your)\b/i.test(
+    /\b(that|this|it|they|them|those|these|previous|earlier|above|step|next|more|simpler|shorter|detail|elaborate|expand|clarify|why does|how does that|what happens next|what about|again|analogy|summarize your|first one|second one|third one|last one|its characteristics|their examples)\b/i.test(
       lower
     );
 
@@ -130,11 +224,11 @@ export function analyzeQuestionIntentAndTopic(params: {
     (hasPronounOrFollowUpCue || currentTopicKeywords.length <= 1);
 
   const needsMultiPassageSynthesis =
-    /\b(compare|contrast|difference|differences|relationship|summarize|overview|all|stages|steps|phases|both|between|connect|across|causes and effects|overall)\b/i.test(
+    /\b(compare|contrast|difference|differences|relationship|relate|connect|summarize|overview|all|types?|categories|kinds|classes|classification|stages|steps|phases|both|between|across|causes and effects|overall|characteristics|properties|examples)\b/i.test(
       lower
     );
 
-  // Enrich follow-up queries with recent conversation topic keywords so retrieval stays anchored
+  // Enrich follow-up queries with recent conversation topic keywords + ordinal coreference resolution
   let enrichedKeywords = [...currentTopicKeywords];
   let retrievalQuery = cleanMessage;
 
@@ -143,20 +237,24 @@ export function analyzeQuestionIntentAndTopic(params: {
       .filter((h) => h.role === 'user')
       .slice(-2)
       .map((h) => h.content);
-    const recentAssistant = params.history
-      .filter((h) => h.role === 'assistant')
-      .slice(-1)
-      .map((h) => h.content.slice(0, 600));
+    const lastAssistant =
+      [...params.history].reverse().find((h) => h.role === 'assistant')?.content || '';
+
+    const ordinalEntity = extractOrdinalReferencedEntity(lower, lastAssistant);
+    const ordinalKeywords = ordinalEntity ? extractTopicKeywords(ordinalEntity, 5) : [];
 
     const historyKeywords = [
+      ...ordinalKeywords,
       ...extractTopicKeywords(recentUsers.join(' '), 6),
-      ...extractTopicKeywords(recentAssistant.join(' '), 4),
+      ...extractTopicKeywords(lastAssistant.slice(0, 700), 4),
     ];
 
     const merged = Array.from(new Set([...currentTopicKeywords, ...historyKeywords])).slice(0, 12);
     enrichedKeywords = merged;
 
-    if (currentTopicKeywords.length < 3 && merged.length > 0) {
+    if (ordinalEntity) {
+      retrievalQuery = `${cleanMessage} ${ordinalEntity} ${merged.join(' ')}`.trim();
+    } else if (currentTopicKeywords.length < 3 && merged.length > 0) {
       retrievalQuery = `${cleanMessage} ${merged.join(' ')}`.trim();
     }
   }
@@ -170,9 +268,13 @@ export function analyzeQuestionIntentAndTopic(params: {
     params.history.length === 0 &&
     !hasDocCue;
 
+  const questionType = classifyQuestionType({ cleanMessage, needsClarification });
+
   let intent: ChatIntent = 'general_academic';
   if (needsClarification) {
     intent = 'ambiguous';
+  } else if (isFollowUp && currentTopicKeywords.length === 0 && !hasDocCue) {
+    intent = 'follow_up';
   } else if (hasDocCue || (params.hasAttachedDocument && currentTopicKeywords.length > 0)) {
     intent = 'document_specific';
   } else if (isFollowUp) {
@@ -186,6 +288,7 @@ export function analyzeQuestionIntentAndTopic(params: {
 
   return {
     intent,
+    questionType,
     topicKeywords: enrichedKeywords,
     topicSummary,
     retrievalQuery,
@@ -209,23 +312,35 @@ function isPassageRelevant(
     result.chunk.keywords.includes(t)
   ).length;
 
+  const headingLower = (result.chunk.sectionHeading || '').toLowerCase();
+  const hasHeadingMatch =
+    Boolean(headingLower) &&
+    topicKeywords.some((kw) => headingLower.includes(kw));
+
   const textLower = result.chunk.originalText.toLowerCase();
   let hasTopicBigram = false;
   for (let i = 0; i < topicKeywords.length - 1; i++) {
     const bigram = `${topicKeywords[i]} ${topicKeywords[i + 1]}`;
-    if (textLower.includes(bigram)) {
+    if (textLower.includes(bigram) || headingLower.includes(bigram)) {
       hasTopicBigram = true;
       break;
     }
   }
 
   if (topicKeywords.length <= 2) {
-    return result.score >= 2.0 && (keywordHitCount >= 1 || matchedTopicTerms.length >= 2 || result.score >= 2.8);
+    return (
+      result.score >= 2.0 &&
+      (keywordHitCount >= 1 || hasHeadingMatch || matchedTopicTerms.length >= 2 || result.score >= 2.8)
+    );
   }
 
   if (topicKeywords.length <= 4) {
     if (matchedTopicTerms.length >= 2 && result.score >= 2.4) return true;
-    if (keywordHitCount >= 1 && matchedTopicTerms.length / topicKeywords.length >= 0.33 && result.score >= 2.8) {
+    if (
+      keywordHitCount >= 1 &&
+      matchedTopicTerms.length / topicKeywords.length >= 0.33 &&
+      (result.score >= 2.8 || (hasHeadingMatch && result.score >= 2.5))
+    ) {
       return true;
     }
     return false;
@@ -245,9 +360,9 @@ function isPassageRelevant(
 }
 
 /**
- * Main RAG orchestrator for the Academic AI Chatbot (Layer B Hybrid AI Learning Engine).
- * Combines shared Document Intelligence Engine retrieval + structured highlights + caching
- * with Groq/Gemini academic reasoning.
+ * Main RAG orchestrator for the Document Assistant / AI Academic Chatbot.
+ * Combines hybrid section-aware retrieval, document intelligence structure (classifications,
+ * definitions, section outlines, relationships), and follow-up coreference resolution.
  */
 export async function buildChatRagContext(params: {
   message: string;
@@ -384,6 +499,7 @@ export async function buildChatRagContext(params: {
 
     const emptyResult: ChatRagContextResult = {
       intent: analysis.intent,
+      questionType: analysis.questionType,
       topicSummary: analysis.topicSummary,
       retrievalQuery: analysis.retrievalQuery,
       searchedDocumentsCount: 0,
@@ -417,13 +533,23 @@ export async function buildChatRagContext(params: {
     allChunks.push(...getOrBuildDocumentChunks(doc));
   }
 
-  const candidatePoolSize = 6;
+  // Domain/structure-aware query expansion ONLY from terms overlapping the query
+  const expansionSourceDocs = attachedDocId && docById.has(attachedDocId)
+    ? [docById.get(attachedDocId)!]
+    : allDocs;
+  const expandedTerms =
+    analysis.topicKeywords.length > 0
+      ? extractDocumentQueryExpansionTerms(expansionSourceDocs, analysis.retrievalQuery, 10)
+      : [];
+
+  const candidatePoolSize = 10;
   let candidates = retrieveRelevantPassages(
     analysis.retrievalQuery,
     allChunks,
     effectiveUserId,
     attachedDocId,
-    candidatePoolSize
+    candidatePoolSize,
+    { expandedTerms }
   ).filter((r) => isPassageRelevant(r, analysis.topicKeywords));
 
   if (
@@ -437,35 +563,51 @@ export async function buildChatRagContext(params: {
       allChunks,
       effectiveUserId,
       undefined,
-      candidatePoolSize
+      candidatePoolSize,
+      { expandedTerms }
     ).filter((r) => isPassageRelevant(r, analysis.topicKeywords));
   }
 
-  // If a document is explicitly attached and the user asked a generic overview/summary question
-  // whose verbs were all filtered as query filler (no off-topic keywords), anchor on the document's opening passages.
+  // If a document is explicitly attached and the user asked an overview/summary question
+  // (e.g. "summarize this document" or "explain the main topics"), spread coverage across
+  // distinct sections/pages of the attached document rather than stopping at page 1.
   if (
     candidates.length === 0 &&
     attachedDocId &&
-    analysis.topicKeywords.length === 0 &&
+    (analysis.questionType === 'overview' || analysis.topicKeywords.length === 0) &&
     !analysis.needsClarification
   ) {
-    candidates = allChunks
-      .filter((c) => c.documentId === attachedDocId)
-      .slice(0, 3)
-      .map((chunk) => ({
-        chunk,
-        score: 1.5,
-        matchedKeywords: ['overview'],
-      }));
+    const docChunks = allChunks.filter((c) => c.documentId === attachedDocId);
+    const sampled: DocumentChunk[] = [];
+    if (docChunks.length <= 5) {
+      sampled.push(...docChunks);
+    } else {
+      const step = Math.max(1, Math.floor((docChunks.length - 1) / 4));
+      for (let i = 0; i < docChunks.length && sampled.length < 5; i += step) {
+        sampled.push(docChunks[i]);
+      }
+    }
+    candidates = sampled.map((chunk, idx) => ({
+      chunk,
+      score: Number((2.0 - idx * 0.1).toFixed(2)),
+      matchedKeywords: ['overview'],
+    }));
   }
 
   const defaultLimit = 3;
   let targetLimit = defaultLimit;
-  if (analysis.needsMultiPassageSynthesis && candidates.length > defaultLimit) {
+  const wantsBroadCoverage =
+    analysis.needsMultiPassageSynthesis ||
+    analysis.questionType === 'classification' ||
+    analysis.questionType === 'comparison' ||
+    analysis.questionType === 'process' ||
+    analysis.questionType === 'overview';
+
+  if (wantsBroadCoverage && candidates.length > defaultLimit) {
     const topScore = candidates[0].score;
-    const maxAllowed = Math.min(5, candidates.length);
+    const maxAllowed = Math.min(6, candidates.length);
     for (let idx = defaultLimit; idx < maxAllowed; idx++) {
-      if (candidates[idx].score >= topScore * 0.45) {
+      if (candidates[idx].score >= topScore * 0.36) {
         targetLimit = idx + 1;
       } else {
         break;
@@ -473,7 +615,7 @@ export async function buildChatRagContext(params: {
     }
   }
 
-  const MAX_TOTAL_PASSAGE_CHARS = 5600;
+  const MAX_TOTAL_PASSAGE_CHARS = wantsBroadCoverage ? 6800 : 5600;
   const selectedResults: RetrievalResult[] = [];
   let runningChars = 0;
 
@@ -520,36 +662,38 @@ export async function buildChatRagContext(params: {
         const title = docTitleById.get(res.chunk.documentId) || 'Uploaded Study Material';
         const pageLabel =
           res.chunk.pageNumber !== null ? `Page ${res.chunk.pageNumber}` : 'Unnumbered Section';
-        return `[Passage ${idx + 1}] Document: "${title}" | Reference: ${pageLabel} (Section #${
+        const headingLabel = res.chunk.sectionHeading ? ` | Topic: ${res.chunk.sectionHeading}` : '';
+        return `[Passage ${idx + 1}] Document: "${title}" | Reference: ${pageLabel}${headingLabel} (Excerpt #${
           res.chunk.chunkPosition + 1
         })\n${res.chunk.originalText}`;
       })
       .join('\n\n---\n\n');
 
-    // Enrich compactly with extracted definitions/formulas only from the matched documents when budget allows
     const matchedDocIds = Array.from(new Set(selectedResults.map((r) => r.chunk.documentId)));
     const matchedDocs = matchedDocIds
       .map((id) => docById.get(id))
       .filter((d): d is IndexedDocumentRecord => Boolean(d));
-    const highlights = extractMatchingStructuredHighlights(matchedDocs, analysis.retrievalQuery, 2);
-    const highlightsText = highlights.join('\n');
-    const highlightBlock =
-      highlights.length > 0 && runningChars + highlightsText.length + 60 <= MAX_TOTAL_PASSAGE_CHARS
-        ? `\n\nKEY DOCUMENT DEFINITIONS & FORMULAS:\n${highlights.map((h) => `- ${h}`).join('\n')}`
-        : '';
+
+    const intelligenceBundle = buildStructuredRagIntelligence(
+      matchedDocs,
+      analysis.retrievalQuery,
+      2000
+    );
+
+    const exampleTitle = sources[0].documentTitle;
+    const examplePage = sources[0].pageNumber !== null ? `Page ${sources[0].pageNumber}` : 'Excerpt';
 
     documentContextPromptBlock = `\n\nRETRIEVED STUDY MATERIAL PASSAGES (${selectedResults.length} relevant excerpt${
       selectedResults.length === 1 ? '' : 's'
-    } from ${searchedTitles.length} searchable material${searchedTitles.length === 1 ? '' : 's'}):
-${passageBlocks}${highlightBlock}
+    } across ${new Set(selectedResults.map((r) => r.chunk.pageNumber).filter((p) => p !== null)).size || 1} page(s) from ${searchedTitles.length} searchable material${searchedTitles.length === 1 ? '' : 's'}):${intelligenceBundle.outlineBlock}
+
+${passageBlocks}${intelligenceBundle.structuredKnowledgeBlock}
 
 STRICT GROUNDING & CITATION RULES FOR THESE PASSAGES:
-1. Prioritize the retrieved passages above when answering the student's question.
-2. Cite the exact Document Title and Page reference inline whenever referencing material facts (for example: *(Source: "${
-      sources[0].documentTitle
-    }", ${sources[0].pageNumber !== null ? `Page ${sources[0].pageNumber}` : 'Excerpt'})*).
-3. NEVER invent a page number, section, statistic, or quote that is not explicitly present in the passages above.
-4. INSUFFICIENT / PARTIAL DOCUMENT INFO: If the retrieved passages relate to the topic but do NOT contain enough information to answer every detail of the question, explicitly state what your study material covers AND honestly tell the student what detail is not included in the uploaded material. If helpful, you may supplement the missing academic explanation under a clearly labeled **General Academic Knowledge** note so the student always knows what came from their document versus general knowledge.`;
+1. Base your answer directly on the retrieved passages and extracted document concepts above, synthesizing all relevant points across pages cleanly.
+2. Cite the exact Document Title and Page reference inline cleanly where facts originate (for example: (${exampleTitle}, ${examplePage}) or (${examplePage}) when discussing a single active document). Keep citations natural and understated.
+3. NEVER invent a page number, section, example, statistic, or document claim not supported by the passages above.
+4. INSUFFICIENT / PARTIAL DOCUMENT INFO: If the retrieved passages mention a concept or relate to the topic but do NOT explain a specific detail requested by the student, explicitly state what your study material covers AND honestly tell the student what detail is missing or only briefly mentioned in the uploaded material. If helpful, supplement under a separate clearly labeled **General Academic Knowledge** section so document facts and general knowledge stay strictly separated.`;
   } else if (analysis.needsClarification) {
     documentContextPromptBlock = `\n\nCLARIFICATION STATUS:
 The student query is ambiguous or underspecified ("${params.message.trim()}"). Searched ${
@@ -571,6 +715,7 @@ RULES FOR ANSWERING:
 
   const finalResult: ChatRagContextResult = {
     intent: analysis.intent,
+    questionType: analysis.questionType,
     topicSummary: analysis.topicSummary,
     retrievalQuery: analysis.retrievalQuery,
     searchedDocumentsCount: allDocs.length,
@@ -592,3 +737,4 @@ RULES FOR ANSWERING:
 
   return finalResult;
 }
+

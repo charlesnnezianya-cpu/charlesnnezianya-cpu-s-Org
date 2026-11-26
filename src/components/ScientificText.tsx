@@ -1,5 +1,5 @@
 import React from 'react';
-import { formatScientificText } from '../lib/scientificFormatter';
+import { formatScientificText, stripUnsupportedDisplaySymbols } from '../lib/scientificFormatter';
 
 interface ScientificTextProps {
   text: string;
@@ -13,7 +13,7 @@ interface ScientificTextProps {
 export function ScientificText({ text, className = '' }: ScientificTextProps) {
   if (!text) return null;
 
-  const formatted = formatScientificText(text);
+  const formatted = formatScientificText(stripUnsupportedDisplaySymbols(text));
 
   // Split by bold markers (**...**) or page references ((Page N))
   const tokens = formatted.split(/(\*\*[^*]+\*\*|\(Pages?\s+\d+(?:\s*[-–]\s*\d+)?\))/g);

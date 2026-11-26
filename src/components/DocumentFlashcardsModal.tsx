@@ -76,13 +76,43 @@ export function DocumentFlashcardsModal({
       }
     }
 
-    // 3. Core Concepts
+    // 3. Classifications & Named Types
+    if (Array.isArray(summary.classificationsAndTypes)) {
+      for (const cls of summary.classificationsAndTypes) {
+        if (cls && Array.isArray(cls.types)) {
+          for (const t of cls.types) {
+            if (t && t.name && t.explanation) {
+              const contextParts: string[] = [];
+              if (t.characteristics && t.characteristics.length > 0) {
+                contextParts.push(`Characteristics: ${t.characteristics.join('; ')}`);
+              }
+              if (t.examples && t.examples.length > 0) {
+                contextParts.push(`Examples: ${t.examples.join('; ')}`);
+              }
+              list.push({
+                id: `cls-${counter++}`,
+                category: 'Core Concept',
+                front: `${cls.topic}: ${t.name}`,
+                back: t.explanation,
+                context: contextParts.length > 0 ? contextParts.join(' · ') : undefined,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // 4. Core Concepts
     if (Array.isArray(summary.mainConcepts)) {
       for (const c of summary.mainConcepts) {
         if (c && c.heading) {
-          const backText = c.aiClarification || (c.sourcePoints && c.sourcePoints.join('\n\n')) || c.heading;
-          const contextPoints = c.sourcePoints && c.sourcePoints.length > 0
-            ? c.sourcePoints.join(' · ')
+          const allPoints = [
+            ...(c.sourcePoints || []),
+            ...(c.subsections ? c.subsections.flatMap((s) => s.points) : []),
+          ];
+          const backText = allPoints.length > 0 ? allPoints.join('\n\n') : c.aiClarification || c.heading;
+          const contextPoints = c.examples && c.examples.length > 0
+            ? `Example: ${c.examples[0]}`
             : undefined;
           list.push({
             id: `concept-${counter++}`,
@@ -95,7 +125,21 @@ export function DocumentFlashcardsModal({
       }
     }
 
-    // 4. Distinctions & Comparisons
+    // 5. Characteristics & Explanations
+    if (Array.isArray(summary.characteristicsAndExplanations)) {
+      for (const grp of summary.characteristicsAndExplanations) {
+        if (grp && grp.topic && Array.isArray(grp.points) && grp.points.length > 0) {
+          list.push({
+            id: `char-${counter++}`,
+            category: 'Deep Dive',
+            front: `Characteristics of ${grp.topic}`,
+            back: grp.points.join('\n\n'),
+          });
+        }
+      }
+    }
+
+    // 6. Distinctions & Comparisons
     if (Array.isArray(summary.importantDistinctions)) {
       for (const d of summary.importantDistinctions) {
         if (d && d.pairTitle && d.comparison) {
@@ -109,7 +153,7 @@ export function DocumentFlashcardsModal({
       }
     }
 
-    // 5. Difficult Concepts
+    // 7. Difficult Concepts
     if (Array.isArray(summary.difficultConceptExplanations)) {
       for (const dc of summary.difficultConceptExplanations) {
         if (dc && dc.concept && dc.plainExplanation) {

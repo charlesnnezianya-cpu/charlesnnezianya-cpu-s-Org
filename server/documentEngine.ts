@@ -6,6 +6,7 @@ export interface DocumentChunk {
   documentId: string;
   userId: string;
   pageNumber: number | null;
+  sectionHeading?: string | null;
   chunkPosition: number;
   originalText: string;
   keywords: string[];
@@ -30,6 +31,7 @@ export interface AnalyzedUnit {
   formattedText: string;
   pageNumber: number | null;
   sectionHeading: string | null;
+  subheading: string | null;
   orderIndex: number;
   isBullet: boolean;
   isStep: boolean;
@@ -97,13 +99,34 @@ export interface ExtractedCauseEffect {
   salience: number;
 }
 
+export interface ExtractedClassificationType {
+  name: string;
+  explanation: string;
+  characteristics: string[];
+  examples: string[];
+  pageNumber: number | null;
+}
+
 export interface ExtractedClassification {
   category: string;
   members: string[];
   statement: string;
+  overviewStatement: string;
+  types: ExtractedClassificationType[];
+  comparisonNote?: string;
+  sourceFingerprints: string[];
   sectionHeading: string | null;
   pageNumber: number | null;
   salience: number;
+}
+
+export interface ExtractedCharacteristic {
+  topic: string;
+  statement: string;
+  sectionHeading: string | null;
+  pageNumber: number | null;
+  salience: number;
+  sourceText: string;
 }
 
 export interface ExtractedStructureFunction {
@@ -173,6 +196,7 @@ export interface DocumentIntelligenceProfile {
   distinctions: ExtractedDistinction[];
   causeEffects: ExtractedCauseEffect[];
   classifications: ExtractedClassification[];
+  characteristics: ExtractedCharacteristic[];
   structureFunctions: ExtractedStructureFunction[];
   examples: ExtractedExample[];
   keyTerminology: string[];
@@ -483,8 +507,19 @@ export function normalizeText(text: string): string {
     .replace(/ﬀ/g, 'ff')
     .replace(/ﬃ/g, 'ffi')
     .replace(/ﬄ/g, 'ffl')
+    // Common UTF-8 / Windows-1252 PDF mojibake cleanup
+    .replace(/â€¢/g, '- ')
+    .replace(/â€“/g, '–')
+    .replace(/â€”/g, '—')
+    .replace(/â€™|â€˜/g, "'")
+    .replace(/â€œ|â€\x9D/g, '"')
     .replace(/[\u2018\u2019]/g, "'")
     .replace(/[\u201C\u201D]/g, '"')
+    // Convert PDF Private Use Area bullets (Wingdings/Symbol) & square/dingbat bullet glyphs to clean list markers
+    .replace(/(^|\n)[ \t]*[\uE000-\uF8FF\u25A0-\u25FF\u2700-\u27BF\uFFFD\u2022\u2023\u2043]+[ \t]*/g, '$1- ')
+    // Strip remaining unsupported inline Private Use Area, empty-box tofu, replacement & zero-width glyphs
+    .replace(/[\uE000-\uF8FF\uFFFD\u25A0-\u25FF\u2700-\u27BF]/g, ' ')
+    .replace(/[\u200B-\u200F\uFEFF\u2028\u2029]/g, '')
     .replace(/([a-z]{2,})-\n([a-z]{2,})/g, '$1$2')
     .replace(/[\u0000-\u0008\u000B-\u000C\u000E-\u001F\u007F-\u009F]/g, '')
     .replace(/[ \t]+/g, ' ')
@@ -531,8 +566,8 @@ export function extractKeywords(text: string, maxKeywords = 8): string[] {
 }
 
 /**
- * Chunks document text with controlled character length and paragraph/sentence overlap.
- * Preserves page references if '[Page N]' markers are present in the text.
+ * Chunks document text with controlled character length, section heading tracking,
+ * and paragraph/sentence overlap. Preserves page references if '[Page N]' markers exist.
  */
 export function chunkDocumentText(
   documentId: string,
@@ -544,9 +579,11 @@ export function chunkDocumentText(
   const normalized = normalizeText(extractedText);
   if (!normalized) return [];
 
-  const pageSegments = normalized.split(/(?=\[Page\s+\d+\])/i);
+  const normalizedMarkers = normalized.replace(/(^|\n)Page\s+(\d+)\s*:\s*/gi, '$1[Page $2]\n');
+  const pageSegments = normalizedMarkers.split(/(?=\[Page\s+\d+\])/i);
   const chunks: DocumentChunk[] = [];
   let chunkPosition = 0;
+  let activeHeading: string | null = null;
 
   for (const seg of pageSegments) {
     const pageMatch = seg.match(/^\[Page\s+(\d+)\]/i);
@@ -555,38 +592,102 @@ export function chunkDocumentText(
 
     if (!cleanSeg) continue;
 
-    const paragraphs = segmentParagraphs(cleanSeg);
-    let currentBuffer = '';
+    // Preserve line structure to identify headings inside each page before grouping paragraphs
+    const rawBlocks = cleanSeg.split(/\n{2,}/);
+    const structuredParagraphs: Array<{ text: string; heading: string | null; startsNewSection: boolean }> = [];
 
-    const pushBuffer = (buf: string) => {
+    for (const rawBlock of rawBlocks) {
+      const lines = rawBlock
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+      if (lines.length === 0) continue;
+
+      let bufLines: string[] = [];
+      let blockStartsNewSection = false;
+
+      for (let li = 0; li < lines.length; li++) {
+        const line = lines[li];
+        const nextLine = lines[li + 1];
+        const headingInfo = detectHeadingInfo(line, nextLine);
+        if (headingInfo) {
+          if (bufLines.length > 0) {
+            structuredParagraphs.push({
+              text: bufLines.join(' ').trim(),
+              heading: activeHeading,
+              startsNewSection: blockStartsNewSection,
+            });
+            bufLines = [];
+            blockStartsNewSection = false;
+          }
+          activeHeading = headingInfo.title;
+          blockStartsNewSection = true;
+          bufLines.push(line);
+        } else {
+          bufLines.push(line);
+        }
+      }
+
+      if (bufLines.length > 0) {
+        structuredParagraphs.push({
+          text: bufLines.join(' ').trim(),
+          heading: activeHeading,
+          startsNewSection: blockStartsNewSection,
+        });
+      }
+    }
+
+    let currentBuffer = '';
+    let currentHeading: string | null = activeHeading;
+
+    const pushBuffer = (buf: string, heading: string | null) => {
       const trimmed = buf.trim();
       if (trimmed.length >= 15) {
+        const kwText = heading ? `${heading} ${trimmed}` : trimmed;
         chunks.push({
           documentId,
           userId,
           pageNumber,
+          sectionHeading: heading,
           chunkPosition: chunkPosition++,
           originalText: trimmed,
-          keywords: extractKeywords(trimmed, 8),
+          keywords: extractKeywords(kwText, 10),
         });
       }
     };
 
-    for (const para of paragraphs) {
-      if (currentBuffer.length + para.length + 2 <= maxChunkChars) {
-        currentBuffer = currentBuffer ? `${currentBuffer}\n\n${para}` : para;
+    for (const para of structuredParagraphs) {
+      // Flush cleanly on a major heading transition once the current chunk has decent substance
+      if (
+        para.startsNewSection &&
+        currentBuffer.length >= 260 &&
+        currentHeading !== para.heading
+      ) {
+        pushBuffer(currentBuffer, currentHeading);
+        currentBuffer = para.text;
+        currentHeading = para.heading;
+        continue;
+      }
+
+      if (!currentBuffer) {
+        currentHeading = para.heading;
+      }
+
+      if (currentBuffer.length + para.text.length + 2 <= maxChunkChars) {
+        currentBuffer = currentBuffer ? `${currentBuffer}\n\n${para.text}` : para.text;
       } else {
         if (currentBuffer) {
-          pushBuffer(currentBuffer);
+          pushBuffer(currentBuffer, currentHeading);
           const tail = currentBuffer.slice(-overlapChars).trim();
-          currentBuffer = tail ? `${tail}\n\n${para}` : para;
+          currentHeading = para.heading;
+          currentBuffer = tail && !para.startsNewSection ? `${tail}\n\n${para.text}` : para.text;
         } else {
           let start = 0;
-          while (start < para.length) {
-            const end = Math.min(start + maxChunkChars, para.length);
-            const sub = para.slice(start, end).trim();
-            pushBuffer(sub);
-            if (end >= para.length) break;
+          while (start < para.text.length) {
+            const end = Math.min(start + maxChunkChars, para.text.length);
+            const sub = para.text.slice(start, end).trim();
+            pushBuffer(sub, para.heading);
+            if (end >= para.text.length) break;
             start = Math.max(0, end - overlapChars);
           }
           currentBuffer = '';
@@ -595,7 +696,7 @@ export function chunkDocumentText(
     }
 
     if (currentBuffer) {
-      pushBuffer(currentBuffer);
+      pushBuffer(currentBuffer, currentHeading);
     }
   }
 
@@ -604,9 +705,10 @@ export function chunkDocumentText(
       documentId,
       userId,
       pageNumber: null,
+      sectionHeading: null,
       chunkPosition: 0,
       originalText: normalized.slice(0, maxChunkChars),
-      keywords: extractKeywords(normalized, 8),
+      keywords: extractKeywords(normalized, 10),
     });
   }
 
@@ -623,17 +725,21 @@ function escapeRegExp(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+export interface RetrievalOptions {
+  expandedTerms?: string[];
+}
+
 /**
- * Enhanced BM25 / TF-IDF overlap passage retrieval with length normalization,
- * multi-word bigram/trigram phrase matching, formula/heading cues, and strict
- * per-user/per-document authorization isolation.
+ * Enhanced hybrid BM25 / TF-IDF + section-heading + structural intent passage retrieval
+ * with query term expansion support and strict per-user/per-document authorization isolation.
  */
 export function retrieveRelevantPassages(
   question: string,
   chunks: DocumentChunk[],
   authUserId: string,
   targetDocumentId?: string,
-  topK = 3
+  topK = 3,
+  options?: RetrievalOptions
 ): RetrievalResult[] {
   const cleanQ = normalizeText(question).toLowerCase();
   if (!cleanQ || chunks.length === 0 || !authUserId) return [];
@@ -649,8 +755,19 @@ export function retrieveRelevantPassages(
     }
   }
 
+  const expandedTermsSet = new Set<string>();
+  if (Array.isArray(options?.expandedTerms)) {
+    for (const rawExp of options.expandedTerms) {
+      const cleanExp = rawExp.toLowerCase().trim();
+      if (cleanExp.length >= 3 && !STOP_WORDS.has(cleanExp) && !qTermsSet.has(cleanExp)) {
+        expandedTermsSet.add(cleanExp);
+      }
+    }
+  }
+
   const qTerms = Array.from(qTermsSet);
-  if (qTerms.length === 0) return [];
+  const expandedTerms = Array.from(expandedTermsSet).slice(0, 14);
+  if (qTerms.length === 0 && expandedTerms.length === 0) return [];
 
   const eligibleChunks = chunks.filter(
     (chunk) =>
@@ -674,19 +791,22 @@ export function retrieveRelevantPassages(
   const totalDocs = eligibleChunks.length;
   const termDf = new Map<string, number>();
   const lowerTexts = eligibleChunks.map((c) => c.originalText.toLowerCase());
+  const lowerHeadings = eligibleChunks.map((c) => (c.sectionHeading || '').toLowerCase());
   const docLengths = lowerTexts.map((t) => Math.max(1, t.split(/\s+/).length));
   const avgDocLen =
     docLengths.reduce((sum, len) => sum + len, 0) / Math.max(1, docLengths.length);
 
-  for (const term of qTerms) {
+  for (const term of [...qTerms, ...expandedTerms]) {
     const stem = lightStem(term);
     let df = 0;
     for (let i = 0; i < eligibleChunks.length; i++) {
       const chunk = eligibleChunks[i];
       const textLower = lowerTexts[i];
+      const headingLower = lowerHeadings[i];
       if (
         chunk.keywords.includes(term) ||
         textLower.includes(term) ||
+        (headingLower && headingLower.includes(term)) ||
         (stem.length >= 5 && textLower.includes(stem))
       ) {
         df++;
@@ -695,6 +815,12 @@ export function retrieveRelevantPassages(
     termDf.set(term, df);
   }
 
+  const wantsFormulaOrDef = /\b(formula|equation|law|defined as|definition|refers to|what is)\b/i.test(cleanQ);
+  const wantsClassification = /\b(types?|categories|kinds|forms|classes|classification|classified into)\b/i.test(cleanQ);
+  const wantsProcess = /\b(steps?|stages?|phases?|process|mechanism|how does|pathway|sequence|procedure)\b/i.test(cleanQ);
+  const wantsComparison = /\b(compare|contrast|difference|differences|versus|vs|distinguish|unlike|similarities)\b/i.test(cleanQ);
+  const wantsExamplesOrProps = /\b(examples?|for instance|characteristics?|properties|features|advantages?|disadvantages?)\b/i.test(cleanQ);
+
   const k1 = 1.5;
   const b = 0.55;
   const results: RetrievalResult[] = [];
@@ -702,8 +828,10 @@ export function retrieveRelevantPassages(
   for (let i = 0; i < eligibleChunks.length; i++) {
     const chunk = eligibleChunks[i];
     const chunkTextLower = lowerTexts[i];
+    const headingLower = lowerHeadings[i];
     const dlNorm = 1 - b + b * (docLengths[i] / Math.max(1, avgDocLen));
     const matchedKeywords: string[] = [];
+    const distinctPrimaryMatches = new Set<string>();
     let matchScore = 0;
 
     for (const term of qTerms) {
@@ -716,30 +844,61 @@ export function retrieveRelevantPassages(
       const tf = exactMatches ? exactMatches.length : 0;
       const bm25Tf = tf > 0 ? (tf * (k1 + 1)) / (tf + k1 * dlNorm) : 0;
 
+      if (headingLower && wordRegex.test(headingLower)) {
+        matchScore += 1.65 * Math.max(0.6, idf);
+        distinctPrimaryMatches.add(term);
+        matchedKeywords.push(term);
+      }
+
       if (chunk.keywords.includes(term)) {
         const effectiveTf = tf > 0 ? bm25Tf : 1.0;
         matchScore += (2.5 + effectiveTf) * idf;
+        distinctPrimaryMatches.add(term);
         matchedKeywords.push(term);
       } else if (tf > 0) {
         matchScore += 1.55 * bm25Tf * idf;
+        distinctPrimaryMatches.add(term);
         matchedKeywords.push(term);
       } else {
         const stem = lightStem(term);
         if (stem.length >= 5 && chunkTextLower.includes(stem)) {
           matchScore += 0.95 * idf;
+          distinctPrimaryMatches.add(term);
           matchedKeywords.push(term);
         }
       }
     }
 
+    // Weighted semantic/domain expansion matches (never matches alone without primary signal or strong multi-term evidence)
+    let expansionScore = 0;
+    let expansionHits = 0;
+    for (const expTerm of expandedTerms) {
+      const df = termDf.get(expTerm) || 0;
+      if (df === 0) continue;
+      const idf = Math.log(1 + (totalDocs - df + 0.5) / (df + 0.5));
+      const wordRegex = new RegExp(`\\b${escapeRegExp(expTerm)}\\b`);
+      if (headingLower && wordRegex.test(headingLower)) {
+        expansionScore += 0.95 * Math.max(0.5, idf);
+        expansionHits++;
+        matchedKeywords.push(expTerm);
+      } else if (wordRegex.test(chunkTextLower)) {
+        expansionScore += 0.72 * idf;
+        expansionHits++;
+        matchedKeywords.push(expTerm);
+      }
+    }
+    if (distinctPrimaryMatches.size > 0 || expansionHits >= 2) {
+      matchScore += Math.min(3.5, expansionScore);
+    }
+
     for (const bigram of queryBigrams) {
-      if (chunkTextLower.includes(bigram)) {
+      if (chunkTextLower.includes(bigram) || headingLower.includes(bigram)) {
         matchScore += 1.85;
       }
     }
 
     for (const trigram of queryTrigrams) {
-      if (chunkTextLower.includes(trigram)) {
+      if (chunkTextLower.includes(trigram) || headingLower.includes(trigram)) {
         matchScore += 2.1;
       }
     }
@@ -748,12 +907,44 @@ export function retrieveRelevantPassages(
       matchScore += 4.5;
     }
 
-    // Structural cues (definitional statements or equations in chunk boost technical Q&A accuracy)
+    // Coverage bonus: passages matching multiple distinct primary concepts rank higher than single-word repetition
+    if (distinctPrimaryMatches.size >= 2) {
+      matchScore += Math.min(2.4, (distinctPrimaryMatches.size - 1) * 0.65);
+    }
+
+    // Structural intent alignment cues
     if (
-      /\b(formula|equation|law|defined as|refers to)\b/i.test(cleanQ) &&
-      (/[=→⇌]/.test(chunk.originalText) || /\b(is defined as|refers to|means)\b/i.test(chunk.originalText))
+      wantsFormulaOrDef &&
+      (/[=→⇌]/.test(chunk.originalText) || /\b(is defined as|refers to|means|defined as)\b/i.test(chunk.originalText))
     ) {
       matchScore += 0.75;
+    }
+    if (
+      wantsClassification &&
+      /\b(types?|categories|classes|classified into|kinds|forms|consists of|divided into)\b/i.test(chunk.originalText)
+    ) {
+      matchScore += 0.8;
+    }
+    if (
+      wantsProcess &&
+      (/\b(step\s*\d+|first|second|next|finally|stage|phase|followed by)\b/i.test(chunk.originalText) ||
+        /(?:^|\n)\s*\d+[.)]\s+/m.test(chunk.originalText))
+    ) {
+      matchScore += 0.7;
+    }
+    if (
+      wantsComparison &&
+      /\b(whereas|unlike|while|in contrast|compared to|difference|similarly|both)\b/i.test(chunk.originalText)
+    ) {
+      matchScore += 0.7;
+    }
+    if (
+      wantsExamplesOrProps &&
+      /\b(for example|for instance|such as|characteristic|property|properties|feature|features|advantage)\b/i.test(
+        chunk.originalText
+      )
+    ) {
+      matchScore += 0.65;
     }
 
     if (matchScore > 0) {
@@ -929,31 +1120,80 @@ export function isMetaFillerSentence(text: string): boolean {
   return false;
 }
 
-export function detectHeadingLine(line: string, nextLine?: string): string | null {
-  const trimmed = line.trim();
-  if (!trimmed || trimmed.length > 85) return null;
+export function isCodeOrSyntaxLine(line: string): boolean {
+  const t = line.trim();
+  if (!t) return false;
+  if (
+    /^(?:import\s+[A-Za-z0-9_.*]+|from\s+[A-Za-z0-9_.]+\s+import\s+|def\s+[A-Za-z0-9_]+\s*\(|async\s+def\s+|class\s+[A-Za-z0-9_]+\s*[(:]|#include\s*<|using\s+namespace\s+|public\s+(?:static|class)\s+|pip\s+install\s+|npm\s+install\s+|console\.log\(|System\.out\.print|printf\s*\(|return\s+[A-Za-z0-9_[\]{}().,+\-*/\s]+;?$)/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  if (/^[{}[\];]+$/.test(t)) return true;
+  if (/^(?:if|elif|else|for|while|try|except|finally|with|switch|case)\b[^.?!]{0,80}:\s*$/i.test(t) && /[=()[\]_]/.test(t)) {
+    return true;
+  }
+  // High code-syntax density (e.g. dot chains + snake_case + parens/brackets, no natural prose)
+  const syntaxTokens = (t.match(/[A-Za-z_]+\.[A-Za-z_]+\(|_[a-z]+_|::|==|!=|<=|>=|\*\*/g) || []).length;
+  if (syntaxTokens >= 2 && t.split(/\s+/).length <= 14 && !/\b(?:is|are|refers|means|because|whereas)\b/i.test(t)) {
+    return true;
+  }
+  return false;
+}
 
-  const mdMatch = trimmed.match(/^#{1,4}\s+(.+?)\s*#*$/);
+export function detectHeadingInfo(
+  line: string,
+  nextLine?: string
+): { title: string; level: 1 | 2 } | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.length > 90) return null;
+  if (isCodeOrSyntaxLine(trimmed)) return null;
+
+  const mdMatch = trimmed.match(/^(#{1,4})\s+(.+?)\s*#*$/);
   if (mdMatch) {
-    return mdMatch[1].replace(/:$/, '').trim();
+    return {
+      title: mdMatch[2].replace(/:$/, '').trim(),
+      level: mdMatch[1].length >= 2 ? 2 : 1,
+    };
+  }
+
+  const subSecMatch = trimmed.match(/^(\d+(?:\.\d+)+[.)]?)\s+([A-Z][^\n]{2,72})$/);
+  if (subSecMatch && !/[.!?]$/.test(trimmed)) {
+    return { title: subSecMatch[2].replace(/:$/, '').trim(), level: 2 };
   }
 
   const secMatch = trimmed.match(
-    /^(?:(?:chapter|section|unit|module|part|topic)\s+\d+(?:\.\d+)*[:.\s-]+|\d+(?:\.\d+){1,2}[.)]?\s+|[IVX]+\.\s+)([A-Z][^\n]{2,70})$/i
+    /^(?:(?:chapter|section|unit|module|part|topic)\s+\d+(?:\.\d+)*[:.\s-]+|[IVX]+\.\s+)([A-Z][^\n]{2,72})$/i
   );
   if (secMatch && !/[.!?]$/.test(trimmed)) {
-    return secMatch[1].replace(/:$/, '').trim();
+    return { title: secMatch[1].replace(/:$/, '').trim(), level: 1 };
   }
 
-  const simpleNumMatch = trimmed.match(/^\d+[.)]\s+([A-Z][A-Za-z0-9\s,&/()-]{2,60})$/);
+  const simpleNumMatch = trimmed.match(/^\d+[.)]\s+([A-Z][A-Za-z0-9\s,&/()-]{2,64})$/);
   if (
     simpleNumMatch &&
-    !/\b(?:is|are|was|were|has|have|had|convert|produces|occurs|means|refers)\b/i.test(
+    !/\b(?:is|are|was|were|has|have|had|convert|produces|occurs|means|refers|includes?|consists?)\b/i.test(
       simpleNumMatch[1]
     ) &&
-    simpleNumMatch[1].split(/\s+/).length <= 7
+    simpleNumMatch[1].split(/\s+/).length <= 8
   ) {
-    return simpleNumMatch[1].replace(/:$/, '').trim();
+    return { title: simpleNumMatch[1].replace(/:$/, '').trim(), level: 1 };
+  }
+
+  // ALL-CAPS academic section headings (2 to 8 words, no sentence punctuation)
+  if (
+    /^[A-Z0-9][A-Z0-9\s,&/:()-]{4,64}$/.test(trimmed) &&
+    /[A-Z]{2,}/.test(trimmed) &&
+    !/[a-z]/.test(trimmed) &&
+    !/[.!?;=]$/.test(trimmed) &&
+    trimmed.split(/\s+/).length >= 2 &&
+    trimmed.split(/\s+/).length <= 8
+  ) {
+    const titleCased = trimmed
+      .toLowerCase()
+      .replace(/\b([a-z])/g, (_, ch: string) => ch.toUpperCase());
+    return { title: titleCased.replace(/:$/, '').trim(), level: 1 };
   }
 
   if (
@@ -962,8 +1202,12 @@ export function detectHeadingLine(line: string, nextLine?: string): string | nul
     nextLine.trim().length > 0
   ) {
     const candidate = trimmed.slice(0, -1).trim();
-    if (!/^(?:note|example|warning|tip|page|step\s*\d+|figure\s*\d+)$/i.test(candidate)) {
-      return candidate;
+    if (
+      !/^(?:note|example|formula|equation|reaction|warning|tip|page|step\s*\d+|figure\s*\d+|table\s*\d+)$/i.test(
+        candidate
+      )
+    ) {
+      return { title: candidate, level: 2 };
     }
   }
 
@@ -971,23 +1215,27 @@ export function detectHeadingLine(line: string, nextLine?: string): string | nul
     nextLine &&
     nextLine.trim().length > trimmed.length &&
     trimmed.length >= 4 &&
-    trimmed.length <= 60 &&
+    trimmed.length <= 64 &&
     !/[.!?,;=→⇌]$/.test(trimmed) &&
     !/^[-*•]/.test(trimmed)
   ) {
     const words = trimmed.split(/\s+/);
-    if (words.length >= 1 && words.length <= 7) {
+    if (words.length >= 1 && words.length <= 8) {
       const capWords = words.filter((w) => /^[A-Z0-9(]/.test(w)).length;
       if (
         capWords >= Math.ceil(words.length * 0.65) &&
-        !/\b(?:is|are|was|were|will|can|has|have)\b/.test(trimmed)
+        !/\b(?:is|are|was|were|will|can|has|have|does|do)\b/.test(trimmed)
       ) {
-        return trimmed;
+        return { title: trimmed, level: 1 };
       }
     }
   }
 
   return null;
+}
+
+export function detectHeadingLine(line: string, nextLine?: string): string | null {
+  return detectHeadingInfo(line, nextLine)?.title ?? null;
 }
 
 export function smartSentenceSplit(paragraph: string): string[] {
@@ -1466,45 +1714,74 @@ function extractCauseEffectFromUnit(unit: AnalyzedUnit): ExtractedCauseEffect | 
   return null;
 }
 
-function extractClassificationFromUnit(unit: AnalyzedUnit): ExtractedClassification | null {
-  const text = stripBoilerplatePrefix(unit.formattedText);
-  if (text.length < 24 || text.length > 280) return null;
+function cleanMemberLabel(raw: string): string {
+  return raw
+    .replace(/^(?:such as|including|namely|e\.g\.|for example|firstly|secondly|thirdly|\d+[.)]|[-*])\s+/i, '')
+    .replace(/[.?!:;]+$/, '')
+    .trim();
+}
 
-  const classMatch = text.match(
-    /(?:types|classes|categories|forms|groups|examples)\s+of\s+([A-Za-z0-9\s'-]{3,42}?)\s+(?:include|are|consist of)\s+(.{8,140}?)[.?!]?$/i
-  );
-  if (classMatch) {
-    const category = classMatch[1].trim();
-    const members = classMatch[2]
-      .split(/,\s*(?:and\s+)?|\s+and\s+/i)
-      .map((m) => m.replace(/^(?:such as|including)\s+/i, '').trim())
-      .filter((m) => m.length >= 2 && m.length <= 45);
-    if (members.length >= 2) {
-      return {
-        category,
-        members,
-        statement: text,
-        sectionHeading: unit.sectionHeading,
-        pageNumber: unit.pageNumber,
-        salience: unit.score,
-      };
-    }
+function splitMemberList(rawList: string): string[] {
+  return rawList
+    .split(/,\s*(?:and\s+|or\s+)?|\s+and\s+|\s*;\s*/i)
+    .map((m) => cleanMemberLabel(m))
+    .filter((m) => m.length >= 2 && m.length <= 55 && !/^(?:etc|and so on|others|more)$/i.test(m));
+}
+
+function extractClassificationFromUnit(unit: AnalyzedUnit): ExtractedClassification | null {
+  let text = stripBoilerplatePrefix(unit.formattedText);
+  if (text.length < 24 || text.length > 340) return null;
+
+  // Strip optional leading label such as "Types of Memory Models: There are..." without stripping "There are two main types of X: ..."
+  if (
+    !/^(?:there\s+(?:are|is)\b|the\s+(?:\d+|two|three|four|five|six)?\s*(?:main|primary|major|basic|common|key)?\s*(?:types|classes|categories|forms|groups|kinds)\s+of\b)/i.test(
+      text
+    )
+  ) {
+    text = text
+      .replace(/^[A-Z][A-Za-z0-9\s'-]{2,48}:\s+(?=(?:There|The|Two|Three|Four|Five|Six)\b)/i, '')
+      .trim();
   }
 
-  const dividedMatch = text.match(
-    /^([A-Z][A-Za-z0-9\s'-]{3,42}?)\s+(?:is|are)\s+(?:classified|divided|grouped|categorized)\s+into\s+(.{8,140}?)[.?!]?$/i
-  );
-  if (dividedMatch) {
-    const category = dividedMatch[1].trim();
-    const members = dividedMatch[2]
-      .split(/,\s*(?:and\s+)?|\s+and\s+/i)
-      .map((m) => m.trim())
-      .filter((m) => m.length >= 2 && m.length <= 45);
+  const patterns: Array<{ regex: RegExp; categoryIdx: number; membersIdx: number }> = [
+    // "There are two main types of problems: well-defined problems and ill-defined problems."
+    {
+      regex:
+        /^(?:there\s+(?:are|is)\s+(?:several|many|\d+|two|three|four|five|six)?\s*(?:main|primary|major|basic|common|key|distinct)?\s*(?:types|kinds|categories|classes|forms|groups|levels|models|approaches|methods)\s+of\s+)([A-Za-z0-9\s'-]{3,48}?)(?:\s*:\s*|\s+(?:which\s+are|namely|including|are)\s+)(.{8,170}?)[.?!]?$/i,
+      categoryIdx: 1,
+      membersIdx: 2,
+    },
+    // "The two primary categories of memory are short-term memory and long-term memory."
+    {
+      regex:
+        /^(?:the\s+)?(?:\d+|two|three|four|five|six)?\s*(?:main|primary|major|basic|common|key)?\s*(?:types|classes|categories|forms|groups|kinds)\s+of\s+([A-Za-z0-9\s'-]{3,48}?)\s+(?:include|are|consist of)\s+(.{8,170}?)[.?!]?$/i,
+      categoryIdx: 1,
+      membersIdx: 2,
+    },
+    // "Problem solving is classified/divided/grouped into two types: A and B" or "... into A and B"
+    {
+      regex:
+        /^([A-Z][A-Za-z0-9\s'-]{3,48}?)\s+(?:is|are|can be)\s+(?:broadly\s+)?(?:classified|divided|grouped|categorized|split)\s+into\s+(?:(?:\d+|two|three|four|five|six)\s+(?:main\s+)?(?:types|classes|categories|forms|groups)\s*:\s*)?(.{8,170}?)[.?!]?$/i,
+      categoryIdx: 1,
+      membersIdx: 2,
+    },
+  ];
+
+  for (const pat of patterns) {
+    const match = text.match(pat.regex);
+    if (!match) continue;
+    const category = match[pat.categoryIdx].trim();
+    const members = splitMemberList(match[pat.membersIdx]).map((m) =>
+      m.charAt(0).toUpperCase() + m.slice(1)
+    );
     if (members.length >= 2) {
       return {
         category,
         members,
         statement: text,
+        overviewStatement: attachPageCitation(text, unit.pageNumber),
+        types: [],
+        sourceFingerprints: [unit.fingerprint],
         sectionHeading: unit.sectionHeading,
         pageNumber: unit.pageNumber,
         salience: unit.score,
@@ -1513,6 +1790,218 @@ function extractClassificationFromUnit(unit: AnalyzedUnit): ExtractedClassificat
   }
 
   return null;
+}
+
+function isCharacteristicUnit(unit: AnalyzedUnit): boolean {
+  const text = unit.formattedText;
+  const heading = (unit.sectionHeading || unit.subheading || '').toLowerCase();
+  if (/\b(?:characteristics?|properties|features|attributes|traits|advantages|disadvantages|limitations)\b/i.test(heading)) {
+    return true;
+  }
+  return /\b(?:characteristics?\s+(?:of|include)|characterized\s+by|key\s+features?\s+(?:of|include)|properties\s+(?:of|include)|typically\s+(?:exhibits?|displays?|possesses?|has|have)|distinctive\s+feature|essential\s+property|advantages?\s+(?:of|include)|limitations?\s+(?:of|include))\b/i.test(
+    text
+  );
+}
+
+function buildDetailedClassifications(
+  units: AnalyzedUnit[],
+  distinctions: ExtractedDistinction[]
+): ExtractedClassification[] {
+  const classifications: ExtractedClassification[] = [];
+  const seenCategories = new Set<string>();
+
+  // 1. Seed from explicit classification intro sentences
+  const unitClassSeeds: Array<{ cls: ExtractedClassification; seedOrder: number }> = [];
+  for (const u of units) {
+    const cls = extractClassificationFromUnit(u);
+    if (!cls) continue;
+    const key = cls.category.toLowerCase();
+    if (seenCategories.has(key)) continue;
+    seenCategories.add(key);
+    unitClassSeeds.push({ cls, seedOrder: u.orderIndex });
+  }
+
+  // 2. Detect heading-based classifications ("Types of X" / "Categories of Y") with numbered/headed child items
+  const headingGroups = new Map<string, AnalyzedUnit[]>();
+  for (const u of units) {
+    const h = u.sectionHeading || '';
+    if (!h) continue;
+    const arr = headingGroups.get(h) || [];
+    arr.push(u);
+    headingGroups.set(h, arr);
+  }
+
+  for (const [heading, secUnits] of headingGroups.entries()) {
+    const typeHeadingMatch = heading.match(
+      /^(?:types|categories|classes|forms|kinds)\s+of\s+(.{3,48})$/i
+    );
+    if (!typeHeadingMatch) continue;
+    const catName = typeHeadingMatch[1].trim();
+    if (seenCategories.has(catName.toLowerCase())) continue;
+
+    // Look for subheadings or colon-led items under this heading
+    const memberNames: string[] = [];
+    const seenM = new Set<string>();
+    for (const su of secUnits) {
+      if (su.subheading && !seenM.has(su.subheading.toLowerCase())) {
+        seenM.add(su.subheading.toLowerCase());
+        memberNames.push(su.subheading);
+      } else {
+        const itemLead = su.formattedText.match(/^([A-Z][A-Za-z0-9\s'-]{2,42})(?::|\s+—)\s+.{15,}$/);
+        if (
+          itemLead &&
+          !/^(?:note|example|formula|characteristic|summary)$/i.test(itemLead[1].trim()) &&
+          !seenM.has(itemLead[1].trim().toLowerCase())
+        ) {
+          seenM.add(itemLead[1].trim().toLowerCase());
+          memberNames.push(itemLead[1].trim());
+        }
+      }
+    }
+
+    if (memberNames.length >= 2) {
+      seenCategories.add(catName.toLowerCase());
+      const firstPage = secUnits[0]?.pageNumber ?? null;
+      const overviewStatement = attachPageCitation(
+        `${catName.charAt(0).toUpperCase() + catName.slice(1)} is organized into ${memberNames.length} categories in this section: ${memberNames.join(', ')}.`,
+        firstPage
+      );
+      unitClassSeeds.push({
+        cls: {
+          category: catName,
+          members: memberNames,
+          statement: overviewStatement,
+          overviewStatement,
+          types: [],
+          sourceFingerprints: [],
+          sectionHeading: heading,
+          pageNumber: firstPage,
+          salience: secUnits.reduce((s, x) => s + x.score, 0) / secUnits.length,
+        },
+        seedOrder: secUnits[0].orderIndex - 1,
+      });
+    }
+  }
+
+  // 3. Attach separate explanations, characteristics, examples, and comparisons per type
+  for (const { cls, seedOrder } of unitClassSeeds) {
+    const scopeUnits = units.filter((u) => {
+      if (u.orderIndex <= seedOrder) return false;
+      if (cls.sectionHeading && u.sectionHeading === cls.sectionHeading) return true;
+      // Also inspect near subsequent units (within 24 units) if they share type/subheading names
+      return u.orderIndex - seedOrder <= 24;
+    });
+
+    const types: ExtractedClassificationType[] = [];
+
+    for (const member of cls.members) {
+      const memberLower = member.toLowerCase();
+      const memberNorm = memberLower.replace(/^(?:the|a|an)\s+/i, '').trim();
+      const memberCoreWords = memberNorm
+        .split(/\s+/)
+        .filter((w) => w.length >= 4 && !ACADEMIC_STOP_WORDS.has(w));
+      const shortAlias =
+        memberNorm.endsWith('s') && memberNorm.length > 4 ? memberNorm.slice(0, -1) : memberNorm;
+
+      const normalizedOtherMembers = cls.members
+        .filter((other) => other !== member)
+        .map((other) => other.toLowerCase().replace(/^(?:the|a|an)\s+/i, '').trim());
+
+      const matchesMember = (u: AnalyzedUnit): boolean => {
+        // Never treat multi-type comparison/contrast sentences as a single type's explanation
+        if (
+          /\b(whereas|in contrast|unlike|differs from|difference between|compared (?:to|with)|on the other hand|versus|\bvs\.?\b)\b/i.test(
+            u.formattedText
+          )
+        ) {
+          return false;
+        }
+
+        const subLower = (u.subheading || '').toLowerCase();
+        if (subLower) {
+          if (subLower.includes(memberNorm) || memberNorm.includes(subLower)) {
+            return true;
+          }
+          // If unit belongs explicitly to another type's subheading, do not steal it
+          if (normalizedOtherMembers.some((om) => subLower.includes(om) || om.includes(subLower))) {
+            return false;
+          }
+        }
+
+        const txtLower = u.formattedText.toLowerCase();
+        if (txtLower.includes(memberNorm) || (shortAlias.length >= 5 && txtLower.includes(shortAlias))) {
+          return true;
+        }
+        if (memberCoreWords.length >= 2) {
+          return memberCoreWords.every((w) => txtLower.includes(w));
+        }
+        return false;
+      };
+
+      const matchingUnits = scopeUnits.filter(
+        (u) => !cls.sourceFingerprints.includes(u.fingerprint) && matchesMember(u)
+      );
+
+      // Separate characteristics & examples vs primary explanation sentences
+      const explSentences: string[] = [];
+      const charList: string[] = [];
+      const exList: string[] = [];
+      let typePage: number | null = null;
+
+      for (const mu of matchingUnits) {
+        if (typePage === null && mu.pageNumber !== null) typePage = mu.pageNumber;
+        cls.sourceFingerprints.push(mu.fingerprint);
+        const cleanSent = attachPageCitation(stripBoilerplatePrefix(mu.formattedText), mu.pageNumber);
+
+        if (/\b(for example|for instance|e\.g\.|such as|illustrated by)\b/i.test(mu.formattedText)) {
+          if (exList.length < 2) exList.push(cleanSent);
+          else if (explSentences.length < 3) explSentences.push(cleanSent);
+        } else if (isCharacteristicUnit(mu)) {
+          if (charList.length < 3) charList.push(cleanSent);
+        } else {
+          if (explSentences.length < 3) explSentences.push(cleanSent);
+          else if (charList.length < 2) charList.push(cleanSent);
+        }
+      }
+
+      const explanation =
+        explSentences.length > 0
+          ? explSentences.join(' ')
+          : charList.length > 0
+            ? charList.shift()!
+            : 'Named in the source document without a separate detailed explanation.';
+
+      types.push({
+        name: member,
+        explanation,
+        characteristics: charList,
+        examples: exList,
+        pageNumber: typePage ?? cls.pageNumber,
+      });
+    }
+
+    // Check for grounded source comparison covering >= 2 types in this classification
+    let comparisonNote: string | undefined;
+    for (const dist of distinctions) {
+      const distLower = dist.comparison.toLowerCase();
+      const matchedCount = cls.members.filter((m) =>
+        distLower.includes(m.toLowerCase().replace(/^(?:the|a|an)\s+/i, ''))
+      ).length;
+      if (matchedCount >= 2 || (cls.sectionHeading && dist.sectionHeading === cls.sectionHeading)) {
+        comparisonNote = dist.comparison;
+        cls.sourceFingerprints.push(normalizedFingerprint(dist.sourceText));
+        break;
+      }
+    }
+
+    classifications.push({
+      ...cls,
+      types,
+      ...(comparisonNote ? { comparisonNote } : {}),
+    });
+  }
+
+  return classifications;
 }
 
 function extractStructureFunctionFromUnit(
@@ -1770,7 +2259,7 @@ function applyTextRankScoring(units: AnalyzedUnit[]): void {
 
 /**
  * Deterministic academic plain-language simplification for dense or complex statements
- * without altering source meaning or inventing facts.
+ * without altering source meaning, inventing facts, or emitting robotic filler.
  */
 export function buildStudentFriendlyClarification(
   text: string,
@@ -1779,8 +2268,8 @@ export function buildStudentFriendlyClarification(
   const clean = stripBoilerplatePrefix(text).trim();
   if (!clean) return '';
 
-  // Clarify overly formal connectors into plain academic phrasing
-  let simplified = clean
+  // Clarify overly dense formal connectors into natural student-friendly academic prose
+  const simplified = clean
     .replace(/\bconsequently,\s*/gi, 'As a result, ')
     .replace(/\bnevertheless,\s*/gi, 'Even so, ')
     .replace(/\bsubsequently,\s*/gi, 'Next, ')
@@ -1788,7 +2277,7 @@ export function buildStudentFriendlyClarification(
     .replace(/\butilized?\b/gi, 'used')
     .replace(/\bfacilitates?\b/gi, 'helps enable');
 
-  // Attach brief parenthetical reminders for specialized terms defined in the document
+  // Pair specialized terms with their document definition when genuinely informative
   for (const def of definitions.slice(0, 12)) {
     const termLower = def.term.toLowerCase();
     if (
@@ -1797,13 +2286,13 @@ export function buildStudentFriendlyClarification(
       !simplified.toLowerCase().includes(def.rawDefinition.slice(0, 24).toLowerCase())
     ) {
       const shortMeaning = def.rawDefinition.split(/[.;]/)[0].trim();
-      if (shortMeaning.length >= 12 && shortMeaning.length <= 95 && simplified.length < 220) {
-        return `${simplified} — Key context: ${def.term} refers to ${shortMeaning.charAt(0).toLowerCase() + shortMeaning.slice(1)}.`;
+      if (shortMeaning.length >= 14 && shortMeaning.length <= 105) {
+        return `Here, ${def.term} refers to ${shortMeaning.charAt(0).toLowerCase() + shortMeaning.slice(1)}.`;
       }
     }
   }
 
-  return simplified !== clean ? `In plain terms: ${simplified}` : '';
+  return simplified !== clean ? simplified : '';
 }
 
 function detectSectionRelationships(
@@ -1816,40 +2305,40 @@ function detectSectionRelationships(
     const freq = new Map<string, number>();
     for (const u of sec.units) {
       for (const tok of u.tokens) {
-        if (tok.length >= 4) {
+        if (tok.length >= 5) {
           freq.set(tok, (freq.get(tok) || 0) + 1);
         }
       }
     }
     return new Set(
       Array.from(freq.entries())
+        .filter(([, count]) => count >= 1)
         .sort((a, b) => b[1] - a[1])
-        .slice(0, 15)
+        .slice(0, 12)
         .map(([w]) => w)
     );
   });
 
   for (let i = 0; i < sections.length - 1; i++) {
-    for (let j = i + 1; j < Math.min(sections.length, i + 4); j++) {
-      if (sections[i].heading === sections[j].heading) continue;
-      const shared: string[] = [];
-      for (const term of sectionTerms[i]) {
-        if (sectionTerms[j].has(term)) {
-          shared.push(term.charAt(0).toUpperCase() + term.slice(1));
-        }
-      }
-      if (shared.length >= 2) {
-        const topShared = shared.slice(0, 4);
-        relationships.push({
-          fromSection: sections[i].heading,
-          toSection: sections[j].heading,
-          sharedConcepts: topShared,
-          connectionNote: `${sections[i].heading} connects directly to ${sections[j].heading} through shared core concepts (${topShared.join(', ')}).`,
-        });
+    const j = i + 1; // Only adjacent sections with strong substantive concept overlap
+    if (sections[i].heading === sections[j].heading) continue;
+    const shared: string[] = [];
+    for (const term of sectionTerms[i]) {
+      if (sectionTerms[j].has(term)) {
+        shared.push(term.charAt(0).toUpperCase() + term.slice(1));
       }
     }
+    if (shared.length >= 3) {
+      const topShared = shared.slice(0, 3);
+      relationships.push({
+        fromSection: sections[i].heading,
+        toSection: sections[j].heading,
+        sharedConcepts: topShared,
+        connectionNote: `Both ${sections[i].heading} and ${sections[j].heading} examine ${topShared.join(', ')}.`,
+      });
+    }
   }
-  return relationships.slice(0, 8);
+  return relationships.slice(0, 5);
 }
 
 function extractDifficultConcepts(
@@ -1860,24 +2349,18 @@ function extractDifficultConcepts(
   const results: ExtractedDifficultConcept[] = [];
   const seenConcepts = new Set<string>();
 
-  // 1. Formula/Equation dense rules simplified for students
-  for (const f of formulas.slice(0, 5)) {
+  for (const f of formulas.slice(0, 4)) {
     const key = f.name.toLowerCase();
-    if (seenConcepts.has(key)) continue;
+    if (seenConcepts.has(key) || f.variables.length === 0) continue;
     seenConcepts.add(key);
-    const varSummary =
-      f.variables.length > 0
-        ? ` Variables involved: ${f.variables.map((v) => `${v.symbol} (${v.meaning})`).join(', ')}.`
-        : '';
     results.push({
       concept: f.name,
       sourceContext: `${f.expressionOrStructure} — ${f.rawUsage}`,
-      plainExplanation: `Look closely at how ${f.expressionOrStructure} relates the quantities in ${f.sectionHeading || 'this topic'}.${varSummary}`,
+      plainExplanation: `Variables: ${f.variables.map((v) => `${v.symbol} denotes ${v.meaning}`).join('; ')}.`,
       pageNumber: f.pageNumber,
     });
   }
 
-  // 2. High-density technical sentences (multi-syllable terminology + causal/conditional structure)
   const denseCandidates = [...units]
     .filter((u) => u.formattedText.length >= 75 && u.formattedText.length <= 290)
     .map((u) => {
@@ -1890,8 +2373,11 @@ function extractDifficultConcepts(
     .filter((item) => item.density >= 3)
     .sort((a, b) => b.density * b.unit.score - a.density * a.unit.score);
 
-  for (const { unit } of denseCandidates.slice(0, 5)) {
+  for (const { unit } of denseCandidates.slice(0, 4)) {
+    const clarified = buildStudentFriendlyClarification(unit.formattedText, definitions);
+    if (!clarified) continue;
     const leadConcept =
+      unit.subheading ||
       unit.sectionHeading ||
       Array.from(unit.tokens)
         .filter((t) => t.length >= 6)
@@ -1901,20 +2387,15 @@ function extractDifficultConcepts(
     if (!leadConcept || seenConcepts.has(leadConcept.toLowerCase())) continue;
     seenConcepts.add(leadConcept.toLowerCase());
 
-    const clarified = buildStudentFriendlyClarification(unit.formattedText, definitions);
-    const plain =
-      clarified ||
-      `Break this down step by step: identify the main subject first, then trace how the condition or mechanism changes the outcome.`;
-
     results.push({
       concept: leadConcept,
       sourceContext: attachPageCitation(stripBoilerplatePrefix(unit.formattedText), unit.pageNumber),
-      plainExplanation: plain,
+      plainExplanation: clarified,
       pageNumber: unit.pageNumber,
     });
   }
 
-  return results.slice(0, 6);
+  return results.slice(0, 5);
 }
 
 // ============================================================================
@@ -1982,8 +2463,14 @@ export function analyzeDocumentIntelligence(
   const seenExactFp = new Set<string>();
   let orderCounter = 0;
   let detectedHeadingCount = 0;
+  const titleTokens = contentTokens(title);
 
-  const scoreSentenceTfIdf = (formattedText: string, tokens: Set<string>, ordIdx: number) => {
+  const scoreSentenceTfIdf = (
+    formattedText: string,
+    tokens: Set<string>,
+    ordIdx: number,
+    secHeading: string | null
+  ) => {
     let tfidfSum = 0;
     for (const t of tokens) {
       const tf = Math.min(8, globalTermFreq.get(t) || 1);
@@ -1992,35 +2479,48 @@ export function analyzeDocumentIntelligence(
       tfidfSum += tf * idf;
     }
     let score = tokens.size > 0 ? tfidfSum / Math.sqrt(tokens.size + 1.2) : 1;
-    if (/\d/.test(formattedText)) score *= 1.12;
-    if (/[=→⇌]/.test(formattedText)) score *= 1.22;
+
+    // BM25-like relevance boost for sentences grounded in the document title or active section heading
+    const secTokens = secHeading ? contentTokens(secHeading) : new Set<string>();
+    let headingOverlap = 0;
+    for (const t of tokens) {
+      if (titleTokens.has(t) || secTokens.has(t)) headingOverlap++;
+    }
+    if (headingOverlap > 0) {
+      score *= 1 + Math.min(0.45, headingOverlap * 0.14);
+    }
+
+    if (/\d/.test(formattedText)) score *= 1.1;
+    if (/[=→⇌]/.test(formattedText)) score *= 1.2;
     if (
-      /\b(is defined as|refers to|means|denotes|causes|leads to|produces|converts|whereas|unlike|therefore|concludes)\b/i.test(
+      /\b(is defined as|refers to|means|denotes|causes|leads to|produces|converts|whereas|unlike|therefore|concludes|types of|classified into)\b/i.test(
         formattedText
       )
     ) {
-      score *= 1.2;
+      score *= 1.22;
     }
-    if (ordIdx < 5) score *= 1.12;
+    if (ordIdx < 5) score *= 1.1;
     return Number(score.toFixed(4));
   };
 
   for (const page of rawPages) {
     const lines = page.text.split('\n');
     let currentHeading: string | null = null;
+    let currentSubheading: string | null = null;
     let paragraphBuf: string[] = [];
 
     const flushParagraph = () => {
       if (paragraphBuf.length === 0) return;
       const paraText = paragraphBuf.join(' ').replace(/\s+/g, ' ').trim();
       paragraphBuf = [];
-      if (paraText.length < 12) return;
+      if (paraText.length < 12 || isCodeOrSyntaxLine(paraText)) return;
 
       const splitSentences = smartSentenceSplit(paraText);
       const candidates = splitSentences.length > 0 ? splitSentences : [paraText];
 
       for (const rawSent of candidates) {
         const cleaned = rawSent.replace(/\s+/g, ' ').trim();
+        if (isCodeOrSyntaxLine(cleaned)) continue;
         const isFormulaLine =
           /[→⇌]|(?:^|\s)[A-Za-zΔαβγλμθπρσωΩ][A-Za-z0-9_₀-₉⁰-⁹']*\s*[=≈∝]\s*\S/.test(cleaned);
         if (cleaned.length < (isFormulaLine ? 5 : 14) || isMetaFillerSentence(cleaned)) continue;
@@ -2033,13 +2533,14 @@ export function analyzeDocumentIntelligence(
         const tokens = contentTokens(formattedText);
         if (tokens.size < 2 && !isFormulaLine && !/[=→⇌]/.test(formattedText)) continue;
 
-        const score = scoreSentenceTfIdf(formattedText, tokens, orderCounter);
+        const score = scoreSentenceTfIdf(formattedText, tokens, orderCounter, currentHeading);
 
         units.push({
           text: cleaned,
           formattedText,
           pageNumber: page.pageNumber,
           sectionHeading: currentHeading,
+          subheading: currentSubheading,
           orderIndex: orderCounter++,
           isBullet: false,
           isStep: /^step\s*\d+/i.test(cleaned),
@@ -2058,10 +2559,21 @@ export function analyzeDocumentIntelligence(
         continue;
       }
 
-      const heading = detectHeadingLine(line, lines[i + 1]);
-      if (heading) {
+      if (isCodeOrSyntaxLine(line)) {
         flushParagraph();
-        currentHeading = formatScientificText(heading);
+        continue;
+      }
+
+      const headingInfo = detectHeadingInfo(line, lines[i + 1]);
+      if (headingInfo) {
+        flushParagraph();
+        const formattedHeading = formatScientificText(headingInfo.title);
+        if (headingInfo.level === 2 && currentHeading) {
+          currentSubheading = formattedHeading;
+        } else {
+          currentHeading = formattedHeading;
+          currentSubheading = null;
+        }
         detectedHeadingCount++;
         continue;
       }
@@ -2071,18 +2583,21 @@ export function analyzeDocumentIntelligence(
         flushParagraph();
         const itemBody = bulletMatch[1].trim();
         const isStep = /^(?:\d+[.)]|Step\s+\d+)/i.test(line);
-        if (itemBody.length >= 14 && !isMetaFillerSentence(itemBody)) {
+        if (itemBody.length >= 14 && !isMetaFillerSentence(itemBody) && !isCodeOrSyntaxLine(itemBody)) {
           const fp = normalizedFingerprint(itemBody);
           if (fp && !seenExactFp.has(fp)) {
             seenExactFp.add(fp);
             const formattedText = formatScientificText(itemBody);
             const tokens = contentTokens(formattedText);
-            const score = Number((scoreSentenceTfIdf(formattedText, tokens, orderCounter) * 1.08).toFixed(4));
+            const score = Number(
+              (scoreSentenceTfIdf(formattedText, tokens, orderCounter, currentHeading) * 1.08).toFixed(4)
+            );
             units.push({
               text: itemBody,
               formattedText,
               pageNumber: page.pageNumber,
               sectionHeading: currentHeading,
+              subheading: currentSubheading,
               orderIndex: orderCounter++,
               isBullet: true,
               isStep,
@@ -2195,10 +2710,20 @@ export function analyzeDocumentIntelligence(
     if (ce) causeEffects.push(ce);
   }
 
-  const classifications: ExtractedClassification[] = [];
+  const classifications = buildDetailedClassifications(dedupedUnits, distinctions);
+
+  const characteristics: ExtractedCharacteristic[] = [];
   for (const unit of dedupedUnits) {
-    const cls = extractClassificationFromUnit(unit);
-    if (cls) classifications.push(cls);
+    if (isCharacteristicUnit(unit)) {
+      characteristics.push({
+        topic: unit.subheading || unit.sectionHeading || 'Key Characteristics',
+        statement: attachPageCitation(stripBoilerplatePrefix(unit.formattedText), unit.pageNumber),
+        sectionHeading: unit.sectionHeading,
+        pageNumber: unit.pageNumber,
+        salience: unit.score,
+        sourceText: unit.formattedText,
+      });
+    }
   }
 
   const structureFunctions: ExtractedStructureFunction[] = [];
@@ -2218,7 +2743,7 @@ export function analyzeDocumentIntelligence(
     if (ex) examples.push(ex);
   }
 
-  // Group units into document sections (by heading or page/keyword cluster)
+  // Group units into document sections in original document order
   const sectionsMap = new Map<string, AnalyzedUnit[]>();
   for (const u of dedupedUnits) {
     const key =
@@ -2243,27 +2768,47 @@ export function analyzeDocumentIntelligence(
   const sectionRelationships = detectSectionRelationships(sections);
   const difficultConcepts = extractDifficultConcepts(dedupedUnits, definitions, formulas);
 
-  // Key terminology & phrases
+  // Key terminology & phrases computed strictly from non-code prose units
+  const cleanProseForTerms = dedupedUnits.map((u) => u.formattedText).join(' ');
+  const extractedKeyPhrases = extractKeyPhrases(cleanProseForTerms || normalized, 14);
   const termCandidates = new Set<string>();
   for (const d of definitions) {
     if (d.term.length >= 2 && d.term.length <= 36) termCandidates.add(d.term);
   }
+  for (const cls of classifications) {
+    for (const m of cls.members) {
+      if (m.length >= 2 && m.length <= 36) termCandidates.add(m);
+    }
+  }
   for (const sf of structureFunctions) {
     if (sf.entity.length >= 2 && sf.entity.length <= 36) termCandidates.add(sf.entity);
   }
+  for (const phrase of extractedKeyPhrases.slice(0, 10)) {
+    const alreadyCovered = Array.from(termCandidates).some(
+      (existing) => existing.toLowerCase() === phrase.toLowerCase()
+    );
+    if (!alreadyCovered) {
+      termCandidates.add(phrase);
+    }
+  }
   const techAcronyms =
-    normalized.match(/\b(?:[A-Z]{2,6}2?|[A-Z][a-z]+[A-Z][A-Za-z]+|pH|pKa)\b/g) || [];
+    cleanProseForTerms.match(/\b(?:[A-Z]{2,6}2?|[A-Z][a-z]+[A-Z][A-Za-z]+|pH|pKa)\b/g) || [];
   for (const ac of techAcronyms) {
     if (!['PDF', 'PAGE', 'UNIT', 'STEP', 'NOTE'].includes(ac.toUpperCase())) {
       termCandidates.add(formatScientificText(ac));
     }
   }
-  const docKeywords = extractKeywords(normalized, 20);
+  const genericFillerWords = new Set([
+    'solving', 'finding', 'current', 'initial', 'desired', 'main', 'types',
+    'lack', 'clear', 'single', 'various', 'several', 'common', 'general',
+    'based', 'given', 'shown', 'using', 'require', 'include', 'provides',
+  ]);
+  const docKeywords = extractKeywords(cleanProseForTerms, 20);
   for (const kw of docKeywords) {
-    if (ACADEMIC_STOP_WORDS.has(kw) || kw.length < 3) continue;
+    if (ACADEMIC_STOP_WORDS.has(kw) || genericFillerWords.has(kw) || kw.length < 4) continue;
     const formattedKw = kw.charAt(0).toUpperCase() + kw.slice(1);
     const alreadyCovered = Array.from(termCandidates).some(
-      (existing) => existing.toLowerCase() === kw.toLowerCase()
+      (existing) => existing.toLowerCase().includes(kw.toLowerCase())
     );
     if (!alreadyCovered) {
       termCandidates.add(formatScientificText(formattedKw));
@@ -2292,10 +2837,11 @@ export function analyzeDocumentIntelligence(
     distinctions,
     causeEffects,
     classifications,
+    characteristics,
     structureFunctions,
     examples,
     keyTerminology: Array.from(termCandidates).slice(0, 20),
-    keyPhrases: extractKeyPhrases(normalized, 14),
+    keyPhrases: extractKeyPhrases(cleanProseForTerms || normalized, 14),
     quality: {
       wordCount,
       alphaWordCount,
@@ -2360,6 +2906,231 @@ export function extractMatchingStructuredHighlights(
     .sort((a, b) => b.score - a.score)
     .slice(0, maxItems)
     .map((item) => item.line);
+}
+
+/**
+ * Extracts query expansion terms strictly from an attached or matched document's structured
+ * intelligence profile (classifications, definitions, section headings) ONLY when the query
+ * overlaps that structural concept, improving recall across multi-page sections.
+ */
+export function extractDocumentQueryExpansionTerms(
+  docs: IndexedDocumentRecord[],
+  query: string,
+  maxTerms = 10
+): string[] {
+  const qTokens = contentTokens(query);
+  if (qTokens.size === 0 || docs.length === 0) return [];
+
+  const expanded = new Set<string>();
+  const addWords = (text: string) => {
+    for (const kw of extractKeywords(text, 8)) {
+      if (!qTokens.has(kw) && kw.length >= 3) {
+        expanded.add(kw);
+      }
+    }
+  };
+
+  for (const doc of docs.slice(0, 3)) {
+    const profile = analyzeDocumentIntelligence(doc.extractedText, { title: doc.title });
+
+    for (const cls of profile.classifications) {
+      const clsTokens = contentTokens(
+        `${cls.category} ${cls.members.join(' ')} ${cls.statement} ${cls.sectionHeading || ''}`
+      );
+      const { containment } = tokenSimilarity(qTokens, clsTokens);
+      if (containment >= 0.25) {
+        addWords(cls.category);
+        for (const m of cls.members) addWords(m);
+      }
+    }
+
+    for (const def of profile.definitions) {
+      const defTokens = contentTokens(`${def.term} ${def.sectionHeading || ''}`);
+      const { containment } = tokenSimilarity(qTokens, defTokens);
+      if (containment >= 0.35) {
+        addWords(def.term);
+        addWords(def.rawDefinition);
+      }
+    }
+
+    for (const sec of profile.sections) {
+      const secTokens = contentTokens(sec.heading);
+      const { containment } = tokenSimilarity(qTokens, secTokens);
+      if (containment >= 0.35) {
+        addWords(sec.heading);
+      }
+    }
+  }
+
+  return Array.from(expanded).slice(0, maxTerms);
+}
+
+/**
+ * Builds a high-density structured intelligence block (Document Outline, Classifications & Types,
+ * Definitions, Characteristics, Distinctions, Processes, Examples, Section Relationships) for
+ * matched documents so the Document Assistant accurately synthesizes multi-page concepts.
+ */
+export function buildStructuredRagIntelligence(
+  docs: IndexedDocumentRecord[],
+  query: string,
+  maxChars = 1900
+): { outlineBlock: string; structuredKnowledgeBlock: string } {
+  if (docs.length === 0 || maxChars <= 0) {
+    return { outlineBlock: '', structuredKnowledgeBlock: '' };
+  }
+
+  const qTokens = contentTokens(query);
+  const queryLower = query.toLowerCase();
+  const wantsAllOverview = /\b(overview|summarize|summary|all|types?|categories|structure|outline|topics|relate|relationship|connect)\b/i.test(
+    queryLower
+  );
+
+  // 1. Compact Document Outline (subject + ordered section headings with page ranges)
+  const outlineLines: string[] = [];
+  const items: Array<{ score: number; text: string }> = [];
+
+  for (const doc of docs.slice(0, 3)) {
+    const profile = analyzeDocumentIntelligence(doc.extractedText, { title: doc.title });
+
+    if (profile.sections.length > 0) {
+      const secSummary = profile.sections
+        .slice(0, 8)
+        .map((s) => {
+          const pages =
+            s.pageNumbers.length === 1
+              ? `p.${s.pageNumbers[0]}`
+              : s.pageNumbers.length > 1
+                ? `pp.${s.pageNumbers[0]}-${s.pageNumbers[s.pageNumbers.length - 1]}`
+                : '';
+          return pages ? `${s.heading} (${pages})` : s.heading;
+        })
+        .join('; ');
+      outlineLines.push(
+        `- "${doc.title}" (${profile.subjectArea}, ${profile.quality.pageCount} page${
+          profile.quality.pageCount === 1 ? '' : 's'
+        }): ${secSummary}`
+      );
+    }
+
+    if (qTokens.size === 0 && !wantsAllOverview) continue;
+
+    for (const def of profile.definitions) {
+      const overlap = tokenSimilarity(qTokens, contentTokens(`${def.term} ${def.rawDefinition} ${def.sectionHeading || ''}`));
+      if (overlap.containment >= 0.22 || Array.from(qTokens).some((t) => def.term.toLowerCase().includes(t))) {
+        items.push({
+          score: overlap.containment * 2.2 + 1.1,
+          text: `Definition [${doc.title}${def.pageNumber ? `, Page ${def.pageNumber}` : ''}]: ${def.term} — ${def.rawDefinition}`,
+        });
+      }
+    }
+
+    for (const cls of profile.classifications) {
+      const clsFull = `${cls.category} ${cls.members.join(' ')} ${cls.statement} ${cls.sectionHeading || ''}`;
+      const overlap = tokenSimilarity(qTokens, contentTokens(clsFull));
+      if (overlap.containment >= 0.2 || wantsAllOverview) {
+        const typesSummary = cls.types
+          .slice(0, 6)
+          .map((t) => {
+            const extras: string[] = [];
+            if (t.characteristics.length > 0) extras.push(`Features: ${t.characteristics[0]}`);
+            if (t.examples.length > 0) extras.push(`Ex: ${t.examples[0]}`);
+            const pageTag = t.pageNumber ? ` (p.${t.pageNumber})` : '';
+            return `${t.name}${pageTag}: ${t.explanation}${extras.length ? ` [${extras.join('; ')}]` : ''}`;
+          })
+          .join(' | ');
+        items.push({
+          score: overlap.containment * 2.5 + (/\b(type|categor|kind|class)/i.test(queryLower) ? 1.8 : 1.0),
+          text: `Classification [${doc.title}${cls.pageNumber ? `, Page ${cls.pageNumber}` : ''}]: ${cls.category} — ${typesSummary}`,
+        });
+      }
+    }
+
+    for (const f of profile.formulas) {
+      const overlap = tokenSimilarity(qTokens, contentTokens(`${f.name} ${f.rawUsage} ${f.expressionOrStructure}`));
+      if (overlap.containment >= 0.22) {
+        const varText =
+          f.variables.length > 0
+            ? ` (${f.variables.map((v) => `${v.symbol}: ${v.meaning}`).join('; ')})`
+            : '';
+        items.push({
+          score: overlap.containment * 2 + 1.1,
+          text: `Formula [${doc.title}${f.pageNumber ? `, Page ${f.pageNumber}` : ''}]: ${f.name}: ${f.expressionOrStructure}${varText}`,
+        });
+      }
+    }
+
+    for (const dist of profile.distinctions) {
+      const overlap = tokenSimilarity(qTokens, contentTokens(`${dist.pairTitle} ${dist.rawComparison}`));
+      if (overlap.containment >= 0.22) {
+        items.push({
+          score: overlap.containment * 2.1 + 1.0,
+          text: `Distinction [${doc.title}${dist.pageNumber ? `, Page ${dist.pageNumber}` : ''}]: ${dist.pairTitle} — ${dist.rawComparison}`,
+        });
+      }
+    }
+
+    for (const proc of profile.processes) {
+      const procText = `${proc.heading} ${proc.steps.map((s) => s.rawText).join(' ')}`;
+      const overlap = tokenSimilarity(qTokens, contentTokens(procText));
+      if (overlap.containment >= 0.22) {
+        const stepsStr = proc.steps
+          .slice(0, 5)
+          .map((s) => `${s.stepNumber}. ${s.rawText}${s.pageNumber ? ` (p.${s.pageNumber})` : ''}`)
+          .join(' ');
+        items.push({
+          score: overlap.containment * 2 + 0.95,
+          text: `Process [${doc.title} — ${proc.heading}]: ${stepsStr}`,
+        });
+      }
+    }
+
+    for (const ex of profile.examples) {
+      const overlap = tokenSimilarity(qTokens, contentTokens(`${ex.title} ${ex.example} ${ex.sectionHeading || ''}`));
+      if (overlap.containment >= 0.24) {
+        items.push({
+          score: overlap.containment * 1.9 + 0.85,
+          text: `Example [${doc.title}${ex.pageNumber ? `, Page ${ex.pageNumber}` : ''}]: ${ex.example}`,
+        });
+      }
+    }
+
+    for (const rel of profile.sectionRelationships) {
+      const overlap = tokenSimilarity(
+        qTokens,
+        contentTokens(`${rel.fromSection} ${rel.toSection} ${rel.sharedConcepts.join(' ')}`)
+      );
+      if (overlap.containment >= 0.2 || wantsAllOverview) {
+        items.push({
+          score: overlap.containment * 1.6 + 0.7,
+          text: `Section Connection [${doc.title}]: "${rel.fromSection}" connects to "${rel.toSection}" via ${rel.sharedConcepts.slice(0, 4).join(', ')}`,
+        });
+      }
+    }
+  }
+
+  const outlineBlock =
+    outlineLines.length > 0
+      ? `\n\nDOCUMENT STRUCTURE OUTLINE:\n${outlineLines.join('\n')}`
+      : '';
+
+  const sorted = items.sort((a, b) => b.score - a.score);
+  const picked: string[] = [];
+  let charBudget = Math.max(200, maxChars - outlineBlock.length);
+
+  for (const it of sorted) {
+    if (picked.length >= 6) break;
+    if (picked.includes(it.text)) continue;
+    if (it.text.length + 4 > charBudget && picked.length > 0) break;
+    picked.push(it.text);
+    charBudget -= it.text.length + 3;
+  }
+
+  const structuredKnowledgeBlock =
+    picked.length > 0
+      ? `\n\nEXTRACTED DOCUMENT CONCEPTS, CLASSIFICATIONS & FORMULAS:\n${picked.map((l) => `- ${l}`).join('\n')}`
+      : '';
+
+  return { outlineBlock, structuredKnowledgeBlock };
 }
 
 export function buildSectionClusterHeading(units: AnalyzedUnit[], fallbackIdx: number): string {

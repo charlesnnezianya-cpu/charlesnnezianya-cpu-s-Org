@@ -3,6 +3,8 @@ import {
   AlertCircle,
   BookOpen,
   Check,
+  ChevronDown,
+  ChevronUp,
   Copy,
   FileText,
   GraduationCap,
@@ -53,6 +55,7 @@ import type {
   StudySummaryRecord,
 } from '../types/brainstine';
 import { resolveSubjectVisual } from '../lib/educationalVisuals';
+import { stripUnsupportedDisplaySymbols } from '../lib/scientificFormatter';
 import { AcademicContentRenderer } from './AcademicContentRenderer';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 import {
@@ -1036,14 +1039,14 @@ export function AiChatWorkspace({
                     className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}
                   >
                     <div
-                      className={`min-w-0 max-w-[92%] rounded-2xl px-3.5 py-3 sm:max-w-[85%] sm:px-4 sm:py-3.5 ${
+                      className={`min-w-0 rounded-2xl ${
                         isUser
-                          ? 'bg-[#0F1E3D] text-white dark:bg-blue-600'
-                          : 'w-full max-w-full overflow-hidden border border-slate-200 bg-slate-50/70 text-slate-900 sm:max-w-[85%] dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-100'
+                          ? 'max-w-[92%] bg-[#0F1E3D] px-4 py-3 text-white sm:max-w-[80%] dark:bg-blue-600'
+                          : 'w-full max-w-full overflow-hidden border border-slate-200/90 bg-slate-50/55 px-4 py-4 text-slate-900 sm:max-w-[92%] sm:px-6 sm:py-5 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-100'
                       }`}
                     >
                       {imgSrc && (
-                        <div className="mb-2.5 overflow-hidden rounded-xl border border-white/15 bg-slate-950/20">
+                        <div className="mb-3 overflow-hidden rounded-xl border border-white/15 bg-slate-950/20">
                           <img
                             src={imgSrc}
                             alt="Uploaded study snapshot"
@@ -1053,70 +1056,69 @@ export function AiChatWorkspace({
                       )}
 
                       {isUser ? (
-                        <p className="whitespace-pre-wrap text-sm leading-relaxed select-text">
+                        <p className="whitespace-pre-wrap text-[14.5px] leading-relaxed select-text">
                           {msg.content}
                         </p>
                       ) : (
                         <>
-                          <AcademicContentRenderer content={msg.content} />
+                          <AcademicContentRenderer content={msg.content} collapsibleSections />
                           {(() => {
                             const ragInfo = messageRagById[msg.id];
                             if (!ragInfo) return null;
                             if (ragInfo.sources.length > 0) {
                               return (
-                                <div className="mt-3 border-t border-slate-200/80 pt-2.5 dark:border-slate-800">
-                                  <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-slate-600 dark:text-slate-300">
-                                    <BookOpen className="h-3 w-3 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
+                                <div className="mt-4 max-w-[74ch] border-t border-slate-200/80 pt-3 dark:border-slate-800">
+                                  <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                                    <BookOpen className="h-3.5 w-3.5 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
                                     <span>Study Material References</span>
                                   </p>
-                                  <div className="flex flex-wrap gap-1.5">
+                                  <div className="space-y-1.5">
                                     {ragInfo.sources.map((src, sIdx) => {
                                       const srcKey = `${msg.id}-${src.documentId}-${src.chunkPosition}-${sIdx}`;
                                       const isExpanded = expandedSourceKey === srcKey;
                                       return (
-                                        <button
+                                        <div
                                           key={srcKey}
-                                          type="button"
-                                          onClick={() =>
-                                            setExpandedSourceKey(isExpanded ? null : srcKey)
-                                          }
-                                          className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200/80 bg-blue-50/70 px-2.5 py-1 text-left text-[11px] font-medium text-blue-900 transition-colors hover:bg-blue-100/80 dark:border-cyan-800/70 dark:bg-cyan-950/35 dark:text-cyan-200 dark:hover:bg-cyan-900/40"
+                                          className="rounded-lg border border-slate-200/90 bg-white/80 dark:border-slate-800 dark:bg-slate-950/45"
                                         >
-                                          <FileText className="h-3 w-3 shrink-0" aria-hidden="true" />
-                                          <span className="max-w-[14rem] truncate">
-                                            {src.documentTitle}
-                                          </span>
-                                          {src.pageNumber !== null && (
-                                            <span className="shrink-0 font-semibold">
-                                              · Page {src.pageNumber}
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setExpandedSourceKey(isExpanded ? null : srcKey)
+                                            }
+                                            aria-expanded={isExpanded}
+                                            className="flex min-h-9 w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/50"
+                                          >
+                                            <span className="flex min-w-0 items-center gap-2 text-slate-800 dark:text-slate-200">
+                                              <FileText className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
+                                              <span className="truncate font-medium">
+                                                {src.documentTitle}
+                                              </span>
                                             </span>
+                                            <span className="flex shrink-0 items-center gap-1.5 font-mono text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
+                                              {src.pageNumber !== null ? `Page ${src.pageNumber}` : 'Excerpt'}
+                                              {isExpanded ? (
+                                                <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                                              ) : (
+                                                <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                                              )}
+                                            </span>
+                                          </button>
+                                          {isExpanded && (
+                                            <div className="border-t border-slate-200/80 px-3 py-2 text-xs leading-relaxed text-slate-700 dark:border-slate-800 dark:text-slate-300">
+                                              {stripUnsupportedDisplaySymbols(src.excerpt)}
+                                            </div>
                                           )}
-                                        </button>
+                                        </div>
                                       );
                                     })}
                                   </div>
-                                  {ragInfo.sources.map((src, sIdx) => {
-                                    const srcKey = `${msg.id}-${src.documentId}-${src.chunkPosition}-${sIdx}`;
-                                    if (expandedSourceKey !== srcKey) return null;
-                                    return (
-                                      <div
-                                        key={`${srcKey}-preview`}
-                                        className="mt-2 rounded-lg border border-slate-200 bg-white/90 px-3 py-2 text-xs leading-relaxed text-slate-700 dark:border-slate-700 dark:bg-slate-950/60 dark:text-slate-300"
-                                      >
-                                        <p className="mb-1 text-[11px] font-semibold text-slate-900 dark:text-white">
-                                          {src.documentTitle}
-                                          {src.pageNumber !== null ? ` · Page ${src.pageNumber}` : ''}
-                                        </p>
-                                        <p className="italic">“{src.excerpt}”</p>
-                                      </div>
-                                    );
-                                  })}
                                 </div>
                               );
                             }
                             if ((ragInfo.ragMeta?.searchedDocumentsCount ?? 0) > 0) {
                               return (
-                                <p className="mt-3 border-t border-slate-200/80 pt-2 text-[11px] text-slate-500 dark:border-slate-800 dark:text-slate-400">
+                                <p className="mt-4 border-t border-slate-200/80 pt-2.5 text-[11px] text-slate-500 dark:border-slate-800 dark:text-slate-400">
                                   General academic knowledge · No matching excerpt found in your uploaded study materials
                                 </p>
                               );
@@ -1268,29 +1270,31 @@ export function AiChatWorkspace({
 
               {sending && streamingContent ? (
                 <div className="flex flex-col items-start">
-                  <div className="w-full max-w-[90%] rounded-2xl border border-blue-200/80 bg-slate-50/90 px-4 py-3.5 text-slate-900 sm:max-w-[85%] dark:border-cyan-900/50 dark:bg-slate-900/60 dark:text-slate-100">
-                    <div className="mb-2 flex items-center justify-between gap-2 text-[11px] font-semibold text-blue-700 select-none dark:text-cyan-400">
+                  <div className="w-full max-w-full rounded-2xl border border-blue-200/80 bg-slate-50/85 px-4 py-4 text-slate-900 sm:max-w-[92%] sm:px-6 sm:py-5 dark:border-cyan-900/50 dark:bg-slate-900/60 dark:text-slate-100">
+                    <div className="mb-2.5 flex items-center justify-between gap-2 text-[11px] font-semibold text-blue-700 select-none dark:text-cyan-400">
                       <span className="inline-flex items-center gap-1.5">
                         <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span>Brainstine AI</span>
+                        <span>Brainstine Document Assistant</span>
                       </span>
                       <span className="inline-flex items-center gap-1 font-mono text-[10px] text-slate-500 tabular-nums dark:text-slate-400">
                         <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
-                        <span>Streaming...</span>
+                        <span>Drafting...</span>
                       </span>
                     </div>
                     <AcademicContentRenderer content={streamingContent} />
                     {streamingRag && streamingRag.sources.length > 0 && (
-                      <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-slate-200/80 pt-2 text-[11px] text-slate-600 dark:border-slate-800 dark:text-slate-300">
-                        <BookOpen className="h-3 w-3 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
-                        <span className="font-semibold">Referencing:</span>
+                      <div className="mt-3.5 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-slate-200/80 pt-2.5 text-[11px] text-slate-600 dark:border-slate-800 dark:text-slate-300">
+                        <span className="inline-flex items-center gap-1.5 font-semibold">
+                          <BookOpen className="h-3 w-3 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
+                          <span>References:</span>
+                        </span>
                         {streamingRag.sources.map((src, sIdx) => (
                           <span
                             key={`stream-src-${sIdx}`}
-                            className="rounded-md border border-blue-200/80 bg-blue-50/70 px-2 py-0.5 text-[11px] text-blue-900 dark:border-cyan-800/70 dark:bg-cyan-950/35 dark:text-cyan-200"
+                            className="font-mono text-[11px] text-slate-600 tabular-nums dark:text-slate-300"
                           >
                             {src.documentTitle}
-                            {src.pageNumber !== null ? ` · Page ${src.pageNumber}` : ''}
+                            {src.pageNumber !== null ? ` (Page ${src.pageNumber})` : ''}
                           </span>
                         ))}
                       </div>

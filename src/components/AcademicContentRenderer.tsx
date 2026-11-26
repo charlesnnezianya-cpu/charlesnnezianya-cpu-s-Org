@@ -1,11 +1,13 @@
-import React, { useState } from 'react';
-import { Check, Copy, Sparkles } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { Check, ChevronDown, ChevronUp, Copy, Sparkles } from 'lucide-react';
+import { stripUnsupportedDisplaySymbols } from '../lib/scientificFormatter';
 import type { EducationalDiagramSpec } from '../types/brainstine';
 import { EducationalDiagramRenderer } from './EducationalDiagramRenderer';
 
 interface AcademicContentRendererProps {
   content: string;
   className?: string;
+  collapsibleSections?: boolean;
 }
 
 const SYMBOL_REPLACEMENTS: Array<[RegExp, string]> = [
@@ -14,17 +16,17 @@ const SYMBOL_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\\div/g, '÷'],
   [/\\pm/g, '±'],
   [/\\mp/g, '∓'],
-  [/\\leq/g, '≤'],
-  [/\\geq/g, '≥'],
-  [/\\neq/g, '≠'],
+  [/\\leq|\\le\b/g, '≤'],
+  [/\\geq|\\ge\b/g, '≥'],
+  [/\\neq|\\ne\b/g, '≠'],
   [/\\approx/g, '≈'],
   [/\\equiv/g, '≡'],
   [/\\propto/g, '∝'],
   [/\\infty/g, '∞'],
-  [/\\rightarrow|\\to/g, '→'],
+  [/\\rightarrow|\\to\b/g, '→'],
   [/\\leftarrow/g, '←'],
   [/\\leftrightarrow/g, '↔'],
-  [/\\rightleftharpoons/g, '⇌'],
+  [/\\rightleftharpoons|\\leftrightharpoons/g, '⇌'],
   [/\\Rightarrow/g, '⇒'],
   [/\\alpha/g, 'α'],
   [/\\beta/g, 'β'],
@@ -50,9 +52,17 @@ const SYMBOL_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\\degree|\^\\circ/g, '°'],
 ];
 
+function sanitizeAcademicDisplayText(raw: string): string {
+  if (!raw || typeof raw !== 'string') return '';
+  // Preserve newlines while stripping PDF Private Use Area / empty-box tofu / zero-width glyphs
+  return raw
+    .split('\n')
+    .map((line) => stripUnsupportedDisplaySymbols(line))
+    .join('\n');
+}
+
 function formatMathExpression(raw: string): string {
   let out = raw.trim();
-  // Clean \frac{a}{b} -> (a) / (b)
   out = out.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, '($1)/($2)');
   out = out.replace(/\\sqrt\{([^{}]+)\}/g, '√($1)');
   for (const [pattern, symbol] of SYMBOL_REPLACEMENTS) {
@@ -65,40 +75,55 @@ function formatMathExpression(raw: string): string {
 
 function renderMathText(expr: string, keyPrefix: string): React.ReactNode {
   const formatted = formatMathExpression(expr);
-  // Render simple superscripts ^{...} / ^x and subscripts _{...} / _x cleanly
   const parts = formatted.split(/(\^\{[^}]+\}|_\{[^}]+\}|\^[0-9a-zA-Z+\-]|_[0-9a-zA-Z+\-])/g);
   return parts.map((part, idx) => {
     const key = `${keyPrefix}-m-${idx}`;
     if (!part) return null;
     if (part.startsWith('^')) {
       const inner = part.startsWith('^{') ? part.slice(2, -1) : part.slice(1);
-      return <sup key={key} className="text-[0.75em] leading-none">{inner}</sup>;
+      return (
+        <sup key={key} className="text-[0.75em] leading-none">
+          {inner}
+        </sup>
+      );
     }
     if (part.startsWith('_')) {
       const inner = part.startsWith('_{') ? part.slice(2, -1) : part.slice(1);
-      return <sub key={key} className="text-[0.75em] leading-none">{inner}</sub>;
+      return (
+        <sub key={key} className="text-[0.75em] leading-none">
+          {inner}
+        </sub>
+      );
     }
     return <React.Fragment key={key}>{part}</React.Fragment>;
   });
 }
 
+const PAGE_CITATION_RE =
+  /^\((?:Source:\s*[^()]{2,90},\s*)?Pages?\s+\d+(?:\s*[-–,]\s*\d+)*\)$/i;
+const DOC_PAGE_CITATION_RE =
+  /^\([^()]{2,90},\s*Pages?\s+\d+(?:\s*[-–,]\s*\d+)*\)$/i;
+
 function renderInlineSegments(text: string, keyPrefix: string): React.ReactNode[] {
   const tokens = text.split(
-    /(`[^`]+`|\*\*[^*\n]+?\*\*|\*[^*\s](?:[^*\n]*?[^*\s])?\*|\\\([^\n]+?\\\)|\$(?!\s)[^$\n]*?(?:[a-zA-Z\\_^=+\-*/(){}])[^$\n]*?\$)/g
+    /(`[^`]+`|\*\*[^*\n]+?\*\*|\*[^*\s](?:[^*\n]*?[^*\s])?\*|\\\([^\n]+?\\\)|\$(?!\s)[^$\n]*?(?:[a-zA-Z\\_^=+\-*/(){}])[^$\n]*?\$|\((?:Source:\s*[^()]{2,90},\s*|[^()]{2,90},\s*)?Pages?\s+\d+(?:\s*[-–,]\s*\d+)*\))/gi
   );
+
   return tokens.map((token, idx) => {
     const key = `${keyPrefix}-${idx}`;
     if (!token) return null;
+
     if (token.startsWith('`') && token.endsWith('`') && token.length >= 2) {
       return (
         <code
           key={key}
-          className="break-words rounded-md border border-slate-200 bg-slate-100 px-1.5 py-0.5 font-mono text-[0.85em] text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-cyan-300"
+          className="break-words rounded border border-slate-200 bg-slate-100/90 px-1.5 py-0.5 font-mono text-[0.84em] text-slate-900 dark:border-slate-700 dark:bg-slate-800/90 dark:text-cyan-300"
         >
           {token.slice(1, -1)}
         </code>
       );
     }
+
     if (token.startsWith('**') && token.endsWith('**') && token.length >= 4) {
       return (
         <strong key={key} className="font-semibold text-slate-950 dark:text-white">
@@ -106,35 +131,80 @@ function renderInlineSegments(text: string, keyPrefix: string): React.ReactNode[
         </strong>
       );
     }
+
     if (token.startsWith('*') && token.endsWith('*') && token.length >= 3) {
+      const inner = token.slice(1, -1).trim();
+      // Keep source citations crisp and upright instead of italic walls
+      if (PAGE_CITATION_RE.test(inner) || DOC_PAGE_CITATION_RE.test(inner)) {
+        return (
+          <span
+            key={key}
+            className="font-mono text-[11px] font-medium text-slate-500 tabular-nums dark:text-slate-400"
+          >
+            {inner}
+          </span>
+        );
+      }
       return (
-        <em key={key} className="italic">
-          {token.slice(1, -1)}
+        <em key={key} className="italic text-slate-800 dark:text-slate-200">
+          {inner}
         </em>
       );
     }
+
     if (token.startsWith('\\(') && token.endsWith('\\)') && token.length >= 5) {
       return (
         <span
           key={key}
-          className="mx-0.5 inline-block max-w-full overflow-x-auto align-bottom rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[0.9em] font-medium text-[#0F1E3D] dark:bg-slate-800/90 dark:text-sky-300"
+          className="font-medium text-[#0F1E3D] dark:text-sky-300"
         >
           {renderMathText(token.slice(2, -2), key)}
         </span>
       );
     }
+
     if (token.startsWith('$') && token.endsWith('$') && token.length >= 3) {
       return (
         <span
           key={key}
-          className="mx-0.5 inline-block max-w-full overflow-x-auto align-bottom rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[0.9em] font-medium text-[#0F1E3D] dark:bg-slate-800/90 dark:text-sky-300"
+          className="font-medium text-[#0F1E3D] dark:text-sky-300"
         >
           {renderMathText(token.slice(1, -1), key)}
         </span>
       );
     }
+
+    if (PAGE_CITATION_RE.test(token) || DOC_PAGE_CITATION_RE.test(token)) {
+      return (
+        <span
+          key={key}
+          className="font-mono text-[11px] font-medium text-slate-500 tabular-nums dark:text-slate-400"
+        >
+          {token}
+        </span>
+      );
+    }
+
     return <React.Fragment key={key}>{token}</React.Fragment>;
   });
+}
+
+/**
+ * Renders structured term—explanation items cleanly without turning every line into a bordered card.
+ */
+function renderTermAwareLine(item: string, keyPrefix: string): React.ReactNode {
+  const defMatch = item.match(/^\*\*([^*\n]{2,64})\*\*\s*(?:—|–|:|-)\s+(.+)$/);
+  if (defMatch) {
+    const [, term, body] = defMatch;
+    return (
+      <>
+        <strong className="font-semibold text-slate-950 dark:text-white">{term}</strong>
+        <span className="text-slate-400 dark:text-slate-500"> — </span>
+        <span>{renderInlineSegments(body, `${keyPrefix}-def`)}</span>
+      </>
+    );
+  }
+  return renderInlineSegments(item, keyPrefix);
 }
 
 function CodeBlock({ code, language }: { code: string; language: string }) {
@@ -193,25 +263,57 @@ function isTableSeparator(line: string): boolean {
   return cells.length > 0 && cells.every((c) => /^:?-{2,}:?$/.test(c));
 }
 
-export const AcademicContentRenderer = React.memo(function AcademicContentRenderer({
-  content,
-  className = '',
-}: AcademicContentRendererProps) {
-  if (!content) return null;
+function renderCalloutBlock(quoteLines: string[], seed: string): React.ReactNode {
+  const cleanedLines = quoteLines.map((l) =>
+    l.replace(/^\[!(KEY|NOTE|TIP|EXAMPLE|CHECK)\]\s*/i, '').trim()
+  );
+  const combinedText = cleanedLines.join('\n').trim();
+  const firstLine = quoteLines[0] || '';
 
-  // Hide any incomplete mid-stream [[DIAGRAM:... marker cleanly while typing
-  let displayContent = content;
-  const openDiagramIdx = displayContent.indexOf('[[DIAGRAM:');
-  let pendingDiagram = false;
-  if (openDiagramIdx !== -1) {
-    const closeIdx = displayContent.indexOf(']]', openDiagramIdx);
-    if (closeIdx === -1) {
-      pendingDiagram = true;
-      displayContent = displayContent.slice(0, openDiagramIdx).trimEnd();
-    }
-  }
+  const isExample =
+    /^(?:\*\*|__)?(worked example|example|analogy|application|real-world example)\b/i.test(
+      cleanedLines[0] || ''
+    ) || /^\[!EXAMPLE\]/i.test(firstLine);
+  const isKnowledgeCheck =
+    /^(?:\*\*|__)?(knowledge check|check your understanding|practice question|quick check)\b/i.test(
+      cleanedLines[0] || ''
+    ) || /^\[!CHECK\]/i.test(firstLine);
+  const isSourceNote =
+    /^(?:\*\*|__)?(source note|document note|general academic knowledge)\b/i.test(
+      cleanedLines[0] || ''
+    );
+  const isKeyTakeaway =
+    /key (concept|takeaway|idea|formula)|important|remember/i.test(cleanedLines[0] || '') ||
+    /^\[!(KEY|NOTE|TIP)\]/i.test(firstLine);
 
-  // Split by fenced code blocks, display math blocks ($$...$$ or \[...\]), and [[DIAGRAM:{...}]]
+  const blockStyle = isExample
+    ? 'border-emerald-200/90 bg-emerald-50/55 text-slate-900 dark:border-emerald-900/60 dark:bg-emerald-950/25 dark:text-slate-100'
+    : isKnowledgeCheck
+      ? 'border-amber-200/90 bg-amber-50/65 text-slate-900 dark:border-amber-900/60 dark:bg-amber-950/25 dark:text-slate-100'
+      : isSourceNote
+        ? 'border-slate-200 bg-slate-100/70 text-slate-700 dark:border-slate-700/80 dark:bg-slate-800/45 dark:text-slate-300'
+        : isKeyTakeaway
+          ? 'border-sky-200/90 bg-sky-50/65 text-slate-900 dark:border-sky-800/60 dark:bg-sky-950/30 dark:text-slate-100'
+          : 'border-blue-200/80 bg-blue-50/55 text-slate-800 dark:border-blue-900/60 dark:bg-blue-950/25 dark:text-slate-200';
+
+  const paragraphs = combinedText
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  return (
+    <div
+      key={`bq-${seed}`}
+      className={`my-3 max-w-[74ch] space-y-1.5 rounded-xl border px-4 py-3 text-[14.5px] leading-[1.68] ${blockStyle}`}
+    >
+      {paragraphs.map((p, idx) => (
+        <p key={`bqp-${seed}-${idx}`}>{renderTermAwareLine(p, `bq-${seed}-${idx}`)}</p>
+      ))}
+    </div>
+  );
+}
+
+function renderSegmentedContent(displayContent: string, pendingDiagram: boolean) {
   const segments = displayContent.split(
     /(```[\s\S]*?```|\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\[\[DIAGRAM:[\s\S]*?\]\])/g
   );
@@ -220,6 +322,7 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
     const lines = blockText.split('\n');
     const elements: React.ReactNode[] = [];
     let listBuffer: { ordered: boolean; items: string[] } | null = null;
+    let quoteBuffer: string[] | null = null;
     let paragraphLines: string[] = [];
 
     const flushParagraph = (keySeed: string) => {
@@ -229,13 +332,19 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
         elements.push(
           <p
             key={`p-${keySeed}`}
-            className="text-sm leading-relaxed text-slate-800 dark:text-slate-200"
+            className="max-w-[74ch] text-[14.5px] leading-[1.7] text-slate-800 sm:text-[15px] dark:text-slate-200"
           >
-            {renderInlineSegments(joined, `p-${keySeed}`)}
+            {renderTermAwareLine(joined, `p-${keySeed}`)}
           </p>
         );
       }
       paragraphLines = [];
+    };
+
+    const flushQuote = (keySeed: string) => {
+      if (!quoteBuffer || quoteBuffer.length === 0) return;
+      elements.push(renderCalloutBlock(quoteBuffer, keySeed));
+      quoteBuffer = null;
     };
 
     const flushList = (keySeed: string) => {
@@ -244,11 +353,11 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
         elements.push(
           <ol
             key={`ol-${keySeed}`}
-            className="my-2 list-decimal space-y-1.5 pl-5 text-sm leading-relaxed text-slate-800 dark:text-slate-200"
+            className="my-2.5 max-w-[74ch] list-decimal space-y-2 pl-5 text-[14.5px] leading-[1.68] text-slate-800 sm:text-[15px] dark:text-slate-200"
           >
             {listBuffer.items.map((item, idx) => (
-              <li key={`oli-${keySeed}-${idx}`}>
-                {renderInlineSegments(item, `oli-${keySeed}-${idx}`)}
+              <li key={`oli-${keySeed}-${idx}`} className="pl-1">
+                {renderTermAwareLine(item, `oli-${keySeed}-${idx}`)}
               </li>
             ))}
           </ol>
@@ -257,11 +366,11 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
         elements.push(
           <ul
             key={`ul-${keySeed}`}
-            className="my-2 list-disc space-y-1.5 pl-5 text-sm leading-relaxed text-slate-800 dark:text-slate-200"
+            className="my-2.5 max-w-[74ch] list-disc space-y-2 pl-5 text-[14.5px] leading-[1.68] text-slate-800 sm:text-[15px] dark:text-slate-200"
           >
             {listBuffer.items.map((item, idx) => (
-              <li key={`uli-${keySeed}-${idx}`}>
-                {renderInlineSegments(item, `uli-${keySeed}-${idx}`)}
+              <li key={`uli-${keySeed}-${idx}`} className="pl-1">
+                {renderTermAwareLine(item, `uli-${keySeed}-${idx}`)}
               </li>
             ))}
           </ul>
@@ -278,6 +387,7 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
       if (!trimmed) {
         flushParagraph(seed);
         flushList(seed);
+        flushQuote(seed);
         continue;
       }
 
@@ -289,21 +399,22 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
       ) {
         flushParagraph(seed);
         flushList(seed);
+        flushQuote(seed);
         const headers = parseTableRow(trimmed);
-        lineIdx += 2; // skip separator
+        lineIdx += 2;
         const rows: string[][] = [];
         while (lineIdx < lines.length && lines[lineIdx].trim().includes('|')) {
           rows.push(parseTableRow(lines[lineIdx]));
           lineIdx++;
         }
-        lineIdx--; // adjust for outer loop increment
+        lineIdx--;
 
         elements.push(
           <div
             key={`tbl-${seed}`}
-            className="my-3 max-w-full overflow-x-auto rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900/50"
+            className="my-3.5 max-w-full overflow-x-auto rounded-xl border border-slate-200 bg-white dark:border-slate-700/90 dark:bg-slate-900/50"
           >
-            <table className="w-full min-w-[420px] border-collapse text-left text-xs sm:text-sm">
+            <table className="w-full min-w-[420px] border-collapse text-left text-xs tabular-nums sm:text-sm">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-100/80 dark:border-slate-700 dark:bg-slate-800/80">
                   {headers.map((h, hIdx) => (
@@ -325,7 +436,7 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
                     {headers.map((_, cIdx) => (
                       <td
                         key={cIdx}
-                        className="px-3.5 py-2.5 text-slate-700 dark:text-slate-300"
+                        className="px-3.5 py-2.5 align-top leading-relaxed text-slate-700 dark:text-slate-300"
                       >
                         {renderInlineSegments(row[cIdx] ?? '', `td-${seed}-${rIdx}-${cIdx}`)}
                       </td>
@@ -342,8 +453,9 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
       if (/^---+$/.test(trimmed)) {
         flushParagraph(seed);
         flushList(seed);
+        flushQuote(seed);
         elements.push(
-          <hr key={`hr-${seed}`} className="my-3 border-slate-200 dark:border-slate-800" />
+          <hr key={`hr-${seed}`} className="my-4 border-slate-200 dark:border-slate-800" />
         );
         continue;
       }
@@ -352,18 +464,22 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
       if (headingMatch) {
         flushParagraph(seed);
         flushList(seed);
+        flushQuote(seed);
         const level = headingMatch[1].length;
         const text = headingMatch[2];
         const headingClass =
           level === 1
-            ? 'mt-3 mb-1.5 font-display text-lg font-bold text-slate-950 dark:text-white'
+            ? 'mt-4 mb-2 font-display text-lg font-bold tracking-tight text-slate-950 dark:text-white'
             : level === 2
-              ? 'mt-3 mb-1.5 font-display text-base font-bold text-slate-900 dark:text-white'
-              : 'mt-2.5 mb-1 font-display text-sm font-semibold text-slate-900 dark:text-slate-100';
+              ? 'mt-4 mb-1.5 font-display text-base font-bold tracking-tight text-slate-900 sm:text-[17px] dark:text-white'
+              : level === 3
+                ? 'mt-3.5 mb-1 font-display text-[15px] font-semibold tracking-tight text-slate-900 dark:text-slate-100'
+                : 'mt-3 mb-1 font-display text-sm font-semibold text-slate-800 dark:text-slate-200';
+        const Tag = level === 1 ? 'h2' : level === 2 ? 'h3' : 'h4';
         elements.push(
-          <h4 key={`h-${seed}`} className={headingClass}>
+          <Tag key={`h-${seed}`} className={headingClass}>
             {renderInlineSegments(text, `h-${seed}`)}
-          </h4>
+          </Tag>
         );
         continue;
       }
@@ -371,41 +487,12 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
       if (trimmed.startsWith('> ')) {
         flushParagraph(seed);
         flushList(seed);
-        const rawQuote = trimmed.slice(2).replace(/^\[!(KEY|NOTE|TIP|EXAMPLE|CHECK)\]\s*/i, '');
-        const isExample =
-          /^(?:\*\*|__)?(worked example|example|analogy|application|real-world example)\b/i.test(
-            rawQuote
-          ) || /^\[!EXAMPLE\]/i.test(trimmed.slice(2));
-        const isKnowledgeCheck =
-          /^(?:\*\*|__)?(knowledge check|check your understanding|practice question|quick check)\b/i.test(
-            rawQuote
-          ) || /^\[!CHECK\]/i.test(trimmed.slice(2));
-        const isSourceNote =
-          /^(?:\*\*|__)?source note\b/i.test(rawQuote);
-        const isKeyTakeaway =
-          /key (concept|takeaway|idea|formula)|important|remember/i.test(rawQuote) ||
-          /^\[!(KEY|NOTE|TIP)\]/i.test(trimmed.slice(2));
-
-        const blockStyle = isExample
-          ? 'border-emerald-200 bg-emerald-50/65 text-slate-900 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-slate-100'
-          : isKnowledgeCheck
-            ? 'border-amber-200 bg-amber-50/75 text-slate-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-slate-100'
-            : isSourceNote
-              ? 'border-slate-200 bg-slate-100/70 text-slate-700 dark:border-slate-700 dark:bg-slate-800/50 dark:text-slate-300'
-              : isKeyTakeaway
-                ? 'border-sky-200 bg-sky-50/80 text-slate-900 dark:border-sky-800/70 dark:bg-sky-950/35 dark:text-slate-100'
-                : 'border-blue-200/80 bg-blue-50/70 text-slate-800 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-slate-200';
-
-        elements.push(
-          <blockquote
-            key={`bq-${seed}`}
-            className={`my-2.5 rounded-xl border px-3.5 py-2.5 text-sm leading-relaxed ${blockStyle}`}
-          >
-            {renderInlineSegments(rawQuote, `bq-${seed}`)}
-          </blockquote>
-        );
+        if (!quoteBuffer) quoteBuffer = [];
+        quoteBuffer.push(trimmed.slice(2));
         continue;
       }
+
+      flushQuote(seed);
 
       const unorderedMatch = trimmed.match(/^[-*•]\s+(.+)$/);
       if (unorderedMatch) {
@@ -439,11 +526,12 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
 
     flushParagraph(`${segIdx}-end`);
     flushList(`${segIdx}-end`);
+    flushQuote(`${segIdx}-end`);
     return elements;
   };
 
   return (
-    <div className={`min-w-0 max-w-full space-y-2.5 break-words academic-selectable ${className}`}>
+    <>
       {segments.map((seg, idx) => {
         if (!seg) return null;
 
@@ -463,7 +551,7 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
           return (
             <div
               key={`math-${idx}`}
-              className="my-2.5 overflow-x-auto rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-center font-mono text-sm font-medium text-[#0F1E3D] dark:border-slate-700 dark:bg-slate-900/80 dark:text-sky-300"
+              className="my-3 max-w-[74ch] overflow-x-auto rounded-xl border border-slate-200/90 bg-slate-50/75 px-4 py-3 text-center font-mono text-sm font-medium text-[#0F1E3D] dark:border-slate-700 dark:bg-slate-900/75 dark:text-sky-300"
             >
               {renderMathText(expr, `math-${idx}`)}
             </div>
@@ -496,6 +584,166 @@ export const AcademicContentRenderer = React.memo(function AcademicContentRender
           <span>Rendering educational diagram…</span>
         </div>
       )}
+    </>
+  );
+}
+
+interface TopSectionChunk {
+  heading: string | null;
+  body: string;
+}
+
+function splitLengthySections(markdown: string): TopSectionChunk[] {
+  const lines = markdown.split('\n');
+  let insideFence = false;
+  const headingIndices: number[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith('```')) {
+      insideFence = !insideFence;
+      continue;
+    }
+    if (!insideFence && /^#{2,3}\s+\S/.test(trimmed)) {
+      headingIndices.push(i);
+    }
+  }
+
+  if (headingIndices.length < 3) return [{ heading: null, body: markdown }];
+
+  const chunks: TopSectionChunk[] = [];
+  const intro = lines.slice(0, headingIndices[0]).join('\n').trim();
+  if (intro) {
+    chunks.push({ heading: null, body: intro });
+  }
+
+  for (let s = 0; s < headingIndices.length; s++) {
+    const start = headingIndices[s];
+    const end = s + 1 < headingIndices.length ? headingIndices[s + 1] : lines.length;
+    const headingLine = lines[start].trim().replace(/^#{2,3}\s+/, '').trim();
+    const body = lines.slice(start + 1, end).join('\n').trim();
+    if (headingLine || body) {
+      chunks.push({ heading: headingLine, body });
+    }
+  }
+
+  return chunks;
+}
+
+export const AcademicContentRenderer = React.memo(function AcademicContentRenderer({
+  content,
+  className = '',
+  collapsibleSections = false,
+}: AcademicContentRendererProps) {
+  const [collapsedMap, setCollapsedMap] = useState<Record<number, boolean>>({});
+
+  const { displayContent, pendingDiagram, sectionChunks } = useMemo(() => {
+    if (!content) {
+      return { displayContent: '', pendingDiagram: false, sectionChunks: null as TopSectionChunk[] | null };
+    }
+
+    let cleaned = sanitizeAcademicDisplayText(content);
+    const openDiagramIdx = cleaned.indexOf('[[DIAGRAM:');
+    let isPending = false;
+    if (openDiagramIdx !== -1) {
+      const closeIdx = cleaned.indexOf(']]', openDiagramIdx);
+      if (closeIdx === -1) {
+        isPending = true;
+        cleaned = cleaned.slice(0, openDiagramIdx).trimEnd();
+      }
+    }
+
+    let chunks: TopSectionChunk[] | null = null;
+    if (collapsibleSections && !isPending && cleaned.length >= 1200) {
+      const candidate = splitLengthySections(cleaned);
+      const headedCount = candidate.filter((c) => c.heading !== null).length;
+      if (headedCount >= 3) {
+        chunks = candidate;
+      }
+    }
+
+    return { displayContent: cleaned, pendingDiagram: isPending, sectionChunks: chunks };
+  }, [content, collapsibleSections]);
+
+  if (!content || !displayContent) return null;
+
+  if (sectionChunks) {
+    const headedIndices = sectionChunks
+      .map((s, idx) => (s.heading ? idx : -1))
+      .filter((idx) => idx !== -1);
+    const anyCollapsed = headedIndices.some((idx) => collapsedMap[idx]);
+
+    const toggleAll = () => {
+      const nextVal = !anyCollapsed;
+      const next: Record<number, boolean> = {};
+      for (const idx of headedIndices) {
+        next[idx] = nextVal;
+      }
+      setCollapsedMap(next);
+    };
+
+    return (
+      <div className={`min-w-0 max-w-full space-y-3 break-words academic-selectable ${className}`}>
+        {sectionChunks.map((sec, idx) => {
+          if (!sec.heading) {
+            return (
+              <div key={`intro-${idx}`} className="space-y-2.5">
+                {renderSegmentedContent(sec.body, false)}
+              </div>
+            );
+          }
+
+          const isCollapsed = Boolean(collapsedMap[idx]);
+          return (
+            <div
+              key={`sec-${idx}`}
+              className="border-t border-slate-200/80 pt-3 first:border-t-0 first:pt-0 dark:border-slate-800/80"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setCollapsedMap((prev) => ({ ...prev, [idx]: !prev[idx] }))
+                  }
+                  aria-expanded={!isCollapsed}
+                  className="flex min-h-9 flex-1 items-center justify-between gap-2 text-left transition-colors hover:text-blue-700 select-none dark:hover:text-cyan-400"
+                >
+                  <span className="font-display text-[15px] font-semibold tracking-tight text-slate-900 dark:text-white">
+                    {renderInlineSegments(sec.heading, `sech-${idx}`)}
+                  </span>
+                  <span className="shrink-0 text-slate-400 dark:text-slate-500">
+                    {isCollapsed ? (
+                      <ChevronDown className="h-4 w-4" aria-hidden="true" />
+                    ) : (
+                      <ChevronUp className="h-4 w-4" aria-hidden="true" />
+                    )}
+                  </span>
+                </button>
+                {idx === headedIndices[0] && (
+                  <button
+                    type="button"
+                    onClick={toggleAll}
+                    className="shrink-0 rounded-md px-2 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 select-none dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-white"
+                  >
+                    {anyCollapsed ? 'Expand all' : 'Collapse all'}
+                  </button>
+                )}
+              </div>
+              {!isCollapsed && (
+                <div className="mt-2 space-y-2.5">
+                  {renderSegmentedContent(sec.body, idx === sectionChunks.length - 1 && pendingDiagram)}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  return (
+    <div className={`min-w-0 max-w-full space-y-2.5 break-words academic-selectable ${className}`}>
+      {renderSegmentedContent(displayContent, pendingDiagram)}
     </div>
   );
 });

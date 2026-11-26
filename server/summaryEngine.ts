@@ -2,7 +2,6 @@ import {
   analyzeDocumentIntelligence,
   attachPageCitation,
   buildSectionClusterHeading,
-  buildStudentFriendlyClarification,
   contentTokens,
   isRedundantAgainstPool,
   normalizedFingerprint,
@@ -12,8 +11,10 @@ import {
   type AnalyzedUnit,
   type DocumentIntelligenceProfile,
 } from './documentEngine.ts';
-import { formatScientificText } from '../src/lib/scientificFormatter.ts';
+import { formatScientificText, stripUnsupportedDisplaySymbols } from '../src/lib/scientificFormatter.ts';
 import type {
+  ClassificationGroup,
+  ClassificationTypeEntry,
   ComparisonTable,
   DefinitionTerm,
   DifficultConceptExplanation,
@@ -22,9 +23,35 @@ import type {
   MainConceptSection,
   ProcessMechanismGroup,
   RelevantExample,
+  StructuredCharacteristicItem,
   StructuredSummary,
   SummaryLevel,
+  SummaryValidationReport,
 } from '../src/types/brainstine.ts';
+
+const MISSING_TYPE_EXPLANATION =
+  'Named in the source document without a separate detailed explanation.';
+
+function sanitizePageCitations(
+  text: string,
+  maxValidPage: number,
+  hasPageMarkers: boolean
+): string {
+  const cleanedSymbols = stripUnsupportedDisplaySymbols(text);
+  if (!cleanedSymbols) return '';
+
+  return cleanedSymbols
+    .replace(/\s*\(Page\s+(\d+)\)/gi, (full, pageStr: string) => {
+      const p = parseInt(pageStr, 10);
+      if (!hasPageMarkers || !Number.isFinite(p) || p < 1 || p > maxValidPage) {
+        return '';
+      }
+      return ` (Page ${p})`;
+    })
+    .replace(/\s+([.!?])/g, '$1')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
 
 export function buildDocumentSummaryMarkdown(
   summary: Omit<StructuredSummary, 'markdown'>
@@ -47,8 +74,12 @@ export function buildDocumentSummaryMarkdown(
     lines.push('');
   }
 
-  lines.push('## Topic Overview', summary.topicOverview, '');
+  // A. Topic Overview
+  if (summary.topicOverview) {
+    lines.push('## Topic Overview', summary.topicOverview, '');
+  }
 
+  // B. Main Concepts
   if (summary.mainConcepts.length > 0) {
     lines.push('## Main Concepts');
     for (const item of summary.mainConcepts) {
@@ -56,19 +87,74 @@ export function buildDocumentSummaryMarkdown(
       for (const pt of item.sourcePoints) {
         lines.push(`- ${pt}`);
       }
-      if (item.aiClarification) {
-        lines.push(`  *Study Note:* ${item.aiClarification}`);
+      if (item.subsections && item.subsections.length > 0) {
+        for (const sub of item.subsections) {
+          lines.push(`#### ${sub.heading}`);
+          for (const subPt of sub.points) {
+            lines.push(`- ${subPt}`);
+          }
+        }
+      }
+      if (item.examples && item.examples.length > 0) {
+        lines.push('**Examples:**');
+        for (const ex of item.examples) {
+          lines.push(`- ${ex}`);
+        }
       }
       lines.push('');
     }
   }
 
+  // C. Definitions
   if (summary.importantDefinitions.length > 0) {
-    lines.push('## Important Definitions');
+    lines.push('## Definitions');
     for (const def of summary.importantDefinitions) {
       lines.push(`- **${def.term}** — ${def.definition}`);
     }
     lines.push('');
+  }
+
+  // D. Classifications and Types
+  if (summary.classificationsAndTypes && summary.classificationsAndTypes.length > 0) {
+    lines.push('## Classifications and Types');
+    for (const cls of summary.classificationsAndTypes) {
+      lines.push(`### ${cls.topic}`);
+      lines.push(cls.overviewStatement);
+      cls.types.forEach((t, idx) => {
+        lines.push(`${idx + 1}. **${t.name}:** ${t.explanation}`);
+        if (t.characteristics && t.characteristics.length > 0) {
+          for (const ch of t.characteristics) {
+            lines.push(`   - Characteristic: ${ch}`);
+          }
+        }
+        if (t.examples && t.examples.length > 0) {
+          for (const ex of t.examples) {
+            lines.push(`   - Example: ${ex}`);
+          }
+        }
+      });
+      if (cls.comparisonNote) {
+        lines.push(`- **Comparison:** ${cls.comparisonNote}`);
+      }
+      lines.push('');
+    }
+  }
+
+  // E. Characteristics, Processes, and Formulas
+  if (
+    summary.characteristicsAndExplanations &&
+    summary.characteristicsAndExplanations.length > 0
+  ) {
+    lines.push('## Characteristics and Explanations');
+    for (const grp of summary.characteristicsAndExplanations) {
+      if (summary.characteristicsAndExplanations.length > 1) {
+        lines.push(`### ${grp.topic}`);
+      }
+      for (const pt of grp.points) {
+        lines.push(`- ${pt}`);
+      }
+      lines.push('');
+    }
   }
 
   if (summary.processesAndMechanisms && summary.processesAndMechanisms.length > 0) {
@@ -83,7 +169,7 @@ export function buildDocumentSummaryMarkdown(
   }
 
   if (summary.formulasOrFrameworks.length > 0) {
-    lines.push('## Important Formulas & Equations');
+    lines.push('## Formulas & Equations');
     for (const f of summary.formulasOrFrameworks) {
       lines.push(`- **${f.name}:** ${f.expressionOrStructure} — ${f.usage}`);
       if (f.variables && f.variables.length > 0) {
@@ -96,31 +182,25 @@ export function buildDocumentSummaryMarkdown(
   }
 
   if (summary.importantFacts.length > 0) {
-    lines.push('## Key Facts');
+    lines.push('## Additional Key Details');
     for (const fact of summary.importantFacts) {
       lines.push(`- ${fact}`);
     }
     lines.push('');
   }
 
+  // F. Examples
   if (summary.relevantExamples.length > 0) {
-    lines.push('## Examples & Applications');
+    lines.push('## Examples');
     for (const ex of summary.relevantExamples) {
       lines.push(`- **${ex.title}:** ${ex.example}`);
     }
     lines.push('');
   }
 
-  if (summary.importantDistinctions && summary.importantDistinctions.length > 0) {
-    lines.push('## Important Distinctions');
-    for (const dist of summary.importantDistinctions) {
-      lines.push(`- **${dist.pairTitle}:** ${dist.comparison}`);
-    }
-    lines.push('');
-  }
-
+  // G. Comparisons
   if (summary.comparisonTables && summary.comparisonTables.length > 0) {
-    lines.push('## Comparison Tables');
+    lines.push('## Comparisons');
     for (const table of summary.comparisonTables) {
       lines.push(`### ${table.title}`);
       lines.push(`| Criterion | ${table.headers.join(' | ')} |`);
@@ -130,6 +210,18 @@ export function buildDocumentSummaryMarkdown(
       }
       lines.push('');
     }
+  }
+
+  if (summary.importantDistinctions && summary.importantDistinctions.length > 0) {
+    if (!summary.comparisonTables || summary.comparisonTables.length === 0) {
+      lines.push('## Comparisons');
+    } else {
+      lines.push('### Key Distinctions');
+    }
+    for (const dist of summary.importantDistinctions) {
+      lines.push(`- **${dist.pairTitle}:** ${dist.comparison}`);
+    }
+    lines.push('');
   }
 
   if (summary.difficultConceptExplanations.length > 0) {
@@ -150,23 +242,16 @@ export function buildDocumentSummaryMarkdown(
   }
 
   if (summary.revisionNotes.length > 0) {
-    lines.push('## Revision Notes');
+    lines.push('## Cause & Formula Checks');
     for (const note of summary.revisionNotes) {
       lines.push(`- ${note}`);
     }
     lines.push('');
   }
 
-  if (summary.finalRecap && summary.finalRecap.length > 0) {
-    lines.push('## Final Recap');
-    for (const r of summary.finalRecap) {
-      lines.push(`- ${r}`);
-    }
-    lines.push('');
-  }
-
+  // H. Key Takeaways
   if (summary.keyTakeaways.length > 0) {
-    lines.push('## Key Takeaways & Exam Focus');
+    lines.push('## Key Takeaways');
     for (const kt of summary.keyTakeaways) {
       lines.push(`- ${kt}`);
     }
@@ -176,41 +261,15 @@ export function buildDocumentSummaryMarkdown(
   return lines.join('\n').trim();
 }
 
-function buildSectionClarificationNote(
-  heading: string,
-  topGroup: AnalyzedUnit[],
-  profile: DocumentIntelligenceProfile,
-  includeClarifications: boolean
-): string {
-  if (!includeClarifications) return '';
-  const notes: string[] = [];
-
-  const rel = profile.sectionRelationships.find(
-    (r) => r.fromSection === heading || r.toSection === heading
-  );
-  if (rel) {
-    notes.push(rel.connectionNote);
-  }
-
-  for (const unit of topGroup.slice(0, 2)) {
-    const plain = buildStudentFriendlyClarification(unit.formattedText, profile.definitions);
-    if (plain && !notes.includes(plain)) {
-      notes.push(plain);
-      break;
-    }
-  }
-
-  return notes.join(' ');
-}
-
 function buildDeterministicComparisonTables(
   profile: DocumentIntelligenceProfile,
+  classificationsAndTypes: ClassificationGroup[],
   maxTables: number
 ): ComparisonTable[] {
   if (maxTables <= 0) return [];
   const tables: ComparisonTable[] = [];
 
-  // 1. Pairwise distinctions table from structured contrast statements
+  // 1. Pairwise distinctions table from grounded contrast statements
   const paired = profile.distinctions.filter((d) => d.subjectA && d.subjectB);
   if (paired.length > 0) {
     const primary = paired[0];
@@ -222,7 +281,7 @@ function buildDeterministicComparisonTables(
       )
       .slice(0, 5)
       .map((d, idx) => {
-        const comp = d.rawComparison;
+        const comp = d.comparison;
         const whereasSplit = comp.split(/\bwhereas\b|\bin contrast,\b|\bunlike\b/i);
         const valA =
           whereasSplit.length >= 2
@@ -231,9 +290,9 @@ function buildDeterministicComparisonTables(
         const valB =
           whereasSplit.length >= 2
             ? whereasSplit.slice(1).join('; ').trim()
-            : 'Contrasting behavior described in source';
+            : 'Contrasting focus described in source';
         return {
-          criterion: d.sectionHeading || `Distinction ${idx + 1}`,
+          criterion: d.sectionHeading || `Contrast ${idx + 1}`,
           values: [valA, valB],
         };
       });
@@ -247,22 +306,109 @@ function buildDeterministicComparisonTables(
     }
   }
 
-  // 2. Category / classification overview table when multiple classifications exist
-  if (tables.length < maxTables && profile.classifications.length >= 2) {
-    tables.push({
-      title: 'Document Classifications & Groupings',
-      headers: ['Included Members / Types', 'Source Context'],
-      rows: profile.classifications.slice(0, 5).map((cls) => ({
-        criterion: cls.category,
-        values: [
-          cls.members.join(', '),
-          attachPageCitation(cls.statement, cls.pageNumber),
-        ],
-      })),
-    });
+  // 2. Side-by-side comparison across types within a classification when grounded details exist
+  for (const cls of classificationsAndTypes) {
+    if (tables.length >= maxTables) break;
+    if (cls.types.length < 2 || cls.types.length > 4) continue;
+
+    // Avoid duplicating a pairwise table covering the exact same pair
+    const typeNamesLower = cls.types.map((t) => t.name.toLowerCase());
+    const alreadyCovered = tables.some((t) =>
+      t.headers.every((h) =>
+        typeNamesLower.some((n) => n.includes(h.toLowerCase()) || h.toLowerCase().includes(n))
+      )
+    );
+    if (alreadyCovered) continue;
+
+    const rows: ComparisonTable['rows'] = [];
+    const explainedCount = cls.types.filter(
+      (t) => t.explanation && t.explanation !== MISSING_TYPE_EXPLANATION
+    ).length;
+
+    if (explainedCount >= 2) {
+      rows.push({
+        criterion: 'Core Description',
+        values: cls.types.map((t) =>
+          t.explanation === MISSING_TYPE_EXPLANATION ? 'Not separately detailed in source' : t.explanation
+        ),
+      });
+    }
+
+    const withChars = cls.types.filter((t) => t.characteristics && t.characteristics.length > 0).length;
+    if (withChars >= 2) {
+      rows.push({
+        criterion: 'Characteristics',
+        values: cls.types.map((t) =>
+          t.characteristics && t.characteristics.length > 0
+            ? t.characteristics.slice(0, 2).join('; ')
+            : '—'
+        ),
+      });
+    }
+
+    const withExamples = cls.types.filter((t) => t.examples && t.examples.length > 0).length;
+    if (withExamples >= 2) {
+      rows.push({
+        criterion: 'Examples',
+        values: cls.types.map((t) =>
+          t.examples && t.examples.length > 0 ? t.examples[0] : '—'
+        ),
+      });
+    }
+
+    if (rows.length > 0) {
+      tables.push({
+        title: `Comparison of ${cls.topic}`,
+        headers: cls.types.map((t) => t.name),
+        rows,
+      });
+    }
   }
 
   return tables.slice(0, maxTables);
+}
+
+function buildSectionPointsAndSubsections(
+  selectedUnits: AnalyzedUnit[],
+  attachCitations: boolean
+): {
+  sourcePoints: string[];
+  subsections: Array<{ heading: string; points: string[] }>;
+} {
+  const ordered = [...selectedUnits].sort((a, b) => a.orderIndex - b.orderIndex);
+  const hasSubheadings = ordered.some((u) => Boolean(u.subheading));
+
+  if (!hasSubheadings) {
+    return {
+      sourcePoints: ordered.map((u) => {
+        const clean = stripBoilerplatePrefix(u.formattedText);
+        return attachCitations ? attachPageCitation(clean, u.pageNumber) : clean;
+      }),
+      subsections: [],
+    };
+  }
+
+  const topPoints: string[] = [];
+  const subMap = new Map<string, string[]>();
+  for (const u of ordered) {
+    const clean = stripBoilerplatePrefix(u.formattedText);
+    const formatted = attachCitations ? attachPageCitation(clean, u.pageNumber) : clean;
+    if (u.subheading) {
+      const arr = subMap.get(u.subheading) || [];
+      arr.push(formatted);
+      subMap.set(u.subheading, arr);
+    } else {
+      topPoints.push(formatted);
+    }
+  }
+
+  return {
+    sourcePoints: topPoints,
+    subsections: Array.from(subMap.entries()).map(([heading, points]) => ({
+      heading,
+      points,
+    })),
+  };
 }
 
 /**
@@ -279,7 +425,7 @@ export function generateExtractiveSummary(
   const alphaWordCount = (normalized.match(/[a-zA-Z]{2,}/g) || []).length;
 
   if (!normalized || normalized.length < 20 || alphaWordCount < 3) {
-    const safeTitle = title || 'Document Summary';
+    const safeTitle = stripUnsupportedDisplaySymbols(title) || 'Document Summary';
     return {
       title: safeTitle,
       subjectArea: subjectArea || 'General Studies',
@@ -290,6 +436,8 @@ export function generateExtractiveSummary(
         'Upload a readable document or paste at least a few complete sentences to generate a structured summary.',
       mainConcepts: [],
       importantDefinitions: [],
+      classificationsAndTypes: [],
+      characteristicsAndExplanations: [],
       keyTerminology: [],
       difficultConceptExplanations: [],
       importantFacts: [],
@@ -310,7 +458,7 @@ export function generateExtractiveSummary(
     };
   }
 
-  const resolvedTitle = (title || 'Document Summary').trim();
+  const resolvedTitle = stripUnsupportedDisplaySymbols((title || 'Document Summary').trim());
   const profile = analyzeDocumentIntelligence(normalized, {
     title: resolvedTitle,
     subjectArea,
@@ -318,450 +466,802 @@ export function generateExtractiveSummary(
 
   const dedupedUnits = profile.units;
   const wordCount = profile.quality.wordCount;
+  const hasPageMarkers = dedupedUnits.some((u) => u.pageNumber !== null);
+  const maxUnitPage = dedupedUnits.reduce((m, u) => Math.max(m, u.pageNumber ?? 0), 0);
+  const maxValidPage = Math.max(profile.quality.pageCount, maxUnitPage, 1);
 
-  // Honest quality notice when source is short or noisy
-  let sourceNotice: string | undefined;
-  if (profile.quality.isBrief) {
-    sourceNotice =
-      'This source material is brief, so only directly supported summary sections are shown.';
-  } else if (profile.quality.lowClarity) {
-    sourceNotice =
-      'Parts of the source text contain irregular formatting or fragments; only clearly readable statements were included.';
-  }
+  const sanitizeOut = (text: string) =>
+    formatScientificText(sanitizePageCitations(text, maxValidPage, hasPageMarkers));
 
   const limits =
     summaryLevel === 'short'
       ? {
-          overview: 1,
-          concepts: 4,
+          overview: 2,
+          concepts: 5,
           pointsPerConcept: 2,
           defs: 4,
+          clsGroups: 3,
+          charsPerType: 1,
+          exPerType: 1,
+          charTopics: 2,
+          charPoints: 2,
           procGroups: 2,
           procSteps: 4,
           formulas: 3,
-          facts: 4,
+          facts: 3,
           examples: 2,
           distinctions: 2,
           terms: 8,
           difficult: 0,
           tables: 0,
           revision: 0,
-          recap: 3,
-          takeaways: 3,
-          includeClarifications: false,
+          takeaways: 4,
         }
       : summaryLevel === 'comprehensive'
         ? {
             overview: 3,
-            concepts: 16,
-            pointsPerConcept: 5,
-            defs: 12,
-            procGroups: 5,
+            concepts: 20,
+            pointsPerConcept: 6,
+            defs: 14,
+            clsGroups: 8,
+            charsPerType: 5,
+            exPerType: 3,
+            charTopics: 8,
+            charPoints: 5,
+            procGroups: 6,
             procSteps: 8,
             formulas: 10,
-            facts: 10,
-            examples: 6,
+            facts: 8,
+            examples: 8,
             distinctions: 8,
             terms: 20,
-            difficult: 6,
-            tables: 2,
-            revision: 7,
-            recap: 6,
+            difficult: 4,
+            tables: 3,
+            revision: 6,
             takeaways: 7,
-            includeClarifications: true,
           }
         : {
             overview: 2,
-            concepts: 8,
-            pointsPerConcept: 3,
+            concepts: 10,
+            pointsPerConcept: 4,
             defs: 8,
+            clsGroups: 5,
+            charsPerType: 3,
+            exPerType: 2,
+            charTopics: 5,
+            charPoints: 4,
             procGroups: 4,
             procSteps: 6,
             formulas: 6,
-            facts: 6,
-            examples: 4,
+            facts: 5,
+            examples: 5,
             distinctions: 5,
             terms: 14,
-            difficult: 4,
-            tables: 1,
-            revision: 5,
-            recap: 4,
+            difficult: 3,
+            tables: 2,
+            revision: 0,
             takeaways: 5,
-            includeClarifications: true,
           };
 
   const usedPool: Array<{ fp: string; tokens: Set<string> }> = [];
   const markUsed = (text: string, tokens?: Set<string>) => {
-    const t = tokens ?? contentTokens(text);
-    usedPool.push({ fp: normalizedFingerprint(text), tokens: t });
+    const clean = stripUnsupportedDisplaySymbols(text);
+    const t = tokens ?? contentTokens(clean);
+    usedPool.push({ fp: normalizedFingerprint(clean), tokens: t });
   };
 
-  // 1. Topic Overview: synthesize central message & TextRank lead statements
+  // --------------------------------------------------------------------------
+  // D (Pre-reserved first so definitions/main concepts don't duplicate types)
+  // Classifications & Types
+  // --------------------------------------------------------------------------
+  const classificationsAndTypes: ClassificationGroup[] = [];
+  const missingExplanationTypes: string[] = [];
+
+  for (const cls of profile.classifications.slice(0, limits.clsGroups)) {
+    const entries: ClassificationTypeEntry[] = cls.types.map((t) => {
+      const rawExpl = t.explanation || MISSING_TYPE_EXPLANATION;
+      if (rawExpl === MISSING_TYPE_EXPLANATION) {
+        missingExplanationTypes.push(t.name);
+      } else {
+        markUsed(rawExpl);
+      }
+
+      const trimmedChars = t.characteristics
+        .slice(0, limits.charsPerType)
+        .map((c) => sanitizeOut(c));
+      trimmedChars.forEach((c) => markUsed(c));
+
+      const trimmedExamples = t.examples
+        .slice(0, limits.exPerType)
+        .map((ex) => sanitizeOut(ex));
+      trimmedExamples.forEach((ex) => markUsed(ex));
+
+      return {
+        name: sanitizeOut(t.name),
+        explanation:
+          rawExpl === MISSING_TYPE_EXPLANATION ? rawExpl : sanitizeOut(rawExpl),
+        ...(trimmedChars.length > 0 ? { characteristics: trimmedChars } : {}),
+        ...(trimmedExamples.length > 0 ? { examples: trimmedExamples } : {}),
+        ...(t.pageNumber ? { pageNumber: t.pageNumber } : {}),
+      };
+    });
+
+    markUsed(cls.statement);
+    if (cls.comparisonNote) {
+      markUsed(cls.comparisonNote);
+    }
+
+    classificationsAndTypes.push({
+      topic: sanitizeOut(
+        cls.category.charAt(0).toUpperCase() + cls.category.slice(1)
+      ),
+      overviewStatement: sanitizeOut(cls.overviewStatement),
+      types: entries,
+      ...(summaryLevel !== 'short' && cls.comparisonNote
+        ? { comparisonNote: sanitizeOut(cls.comparisonNote) }
+        : {}),
+    });
+  }
+
+  // --------------------------------------------------------------------------
+  // C. Definitions (Important Definitions — separated cleanly from Main Concepts)
+  // --------------------------------------------------------------------------
+  const importantDefinitions: DefinitionTerm[] = [];
+  for (const d of profile.definitions) {
+    if (importantDefinitions.length >= limits.defs) break;
+    // Skip if already verbatim covered as a named type explanation in Classifications
+    if (
+      isRedundantAgainstPool(
+        d.sourceText,
+        contentTokens(d.sourceText),
+        usedPool,
+        0.65,
+        0.82
+      )
+    ) {
+      continue;
+    }
+    importantDefinitions.push({
+      term: sanitizeOut(d.term),
+      definition: sanitizeOut(d.definition),
+      origin: d.origin,
+    });
+    markUsed(d.sourceText);
+    markUsed(`${d.term} ${d.rawDefinition}`);
+  }
+
+  // --------------------------------------------------------------------------
+  // A. Topic Overview (Synthesizes central subject & TextRank prose cleanly)
+  // --------------------------------------------------------------------------
   const distinctionTexts = new Set(profile.distinctions.map((d) => d.sourceText));
+  const classificationFingerprints = new Set<string>();
+  for (const cls of profile.classifications) {
+    for (const fp of cls.sourceFingerprints) {
+      classificationFingerprints.add(fp);
+    }
+  }
+
+  const firstSectionHeading = profile.sections[0]?.heading || null;
   const rankedByScore = [...dedupedUnits].sort((a, b) => b.score - a.score);
   const overviewCandidates = [...dedupedUnits]
     .filter(
       (u) =>
         !/^\s*[A-Za-zΔ]+\s*[=∝]/.test(u.formattedText) &&
         !u.isStep &&
+        !classificationFingerprints.has(u.fingerprint) &&
         !/^(?:first|initially|second|third|next|then|subsequently|finally)\b/i.test(
           u.formattedText
         ) &&
         !distinctionTexts.has(u.formattedText)
     )
     .sort((a, b) => {
-      const aLeadBonus = a.orderIndex <= 2 ? 1.25 : 1;
-      const bLeadBonus = b.orderIndex <= 2 ? 1.25 : 1;
-      return b.score * bLeadBonus - a.score * aLeadBonus;
+      const aLead =
+        (a.orderIndex <= 4 ? 1.45 : 1) *
+        (firstSectionHeading && a.sectionHeading === firstSectionHeading ? 1.3 : 1);
+      const bLead =
+        (b.orderIndex <= 4 ? 1.45 : 1) *
+        (firstSectionHeading && b.sectionHeading === firstSectionHeading ? 1.3 : 1);
+      return b.score * bLead - a.score * aLead;
     });
 
-  const overviewTarget = dedupedUnits.length <= 7 ? 1 : limits.overview;
+  // For multi-section docs, keep Topic Overview concise from opening/central prose so later sections remain rich in Main Concepts
+  const overviewTarget =
+    dedupedUnits.length <= 6
+      ? 1
+      : profile.sections.length >= 2
+        ? Math.min(2, limits.overview)
+        : limits.overview;
   const selectedOverviewUnits: AnalyzedUnit[] = [];
   for (const cand of overviewCandidates) {
     if (selectedOverviewUnits.length >= overviewTarget) break;
-    if (isRedundantAgainstPool(cand.formattedText, cand.tokens, usedPool, 0.52, 0.72)) continue;
+    if (
+      profile.sections.length >= 2 &&
+      firstSectionHeading &&
+      cand.sectionHeading &&
+      cand.sectionHeading !== firstSectionHeading &&
+      selectedOverviewUnits.length >= 1
+    ) {
+      continue;
+    }
+    if (isRedundantAgainstPool(cand.formattedText, cand.tokens, usedPool, 0.54, 0.74)) {
+      continue;
+    }
     selectedOverviewUnits.push(cand);
     markUsed(cand.formattedText, cand.tokens);
   }
   if (selectedOverviewUnits.length === 0 && dedupedUnits[0]) {
-    selectedOverviewUnits.push(dedupedUnits[0]);
-    markUsed(dedupedUnits[0].formattedText, dedupedUnits[0].tokens);
+    // Allow brief intro from lead unit if overviewCandidates were already placed in Definitions/Classifications
+    const leadAlt =
+      dedupedUnits.find(
+        (u) =>
+          !classificationFingerprints.has(u.fingerprint) &&
+          !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.78, 0.9)
+      ) || dedupedUnits[0];
+    selectedOverviewUnits.push(leadAlt);
+    markUsed(leadAlt.formattedText, leadAlt.tokens);
   }
 
   selectedOverviewUnits.sort((a, b) => a.orderIndex - b.orderIndex);
   const overviewCore = selectedOverviewUnits
-    .map((u) => attachPageCitation(stripBoilerplatePrefix(u.formattedText), u.pageNumber))
+    .map((u) =>
+      sanitizeOut(attachPageCitation(stripBoilerplatePrefix(u.formattedText), u.pageNumber))
+    )
     .join(' ');
 
-  const topThemes = profile.keyPhrases.slice(0, 4);
-  const themeIntro =
-    summaryLevel !== 'short' && topThemes.length >= 2 && profile.sections.length >= 2
-      ? `Core themes across ${profile.sections.length} document sections include ${topThemes.join(', ')}. `
+  const namedSectionHeadings = profile.sections
+    .map((s) => s.heading)
+    .filter((h) => !/^Page \d+$/i.test(h))
+    .slice(0, 4);
+  const themeLead =
+    summaryLevel !== 'short' && namedSectionHeadings.length >= 2
+      ? `Key areas covered include ${namedSectionHeadings.join(', ')}. `
       : '';
-  const topicOverview = `${themeIntro}${overviewCore}`.trim();
+  const topicOverview = sanitizeOut(`${overviewCore} ${themeLead}`.trim());
 
-  // 2. Formulas & Equations from shared profile
+  // --------------------------------------------------------------------------
+  // B. Main Concepts (strict document order + attached examples + subsections)
+  // --------------------------------------------------------------------------
+  const mainConcepts: MainConceptSection[] = [];
+  const attachedExampleIndices = new Set<number>();
+
+  const attachExamplesToHeading = (
+    heading: string,
+    sectionUnits: AnalyzedUnit[]
+  ): string[] => {
+    const attached: string[] = [];
+    const headingTokens = contentTokens(heading);
+    const secTokenUnion = new Set<string>(headingTokens);
+    for (const u of sectionUnits) {
+      for (const tok of u.tokens) secTokenUnion.add(tok);
+    }
+
+    profile.examples.forEach((ex, idx) => {
+      if (attached.length >= 2 || attachedExampleIndices.has(idx)) return;
+      const sameSection =
+        ex.sectionHeading &&
+        ex.sectionHeading.toLowerCase() === heading.toLowerCase();
+      const exTokens = contentTokens(ex.example);
+      const { containment } = tokenSimilarity(exTokens, secTokenUnion);
+      if (
+        (sameSection || containment >= 0.38) &&
+        !isRedundantAgainstPool(ex.example, exTokens, usedPool, 0.65, 0.82)
+      ) {
+        attached.push(sanitizeOut(ex.example));
+        attachedExampleIndices.add(idx);
+        markUsed(ex.example, exTokens);
+      }
+    });
+    return attached;
+  };
+
+  if (profile.quality.hasStructuredHeadings && profile.sections.length > 0) {
+    for (const sec of profile.sections) {
+      if (mainConcepts.length >= limits.concepts) break;
+
+      // Skip sections whose entire prose belongs exclusively inside ClassificationsAndTypes
+      const isClassificationSection = classificationsAndTypes.some(
+        (c) =>
+          c.topic.toLowerCase() === sec.heading.toLowerCase() ||
+          `types of ${c.topic.toLowerCase()}` === sec.heading.toLowerCase() ||
+          `categories of ${c.topic.toLowerCase()}` === sec.heading.toLowerCase()
+      );
+
+      const nonRedundantUnits = sec.units.filter(
+        (u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.56, 0.76)
+      );
+
+      if (isClassificationSection && nonRedundantUnits.length === 0) {
+        continue;
+      }
+
+      const fallbackUnits = sec.units.filter(
+        (u) =>
+          !selectedOverviewUnits.includes(u) &&
+          !classificationFingerprints.has(u.fingerprint) &&
+          !importantDefinitions.some(
+            (d) => normalizedFingerprint(`${d.term} ${d.definition}`) === u.fingerprint
+          )
+      );
+
+      const pool =
+        nonRedundantUnits.length > 0
+          ? nonRedundantUnits
+          : !isClassificationSection && fallbackUnits.length > 0
+            ? fallbackUnits
+            : [];
+
+      if (pool.length === 0) continue;
+
+      const selectedGroup = [...pool]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limits.pointsPerConcept);
+
+      const { sourcePoints, subsections } = buildSectionPointsAndSubsections(
+        selectedGroup,
+        true
+      );
+      if (sourcePoints.length === 0 && subsections.length === 0) continue;
+
+      for (const u of selectedGroup) {
+        markUsed(u.formattedText, u.tokens);
+      }
+
+      const attachedExamples =
+        summaryLevel !== 'short' ? attachExamplesToHeading(sec.heading, selectedGroup) : [];
+
+      mainConcepts.push({
+        heading: sanitizeOut(sec.heading),
+        sourcePoints: sourcePoints.map(sanitizeOut),
+        aiClarification: '',
+        ...(subsections.length > 0
+          ? {
+              subsections: subsections.map((sub) => ({
+                heading: sanitizeOut(sub.heading),
+                points: sub.points.map(sanitizeOut),
+              })),
+            }
+          : {}),
+        ...(attachedExamples.length > 0 ? { examples: attachedExamples } : {}),
+      });
+    }
+  } else {
+    // Unheaded document: cluster remaining substantive units cleanly in document order
+    const remainingUnits = dedupedUnits.filter(
+      (u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.55, 0.75)
+    );
+    const pool =
+      remainingUnits.length >= 2 || dedupedUnits.length < 4
+        ? remainingUnits
+        : dedupedUnits.filter((u) => !selectedOverviewUnits.includes(u));
+
+    const clusters: AnalyzedUnit[][] = [];
+    for (const unit of pool) {
+      if (clusters.length >= limits.concepts) {
+        const bestCluster = clusters.find((c) => {
+          if (c.length >= limits.pointsPerConcept) return false;
+          return tokenSimilarity(unit.tokens, c[0].tokens).jaccard >= 0.16;
+        });
+        if (bestCluster) bestCluster.push(unit);
+        continue;
+      }
+
+      let bestCluster: AnalyzedUnit[] | null = null;
+      let bestSim = 0;
+      for (const cluster of clusters) {
+        if (cluster.length >= limits.pointsPerConcept) continue;
+        const sim = tokenSimilarity(unit.tokens, cluster[0].tokens).jaccard;
+        if (sim > bestSim && sim >= 0.16) {
+          bestSim = sim;
+          bestCluster = cluster;
+        }
+      }
+      if (bestCluster) {
+        bestCluster.push(unit);
+      } else {
+        clusters.push([unit]);
+      }
+    }
+
+    // Order clusters by earliest appearance in the document
+    clusters.sort(
+      (a, b) =>
+        Math.min(...a.map((u) => u.orderIndex)) - Math.min(...b.map((u) => u.orderIndex))
+    );
+
+    clusters.forEach((cluster, idx) => {
+      const topInCluster = [...cluster]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limits.pointsPerConcept)
+        .sort((a, b) => a.orderIndex - b.orderIndex);
+      const heading = buildSectionClusterHeading(topInCluster, idx);
+      for (const u of topInCluster) markUsed(u.formattedText, u.tokens);
+      const attachedExamples =
+        summaryLevel !== 'short' ? attachExamplesToHeading(heading, topInCluster) : [];
+
+      mainConcepts.push({
+        heading: sanitizeOut(heading),
+        sourcePoints: topInCluster.map((u) =>
+          sanitizeOut(attachPageCitation(stripBoilerplatePrefix(u.formattedText), u.pageNumber))
+        ),
+        aiClarification: '',
+        ...(attachedExamples.length > 0 ? { examples: attachedExamples } : {}),
+      });
+    });
+  }
+
+  // --------------------------------------------------------------------------
+  // E. Characteristics, Processes & Formulas
+  // --------------------------------------------------------------------------
+  const characteristicsByTopic = new Map<string, string[]>();
+  for (const ch of profile.characteristics) {
+    if (characteristicsByTopic.size >= limits.charTopics && !characteristicsByTopic.has(ch.topic)) {
+      continue;
+    }
+    const chTokens = contentTokens(ch.sourceText);
+    if (isRedundantAgainstPool(ch.sourceText, chTokens, usedPool, 0.56, 0.76)) continue;
+
+    const list = characteristicsByTopic.get(ch.topic) || [];
+    if (list.length >= limits.charPoints) continue;
+    list.push(sanitizeOut(ch.statement));
+    characteristicsByTopic.set(ch.topic, list);
+    markUsed(ch.sourceText, chTokens);
+  }
+
+  const characteristicsAndExplanations: StructuredCharacteristicItem[] = Array.from(
+    characteristicsByTopic.entries()
+  ).map(([topic, points]) => ({
+    topic: sanitizeOut(topic),
+    points,
+  }));
+
   const formulasOrFrameworks: FormulaOrFramework[] = profile.formulas
     .slice(0, limits.formulas)
     .map((f) => {
-      if (f.sourceText.length < 95) {
-        markUsed(f.sourceText);
-      }
+      markUsed(f.sourceText);
       return {
-        name: f.name,
-        expressionOrStructure: f.expressionOrStructure,
-        usage: f.usage,
-        ...(f.variables.length > 0 ? { variables: f.variables } : {}),
+        name: sanitizeOut(f.name),
+        expressionOrStructure: sanitizeOut(f.expressionOrStructure),
+        usage: sanitizeOut(f.usage),
+        ...(f.variables.length > 0
+          ? {
+              variables: f.variables.map((v) => ({
+                symbol: sanitizeOut(v.symbol),
+                meaning: sanitizeOut(v.meaning),
+              })),
+            }
+          : {}),
       };
     });
 
-  // 3. Important Definitions from shared profile
-  const importantDefinitions: DefinitionTerm[] = profile.definitions
-    .slice(0, limits.defs)
-    .map((d) => {
-      markUsed(d.sourceText);
-      return {
-        term: d.term,
-        definition: d.definition,
-        origin: d.origin,
-      };
-    });
-
-  // 4. Important Distinctions from shared profile
-  const importantDistinctions: DistinctionItem[] = [];
-  for (const dist of profile.distinctions) {
-    if (importantDistinctions.length >= limits.distinctions) break;
-    const distTokens = contentTokens(dist.sourceText);
-    if (isRedundantAgainstPool(dist.sourceText, distTokens, usedPool, 0.56, 0.76)) continue;
-    importantDistinctions.push({
-      pairTitle: dist.pairTitle,
-      comparison: dist.comparison,
-    });
-    markUsed(dist.sourceText, distTokens);
-  }
-
-  // 5. Processes & Mechanisms from shared profile
   const processesAndMechanisms: ProcessMechanismGroup[] = [];
   for (const proc of profile.processes) {
     if (processesAndMechanisms.length >= limits.procGroups) break;
     const nonRedundantSteps = proc.steps.filter(
       (s) => !isRedundantAgainstPool(s.rawText, contentTokens(s.rawText), usedPool, 0.62, 0.8)
     );
-    if (nonRedundantSteps.length >= 2 || (nonRedundantSteps.length === 1 && proc.steps.length === 1)) {
+    if (
+      nonRedundantSteps.length >= 2 ||
+      (nonRedundantSteps.length === 1 && proc.steps.length === 1)
+    ) {
       const chosen = nonRedundantSteps.slice(0, limits.procSteps);
       processesAndMechanisms.push({
-        heading: proc.heading,
-        steps: chosen.map((s) => s.text),
+        heading: sanitizeOut(proc.heading),
+        steps: chosen.map((s) => sanitizeOut(s.text)),
       });
-      for (const s of chosen) {
-        markUsed(s.rawText);
-      }
+      for (const s of chosen) markUsed(s.rawText);
     }
   }
 
-  // 6. Examples & Applications from shared profile
-  const relevantExamples: RelevantExample[] = [];
-  for (const ex of profile.examples) {
-    if (relevantExamples.length >= limits.examples) break;
-    const exTokens = contentTokens(ex.example);
-    if (isRedundantAgainstPool(ex.example, exTokens, usedPool, 0.55, 0.76)) continue;
-    relevantExamples.push({
-      title: ex.title,
-      example: ex.example,
-      origin: ex.origin,
-    });
-    markUsed(ex.example, exTokens);
-  }
-
-  // 7. Main Concepts (grouped by real document headings or cohesive keyword clusters + cross-section connections)
-  const mainConcepts: MainConceptSection[] = [];
-  const conceptPoolCandidates = dedupedUnits.filter(
-    (u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.54, 0.74)
-  );
-
-  const effectiveConceptCandidates =
-    conceptPoolCandidates.length >= 2 || dedupedUnits.length < 4
-      ? conceptPoolCandidates
-      : dedupedUnits.filter((u) => !selectedOverviewUnits.includes(u));
-
-  const allHeadingGroups = new Map<string, AnalyzedUnit[]>();
-  const unheadedUnits: AnalyzedUnit[] = [];
-
-  for (const u of dedupedUnits) {
-    if (u.sectionHeading) {
-      const arr = allHeadingGroups.get(u.sectionHeading) || [];
-      arr.push(u);
-      allHeadingGroups.set(u.sectionHeading, arr);
-    } else if (effectiveConceptCandidates.includes(u)) {
-      unheadedUnits.push(u);
-    }
-  }
-
-  if (allHeadingGroups.size > 0) {
-    for (const [heading, fullGroup] of allHeadingGroups.entries()) {
-      if (mainConcepts.length >= limits.concepts) break;
-      const unusedInGroup = fullGroup.filter(
-        (u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.54, 0.74)
-      );
-      const fallbackGroup = fullGroup.filter((u) => !selectedOverviewUnits.includes(u));
-      const candidatePool =
-        unusedInGroup.length > 0
-          ? unusedInGroup
-          : fallbackGroup.length > 0
-            ? fallbackGroup
-            : fullGroup;
-
-      const topGroup = [...candidatePool]
-        .sort((a, b) => b.score - a.score)
-        .slice(0, limits.pointsPerConcept)
-        .sort((a, b) => a.orderIndex - b.orderIndex);
-      if (topGroup.length === 0) continue;
-
-      mainConcepts.push({
-        heading,
-        sourcePoints: topGroup.map((u) =>
-          attachPageCitation(stripBoilerplatePrefix(u.formattedText), u.pageNumber)
-        ),
-        aiClarification: buildSectionClarificationNote(
-          heading,
-          topGroup,
-          profile,
-          limits.includeClarifications
-        ),
-      });
-      for (const u of topGroup) markUsed(u.formattedText, u.tokens);
-    }
-  }
-
-  if (unheadedUnits.length > 0 && mainConcepts.length < limits.concepts) {
-    const remainingSlots = limits.concepts - mainConcepts.length;
-    const topUnheaded = [...unheadedUnits]
-      .filter((u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.54, 0.74))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, remainingSlots * limits.pointsPerConcept);
-
-    const seededUnheaded =
-      topUnheaded.length > 0
-        ? topUnheaded
-        : unheadedUnits.slice(0, remainingSlots * limits.pointsPerConcept);
-
-    const clusters: AnalyzedUnit[][] = [];
-    for (const unit of seededUnheaded) {
-      let bestCluster: AnalyzedUnit[] | null = null;
-      let bestSim = 0;
-
-      for (const cluster of clusters) {
-        if (cluster.length >= limits.pointsPerConcept) continue;
-        const sim = tokenSimilarity(unit.tokens, cluster[0].tokens).jaccard;
-        if (sim > bestSim && sim >= 0.14) {
-          bestSim = sim;
-          bestCluster = cluster;
-        }
-      }
-
-      if (bestCluster) {
-        bestCluster.push(unit);
-      } else if (clusters.length < remainingSlots) {
-        clusters.push([unit]);
-      } else if (clusters.length > 0) {
-        const smallest = clusters.reduce((a, b) => (a.length <= b.length ? a : b));
-        if (smallest.length < limits.pointsPerConcept + 1) smallest.push(unit);
-      }
-    }
-
-    clusters.forEach((cluster, idx) => {
-      cluster.sort((a, b) => a.orderIndex - b.orderIndex);
-      const clusterHeading = buildSectionClusterHeading(cluster, mainConcepts.length + idx);
-      mainConcepts.push({
-        heading: clusterHeading,
-        sourcePoints: cluster.map((u) =>
-          attachPageCitation(stripBoilerplatePrefix(u.formattedText), u.pageNumber)
-        ),
-        aiClarification: buildSectionClarificationNote(
-          clusterHeading,
-          cluster,
-          profile,
-          limits.includeClarifications
-        ),
-      });
-      for (const u of cluster) markUsed(u.formattedText, u.tokens);
-    });
-  }
-
-  // 8. Key Facts (distinct factual/quantitative/causal points not repeated above)
+  // Remaining distinct quantitative or causal facts not covered above
   const importantFacts: string[] = [];
-  const factCandidates = rankedByScore.filter(
-    (u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.52, 0.72)
-  );
-
-  factCandidates.sort((a, b) => {
-    const aQuant =
-      a.quantitiesUnits.length > 0 ||
-      /\d|%|°|mol|kg|km|nm|atm|pH|ATP|DNA|RNA/i.test(a.formattedText)
-        ? 1.25
-        : 1;
-    const bQuant =
-      b.quantitiesUnits.length > 0 ||
-      /\d|%|°|mol|kg|km|nm|atm|pH|ATP|DNA|RNA/i.test(b.formattedText)
-        ? 1.25
-        : 1;
-    return b.score * bQuant - a.score * aQuant;
-  });
+  const factCandidates = rankedByScore
+    .filter((u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.52, 0.72))
+    .sort((a, b) => {
+      const aQuant =
+        a.quantitiesUnits.length > 0 ||
+        /\d|%|°|mol|kg|km|nm|atm|pH|ATP|DNA|RNA/i.test(a.formattedText)
+          ? 1.28
+          : 1;
+      const bQuant =
+        b.quantitiesUnits.length > 0 ||
+        /\d|%|°|mol|kg|km|nm|atm|pH|ATP|DNA|RNA/i.test(b.formattedText)
+          ? 1.28
+          : 1;
+      return b.score * bQuant - a.score * aQuant;
+    });
 
   for (const cand of factCandidates) {
     if (importantFacts.length >= limits.facts) break;
     importantFacts.push(
-      attachPageCitation(stripBoilerplatePrefix(cand.formattedText), cand.pageNumber)
+      sanitizeOut(attachPageCitation(stripBoilerplatePrefix(cand.formattedText), cand.pageNumber))
     );
     markUsed(cand.formattedText, cand.tokens);
   }
 
-  // 9. Key Terminology (combine RAKE keyphrases + domain terminology)
+  // --------------------------------------------------------------------------
+  // F. Standalone Examples (excluding examples already tucked under concepts/types)
+  // --------------------------------------------------------------------------
+  const relevantExamples: RelevantExample[] = [];
+  profile.examples.forEach((ex, idx) => {
+    if (relevantExamples.length >= limits.examples || attachedExampleIndices.has(idx)) return;
+    const exTokens = contentTokens(ex.example);
+    if (isRedundantAgainstPool(ex.example, exTokens, usedPool, 0.56, 0.76)) return;
+    relevantExamples.push({
+      title: sanitizeOut(ex.title),
+      example: sanitizeOut(ex.example),
+      origin: ex.origin,
+    });
+    markUsed(ex.example, exTokens);
+  });
+
+  // --------------------------------------------------------------------------
+  // G. Comparisons (Comparison Tables + Important Distinctions)
+  // --------------------------------------------------------------------------
+  const comparisonTables = buildDeterministicComparisonTables(
+    profile,
+    classificationsAndTypes,
+    limits.tables
+  );
+
+  // Track distinction texts covered in tables or classifications comparisonNote
+  const tableFingerprints = new Set<string>();
+  for (const table of comparisonTables) {
+    for (const row of table.rows) {
+      for (const val of row.values) {
+        tableFingerprints.add(normalizedFingerprint(val));
+      }
+    }
+  }
+  for (const cls of classificationsAndTypes) {
+    if (cls.comparisonNote) {
+      tableFingerprints.add(normalizedFingerprint(cls.comparisonNote));
+    }
+  }
+
+  const importantDistinctions: DistinctionItem[] = [];
+  for (const dist of profile.distinctions) {
+    if (importantDistinctions.length >= limits.distinctions) break;
+    const distTokens = contentTokens(dist.sourceText);
+    const rawFp = normalizedFingerprint(dist.sourceText);
+    if (
+      tableFingerprints.has(rawFp) ||
+      isRedundantAgainstPool(dist.sourceText, distTokens, usedPool, 0.56, 0.76)
+    ) {
+      continue;
+    }
+    importantDistinctions.push({
+      pairTitle: sanitizeOut(dist.pairTitle),
+      comparison: sanitizeOut(dist.comparison),
+    });
+    markUsed(dist.sourceText, distTokens);
+  }
+
+  // Key terminology (prose-only tokens + RAKE academic phrases)
   const keyTerminology = Array.from(
-    new Set([...profile.keyTerminology, ...profile.keyPhrases])
-  ).slice(0, limits.terms);
+    new Set([...profile.keyTerminology, ...profile.keyPhrases].map(sanitizeOut))
+  )
+    .filter(Boolean)
+    .slice(0, limits.terms);
 
-  // 10. Concept Clarifications & Difficult Terms (from DocumentIntelligenceProfile)
-  const difficultConceptExplanations: DifficultConceptExplanation[] =
-    limits.difficult > 0
-      ? profile.difficultConcepts.slice(0, limits.difficult).map((d) => ({
-          concept: d.concept,
-          sourceContext: d.sourceContext,
-          plainExplanation: d.plainExplanation,
-        }))
-      : [];
+  // Concept clarifications (formula variables & genuinely non-redundant dense concepts)
+  const difficultConceptExplanations: DifficultConceptExplanation[] = [];
+  if (limits.difficult > 0) {
+    for (const d of profile.difficultConcepts) {
+      if (difficultConceptExplanations.length >= limits.difficult) break;
+      const isFormulaVarNote = /^Variables:/i.test(d.plainExplanation);
+      if (
+        !isFormulaVarNote &&
+        isRedundantAgainstPool(
+          d.sourceContext,
+          contentTokens(d.sourceContext),
+          usedPool,
+          0.68,
+          0.84
+        )
+      ) {
+        continue;
+      }
+      difficultConceptExplanations.push({
+        concept: sanitizeOut(d.concept),
+        sourceContext: sanitizeOut(d.sourceContext),
+        plainExplanation: sanitizeOut(d.plainExplanation),
+      });
+    }
+  }
 
-  // 11. Structured Comparison Tables (for Detailed & Comprehensive modes)
-  const comparisonTables = buildDeterministicComparisonTables(profile, limits.tables);
-
-  // 12. Revision Notes (cross-section links, cause-effect rules, quantitative values)
+  // Comprehensive-only non-redundant cause & formula study checks
   const revisionNotes: string[] = [];
   if (limits.revision > 0) {
-    for (const rel of profile.sectionRelationships) {
-      if (revisionNotes.length >= limits.revision) break;
-      revisionNotes.push(rel.connectionNote);
-    }
     for (const ce of profile.causeEffects) {
       if (revisionNotes.length >= limits.revision) break;
-      const line = attachPageCitation(
-        `Cause & Effect: ${ce.cause} -> ${ce.effect}.`,
-        ce.pageNumber
+      const line = sanitizeOut(
+        attachPageCitation(`Cause & Effect: ${ce.cause} → ${ce.effect}.`, ce.pageNumber)
       );
-      if (!revisionNotes.includes(line)) {
+      if (!isRedundantAgainstPool(line, contentTokens(line), usedPool, 0.65, 0.82)) {
         revisionNotes.push(line);
+        markUsed(line);
       }
     }
     for (const f of formulasOrFrameworks) {
       if (revisionNotes.length >= limits.revision) break;
-      const line = `Formula Check (${f.name}): Memorize ${f.expressionOrStructure} and when to apply it.`;
-      if (!revisionNotes.includes(line)) {
-        revisionNotes.push(line);
-      }
+      const line = sanitizeOut(
+        `Equation check — ${f.name}: ${f.expressionOrStructure}`
+      );
+      if (!revisionNotes.includes(line)) revisionNotes.push(line);
     }
   }
 
-  // 13. Final Recap (only when document has >= 4 distinct units)
-  const finalRecap: string[] = [];
-  if (dedupedUnits.length >= 4) {
-    const recapPool = [...dedupedUnits]
-      .filter((u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.54, 0.74))
-      .sort((a, b) => b.score - a.score);
-
-    for (const u of recapPool) {
-      if (finalRecap.length >= limits.recap) break;
-      finalRecap.push(attachPageCitation(stripBoilerplatePrefix(u.formattedText), u.pageNumber));
-      markUsed(u.formattedText, u.tokens);
-    }
-
-    if (finalRecap.length === 0 && mainConcepts.length >= 2) {
-      for (const c of mainConcepts.slice(0, limits.recap)) {
-        if (c.sourcePoints.length > 0 && !c.heading.startsWith('Core Concept')) {
-          finalRecap.push(`${c.heading}: ${c.sourcePoints[0]}`);
-        }
-      }
-    }
-  }
-
-  // 14. Key Takeaways & Exam Focus
+  // --------------------------------------------------------------------------
+  // H. Key Takeaways (concise exam-ready synthesis without verbatim duplication)
+  // --------------------------------------------------------------------------
   const keyTakeaways: string[] = [];
-  if (importantDefinitions.length > 0) {
-    const topDefs = importantDefinitions
-      .slice(0, 3)
-      .map((d) => d.term)
-      .join(', ');
-    keyTakeaways.push(`Core definitions to master: ${topDefs}.`);
+  if (classificationsAndTypes.length > 0 && keyTakeaways.length < limits.takeaways) {
+    const firstCls = classificationsAndTypes[0];
+    keyTakeaways.push(
+      sanitizeOut(
+        `${firstCls.topic} encompasses ${firstCls.types.length} named ${
+          firstCls.types.length === 1 ? 'category' : 'categories'
+        }: ${firstCls.types.map((t) => t.name).join(', ')}.`
+      )
+    );
+  }
+  if (importantDefinitions.length > 0 && keyTakeaways.length < limits.takeaways) {
+    keyTakeaways.push(
+      sanitizeOut(
+        `Foundational terms to retain: ${importantDefinitions
+          .slice(0, 4)
+          .map((d) => d.term)
+          .join(', ')}.`
+      )
+    );
   }
   if (formulasOrFrameworks.length > 0 && keyTakeaways.length < limits.takeaways) {
     keyTakeaways.push(
-      `Key equations/reactions: ${formulasOrFrameworks
-        .slice(0, 3)
-        .map((f) => `${f.name} (${f.expressionOrStructure})`)
-        .join('; ')}.`
+      sanitizeOut(
+        `Essential equations/expressions: ${formulasOrFrameworks
+          .slice(0, 3)
+          .map((f) => `${f.name} (${f.expressionOrStructure})`)
+          .join('; ')}.`
+      )
     );
   }
   if (importantDistinctions.length > 0 && keyTakeaways.length < limits.takeaways) {
     keyTakeaways.push(
-      `High-yield distinctions: ${importantDistinctions
-        .slice(0, 2)
-        .map((d) => d.pairTitle)
-        .join(', ')}.`
+      sanitizeOut(
+        `Key contrasts to distinguish: ${importantDistinctions
+          .slice(0, 2)
+          .map((d) => d.pairTitle)
+          .join(', ')}.`
+      )
     );
   }
-  for (const unit of rankedByScore) {
+  for (const ce of profile.causeEffects) {
     if (keyTakeaways.length >= limits.takeaways) break;
-    const text = attachPageCitation(stripBoilerplatePrefix(unit.formattedText), unit.pageNumber);
-    if (!keyTakeaways.some((kt) => kt.includes(text.slice(0, 32)))) {
-      keyTakeaways.push(text);
+    const summaryLine = sanitizeOut(
+      attachPageCitation(`${ce.cause} → ${ce.effect}.`, ce.pageNumber)
+    );
+    if (!keyTakeaways.some((kt) => normalizedFingerprint(kt) === normalizedFingerprint(summaryLine))) {
+      keyTakeaways.push(summaryLine);
     }
   }
+  // Fallback synthesis only if keyTakeaways is still short on concise docs
+  for (const unit of rankedByScore) {
+    if (keyTakeaways.length >= Math.min(2, limits.takeaways)) break;
+    const candidate = sanitizeOut(
+      attachPageCitation(stripBoilerplatePrefix(unit.formattedText), unit.pageNumber)
+    );
+    if (!isRedundantAgainstPool(candidate, unit.tokens, usedPool, 0.72, 0.85)) {
+      keyTakeaways.push(candidate);
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // QUALITY CONTROL VALIDATION STAGE
+  // Check section coverage, named-type explanations, page refs & deduplication
+  // --------------------------------------------------------------------------
+  const validationNotes: string[] = [];
+  const coveredSectionTitles = new Set<string>([
+    ...mainConcepts.map((c) => c.heading.toLowerCase()),
+    ...classificationsAndTypes.map((c) => c.topic.toLowerCase()),
+    ...processesAndMechanisms.map((p) => p.heading.toLowerCase()),
+  ]);
+
+  const missingTopics: string[] = [];
+  let substantiveSectionsConsidered = 0;
+
+  if (profile.quality.hasStructuredHeadings) {
+    for (const sec of profile.sections) {
+      if (sec.units.length < 2) continue;
+      substantiveSectionsConsidered++;
+      const lowerHeading = sec.heading.toLowerCase();
+      const allUnitsAlreadyCovered = sec.units.every(
+        (u) =>
+          classificationFingerprints.has(u.fingerprint) ||
+          isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.58, 0.78)
+      );
+
+      const isCovered =
+        coveredSectionTitles.has(lowerHeading) ||
+        allUnitsAlreadyCovered ||
+        classificationsAndTypes.some(
+          (c) =>
+            lowerHeading.includes(c.topic.toLowerCase()) ||
+            c.types.some((t) => lowerHeading.includes(t.name.toLowerCase()))
+        );
+
+      if (isCovered) {
+        coveredSectionTitles.add(lowerHeading);
+      } else {
+        // Recover missed substantive document section so no major section is omitted
+        const topRecover = [...sec.units]
+          .filter((u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.74, 0.88))
+          .slice(0, Math.max(1, Math.min(2, limits.pointsPerConcept)));
+
+        if (topRecover.length > 0) {
+          mainConcepts.push({
+            heading: sanitizeOut(sec.heading),
+            sourcePoints: topRecover.map((u) =>
+              sanitizeOut(
+                attachPageCitation(stripBoilerplatePrefix(u.formattedText), u.pageNumber)
+              )
+            ),
+            aiClarification: '',
+          });
+          coveredSectionTitles.add(lowerHeading);
+          for (const u of topRecover) markUsed(u.formattedText, u.tokens);
+        } else {
+          missingTopics.push(sec.heading);
+        }
+      }
+    }
+  } else {
+    substantiveSectionsConsidered = profile.sections.length;
+  }
+
+  // Honest source completeness notices (without fabricating content)
+  const noticeParts: string[] = [];
+  if (profile.quality.isBrief) {
+    noticeParts.push(
+      'This source material is brief, so only directly supported summary sections are shown.'
+    );
+  } else if (profile.quality.lowClarity) {
+    noticeParts.push(
+      'Parts of the source text contain irregular formatting or fragments; only clearly readable statements were included.'
+    );
+  }
+  if (missingExplanationTypes.length > 0) {
+    const listed = missingExplanationTypes.slice(0, 4).join(', ');
+    noticeParts.push(
+      `The source document names ${listed} without providing a separate detailed explanation in the uploaded text.`
+    );
+    validationNotes.push(
+      `Unexplained named categories in source: ${missingExplanationTypes.join(', ')}`
+    );
+  }
+
+  const sourceNotice = noticeParts.length > 0 ? noticeParts.join(' ') : undefined;
+
+  const validationReport: SummaryValidationReport = {
+    isComplete: missingTopics.length === 0 && missingExplanationTypes.length === 0,
+    sectionsConsidered: substantiveSectionsConsidered,
+    sectionsCovered: coveredSectionTitles.size,
+    classificationsCovered: classificationsAndTypes.reduce(
+      (sum, c) => sum + c.types.length,
+      0
+    ),
+    missingTopics,
+    notes: validationNotes,
+  };
 
   const baseSummary: Omit<StructuredSummary, 'markdown'> = {
     title: resolvedTitle,
     subjectArea: profile.subjectArea,
     summaryLevel,
-    topicOverview: formatScientificText(topicOverview),
+    topicOverview,
     mainConcepts,
     importantDefinitions,
+    classificationsAndTypes,
+    characteristicsAndExplanations,
     keyTerminology,
     difficultConceptExplanations,
     importantFacts,
@@ -769,12 +1269,13 @@ export function generateExtractiveSummary(
     formulasOrFrameworks,
     processesAndMechanisms,
     importantDistinctions,
-    finalRecap,
+    finalRecap: [],
     ...(sourceNotice ? { sourceNotice } : {}),
     comparisonTables,
     visualDiagrams: [],
     revisionNotes,
     keyTakeaways,
+    validationReport,
     wordCount,
     chunkCount: profile.chunks.length,
     generatedAt: new Date().toISOString(),

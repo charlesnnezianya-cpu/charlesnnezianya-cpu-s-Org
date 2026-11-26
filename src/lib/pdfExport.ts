@@ -171,16 +171,62 @@ export function exportSummaryToPdf(summary: StructuredSummary): void {
       for (const pt of c.sourcePoints) {
         pushBody(`* ${pt}`, true);
       }
-      if (c.aiClarification) {
-        pushBody(`* ${c.aiClarification}`, true);
+      if (c.subsections && c.subsections.length > 0) {
+        for (const sub of c.subsections) {
+          pushBody(`${sub.heading}:`, true);
+          for (const sp of sub.points) {
+            pushBody(`  * ${sp}`, true);
+          }
+        }
+      }
+      if (c.examples && c.examples.length > 0) {
+        for (const ex of c.examples) {
+          pushBody(`  Example: ${ex}`, true);
+        }
       }
     });
   }
 
   if (summary.importantDefinitions.length > 0) {
-    pushHeading('Important Definitions');
+    pushHeading('Definitions');
     for (const d of summary.importantDefinitions) {
       pushBody(`* ${d.term} - ${d.definition}`, true);
+    }
+  }
+
+  if (summary.classificationsAndTypes && summary.classificationsAndTypes.length > 0) {
+    pushHeading('Classifications and Types');
+    for (const cls of summary.classificationsAndTypes) {
+      pushSubheading(cls.topic);
+      pushBody(cls.overviewStatement);
+      cls.types.forEach((t, idx) => {
+        pushBody(`${idx + 1}. ${t.name}: ${t.explanation}`, true);
+        if (t.characteristics) {
+          for (const ch of t.characteristics) {
+            pushBody(`  * Characteristic: ${ch}`, true);
+          }
+        }
+        if (t.examples) {
+          for (const ex of t.examples) {
+            pushBody(`  * Example: ${ex}`, true);
+          }
+        }
+      });
+      if (cls.comparisonNote) {
+        pushBody(`Comparison: ${cls.comparisonNote}`, true);
+      }
+    }
+  }
+
+  if (summary.characteristicsAndExplanations && summary.characteristicsAndExplanations.length > 0) {
+    pushHeading('Characteristics and Explanations');
+    for (const grp of summary.characteristicsAndExplanations) {
+      if (summary.characteristicsAndExplanations.length > 1) {
+        pushSubheading(grp.topic);
+      }
+      for (const pt of grp.points) {
+        pushBody(`* ${pt}`, true);
+      }
     }
   }
 
@@ -197,7 +243,7 @@ export function exportSummaryToPdf(summary: StructuredSummary): void {
   }
 
   if (summary.formulasOrFrameworks.length > 0) {
-    pushHeading('Important Formulas & Equations');
+    pushHeading('Formulas & Equations');
     for (const f of summary.formulasOrFrameworks) {
       pushBody(`* ${f.name}: ${f.expressionOrStructure} - ${f.usage}`, true);
       if (f.variables && f.variables.length > 0) {
@@ -207,21 +253,32 @@ export function exportSummaryToPdf(summary: StructuredSummary): void {
   }
 
   if (summary.importantFacts.length > 0) {
-    pushHeading('Key Facts');
+    pushHeading('Additional Key Details');
     for (const fact of summary.importantFacts) {
       pushBody(`* ${fact}`, true);
     }
   }
 
   if (summary.relevantExamples.length > 0) {
-    pushHeading('Examples & Applications');
+    pushHeading('Examples');
     for (const ex of summary.relevantExamples) {
       pushBody(`* ${ex.title}: ${ex.example}`, true);
     }
   }
 
+  if (summary.comparisonTables && summary.comparisonTables.length > 0) {
+    pushHeading('Comparisons');
+    for (const table of summary.comparisonTables) {
+      pushSubheading(table.title);
+      pushBody(`Columns: ${table.headers.join(' | ')}`, true);
+      for (const row of table.rows) {
+        pushBody(`* ${row.criterion}: ${row.values.join(' | ')}`, true);
+      }
+    }
+  }
+
   if (summary.importantDistinctions && summary.importantDistinctions.length > 0) {
-    pushHeading('Important Distinctions');
+    pushHeading('Key Distinctions');
     for (const d of summary.importantDistinctions) {
       pushBody(`* ${d.pairTitle}: ${d.comparison}`, true);
     }
@@ -230,24 +287,6 @@ export function exportSummaryToPdf(summary: StructuredSummary): void {
   if (summary.keyTerminology.length > 0) {
     pushHeading('Key Terminology');
     pushBody(summary.keyTerminology.join(', '));
-  }
-
-  if (summary.finalRecap && summary.finalRecap.length > 0) {
-    pushHeading('Final Recap');
-    summary.finalRecap.forEach((r, idx) => {
-      pushBody(`${idx + 1}. ${r}`, true);
-    });
-  }
-
-  if (summary.comparisonTables && summary.comparisonTables.length > 0) {
-    pushHeading('Comparison Tables');
-    for (const table of summary.comparisonTables) {
-      pushSubheading(table.title);
-      pushBody(`Columns: ${table.headers.join(' | ')}`, true);
-      for (const row of table.rows) {
-        pushBody(`* ${row.criterion}: ${row.values.join(' | ')}`, true);
-      }
-    }
   }
 
   if (summary.visualDiagrams && summary.visualDiagrams.length > 0) {
@@ -266,14 +305,21 @@ export function exportSummaryToPdf(summary: StructuredSummary): void {
     }
   }
 
-  if ((!summary.finalRecap || summary.finalRecap.length === 0) && summary.revisionNotes.length > 0) {
-    pushHeading('Revision Notes');
+  if (summary.revisionNotes.length > 0) {
+    pushHeading('Cause & Formula Checks');
     for (const note of summary.revisionNotes) {
       pushBody(`* ${note}`, true);
     }
   }
 
-  if ((!summary.finalRecap || summary.finalRecap.length === 0) && summary.keyTakeaways.length > 0) {
+  if (summary.finalRecap && summary.finalRecap.length > 0) {
+    pushHeading('Final Recap');
+    summary.finalRecap.forEach((r, idx) => {
+      pushBody(`${idx + 1}. ${r}`, true);
+    });
+  }
+
+  if (summary.keyTakeaways.length > 0) {
     pushHeading('Key Takeaways');
     for (const t of summary.keyTakeaways) {
       pushBody(`* ${t}`, true);

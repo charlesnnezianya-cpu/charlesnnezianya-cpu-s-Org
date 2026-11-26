@@ -172,7 +172,93 @@ async function runChatRagTests() {
   assert.strictEqual(s8.needsClarification, true);
   console.log('Test 8 [Ambiguous Query Clarification Detection]: PASS');
 
-  console.log('\n[ChatRAG Test Suite] ALL 8 UNIT TESTS PASSED SUCCESSFULLY!');
+  // Scenario 9: Multi-page Classification & Types retrieval + Document Outline + Ordinal Follow-up
+  const problemTypesDoc = {
+    id: 'mat-cs-201',
+    title: 'Computational Thinking and Problem Solving.pdf',
+    type: 'Uploaded PDF Material',
+    content: [
+      `[Page 1]
+1. Problem Solving Foundations
+Problem solving is defined as the systematic process of identifying a gap between a current state and a desired goal state and selecting effective actions to bridge it.
+
+Classification of Problems:
+Problems in engineering and cognitive science are classified into three main types: Well-Defined Problems, Ill-Defined Problems, and Constraint-Satisfaction Problems.`,
+
+      `[Page 2]
+Well-Defined Problems:
+Well-defined problems are problems that specify clear initial conditions, permissible operators, and an explicit goal test.
+Key characteristics: deterministic state transitions, verifiable solutions, and formal algorithmic steps.
+For example, finding the shortest weighted path between two nodes using Dijkstra's algorithm.`,
+
+      `[Page 3]
+Ill-Defined Problems and Constraint-Satisfaction Problems:
+Ill-defined problems lack an explicit goal specification or complete state boundaries, requiring iterative framing and heuristic judgment.
+For example, designing a sustainable urban transit system with competing stakeholder priorities.
+Constraint-Satisfaction Problems require assigning values to variables so that all domain constraints hold simultaneously, such as scheduling university final examinations without room or student conflicts.`,
+    ].join('\n\n'),
+  };
+
+  const s9 = await buildChatRagContext({
+    message: 'What are the types of problems described in my notes?',
+    history: [],
+    documentContext: problemTypesDoc,
+    userId: 'student-1',
+    hasImage: false,
+  });
+  assert.strictEqual(s9.questionType, 'classification', 'Scenario 9 must detect classification intent');
+  const s9Pages = new Set(s9.sources.map((src) => src.pageNumber));
+  assert(s9Pages.has(1) && s9Pages.has(2) && s9Pages.has(3), `Scenario 9 should span Pages 1, 2, and 3 (got ${Array.from(s9Pages).join(',')})`);
+  assert(
+    s9.documentContextPromptBlock.includes('DOCUMENT STRUCTURE OUTLINE'),
+    'Scenario 9 prompt must include the Document Structure Outline'
+  );
+  assert(
+    s9.documentContextPromptBlock.includes('EXTRACTED DOCUMENT CONCEPTS'),
+    'Scenario 9 prompt must include extracted classifications/definitions'
+  );
+  console.log(`Test 9 [Multi-Page Classification Retrieval & Structured Grounding]: PASS (Pages: ${Array.from(s9Pages).sort().join(', ')})`);
+
+  // Scenario 10: Ordinal follow-up coreference resolution ("explain the second type with an example")
+  const s10 = await buildChatRagContext({
+    message: 'Explain the second type with its example.',
+    history: [
+      { role: 'user', content: 'What are the types of problems?' },
+      {
+        role: 'assistant',
+        content: [
+          'Here are the three types of problems:',
+          '1. **Well-Defined Problems** — clear initial conditions and goal tests.',
+          '2. **Ill-Defined Problems** — unclear goal boundaries requiring heuristic framing.',
+          '3. **Constraint-Satisfaction Problems** — satisfy simultaneous constraints.',
+        ].join('\n'),
+      },
+    ],
+    documentContext: problemTypesDoc,
+    userId: 'student-1',
+    hasImage: false,
+  });
+  assert(
+    s10.retrievalQuery.toLowerCase().includes('ill-defined'),
+    `Scenario 10 should resolve "the second type" to "Ill-Defined Problems" (got: ${s10.retrievalQuery})`
+  );
+  assert(s10.sources.some((s) => s.pageNumber === 3), 'Scenario 10 must retrieve Page 3 where Ill-Defined Problems and its example appear');
+  console.log(`Test 10 [Ordinal Follow-Up Coreference Resolution]: PASS (Resolved query -> Page 3)`);
+
+  // Scenario 11: Comparison Question Type Detection
+  const s11 = await buildChatRagContext({
+    message: 'Compare Well-Defined Problems vs Ill-Defined Problems.',
+    history: [],
+    documentContext: problemTypesDoc,
+    userId: 'student-1',
+    hasImage: false,
+  });
+  assert.strictEqual(s11.questionType, 'comparison');
+  const s11Pages = new Set(s11.sources.map((src) => src.pageNumber));
+  assert(s11Pages.has(2) && s11Pages.has(3), 'Scenario 11 comparison must retrieve both Page 2 and Page 3');
+  console.log(`Test 11 [Comparison Intent & Cross-Page Evidence]: PASS (Pages: ${Array.from(s11Pages).sort().join(', ')})`);
+
+  console.log('\n[ChatRAG Test Suite] ALL 11 UNIT TESTS PASSED SUCCESSFULLY!');
 }
 
 runChatRagTests().catch((err) => {
