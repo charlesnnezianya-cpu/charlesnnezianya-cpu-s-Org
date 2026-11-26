@@ -19,21 +19,25 @@ export interface QuizGenerationOptions {
 
 type CognitiveLevel = 'recall' | 'conceptual' | 'application';
 
+type TemplateType =
+  | 'definition_to_term'
+  | 'term_to_definition'
+  | 'structure_to_function'
+  | 'function_to_structure'
+  | 'classification'
+  | 'classification_exception'
+  | 'cause_effect'
+  | 'effect_to_cause'
+  | 'process_sequence'
+  | 'distinction'
+  | 'formula_expression'
+  | 'formula_variable'
+  | 'quantitative_fact'
+  | 'targeted_cloze';
+
 interface QuizCandidate {
   idKey: string;
-  templateType:
-    | 'definition_to_term'
-    | 'term_to_definition'
-    | 'structure_to_function'
-    | 'function_to_structure'
-    | 'classification'
-    | 'cause_effect'
-    | 'process_sequence'
-    | 'distinction'
-    | 'formula_expression'
-    | 'formula_variable'
-    | 'quantitative_fact'
-    | 'targeted_cloze';
+  templateType: TemplateType;
   cognitiveLevel: CognitiveLevel;
   sectionKey: string;
   sectionHeading: string | null;
@@ -136,6 +140,12 @@ function isOptionCompatible(
   if (optLower === ansLower) return false;
   if (optLower.includes(ansLower) || ansLower.includes(optLower)) return false;
 
+  // Maintain reasonable length/form parity so short single terms aren't paired with long clauses
+  const ansWords = ansLower.split(/\s+/).filter(Boolean).length;
+  const optWords = optLower.split(/\s+/).filter(Boolean).length;
+  if (ansWords <= 3 && optWords > 9) return false;
+  if (ansWords >= 7 && optWords <= 1) return false;
+
   for (const prev of existingOptions) {
     const prevLower = prev.toLowerCase();
     if (prevLower === optLower) return false;
@@ -154,7 +164,7 @@ function isOptionCompatible(
   const ansTokens = contentTokens(correctAnswer);
   if (optTokens.size > 0 && ansTokens.size > 0) {
     const { jaccard, containment } = tokenSimilarity(optTokens, ansTokens);
-    if (jaccard >= 0.65 || containment >= 0.85) return false;
+    if (jaccard >= 0.62 || containment >= 0.82) return false;
   }
 
   return true;
@@ -164,7 +174,8 @@ function pickDistractorsFromPools(
   correctAnswer: string,
   pools: string[][],
   count = 3,
-  forbiddenEntity = ''
+  forbiddenEntity = '',
+  excludedTokens?: Set<string>
 ): string[] {
   const chosen: string[] = [];
 
@@ -172,6 +183,7 @@ function pickDistractorsFromPools(
     for (const raw of pool) {
       if (chosen.length >= count) break;
       const cleaned = cleanSnippet(raw, 155);
+      if (excludedTokens && excludedTokens.has(cleaned.toLowerCase())) continue;
       if (isOptionCompatible(cleaned, correctAnswer, chosen, forbiddenEntity)) {
         chosen.push(cleaned);
       }
@@ -185,12 +197,10 @@ function pickDistractorsFromPools(
 function generateEquationDistractors(expr: string, allFormulas: string[]): string[] {
   const candidates: string[] = [];
 
-  // Other formulas from same document first
   for (const other of allFormulas) {
     if (other !== expr) candidates.push(other);
   }
 
-  // Deterministic algebraic / stoichiometric perturbations of the formula itself
   if (expr.includes(' + ')) {
     candidates.push(expr.replace(' + ', ' - '));
   }
@@ -253,7 +263,6 @@ function generateQuantityDistractors(qty: string, otherQuantities: string[]): st
   const sameUnitMatch = qty.match(/^(\d+(?:\.\d+)?)\s*(.*)$/);
   const targetUnit = sameUnitMatch ? sameUnitMatch[2].trim().toLowerCase() : '';
 
-  // Prefer other quantities from the document that share compatible units
   for (const o of otherQuantities) {
     if (o.toLowerCase() === qty.toLowerCase()) continue;
     if (!targetUnit || o.toLowerCase().endsWith(targetUnit)) {
@@ -289,6 +298,12 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
   const candidates: QuizCandidate[] = [];
   const subjectPeers = getSubjectPeerTerms(profile.subjectArea);
 
+  const frequentDocNouns = Array.from(profile.globalTermFreq.entries())
+    .filter(([w]) => w.length >= 5 && /^[a-z][a-z-]+$/.test(w))
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 40)
+    .map(([w]) => ucFirst(w));
+
   const allEntityNames = Array.from(
     new Set([
       ...profile.definitions.map((d) => d.term),
@@ -296,6 +311,7 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
       ...profile.classifications.flatMap((c) => c.members),
       ...profile.keyTerminology,
       ...profile.keyPhrases,
+      ...frequentDocNouns,
     ])
   ).filter((t) => t.length >= 3 && t.length <= 50);
 
@@ -306,6 +322,10 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
       ...profile.causeEffects.map((ce) => ucFirst(cleanSnippet(ce.effect, 145))),
     ])
   ).filter((d) => d.length >= 16);
+
+  const allCauses = Array.from(
+    new Set(profile.causeEffects.map((ce) => ucFirst(cleanSnippet(ce.cause, 145))))
+  ).filter((c) => c.length >= 10);
 
   const allStepActions = profile.processes.flatMap((p) =>
     p.steps.map((s) => ucFirst(cleanSnippet(s.rawText, 145)))
@@ -327,6 +347,7 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
         profile.keyTerminology,
         profile.keyPhrases,
         subjectPeers,
+        frequentDocNouns,
       ],
       3,
       def.term
@@ -417,6 +438,7 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
         profile.structureFunctions.map((other) => other.entity),
         allEntityNames,
         subjectPeers,
+        frequentDocNouns,
       ],
       3,
       sf.entity
@@ -509,7 +531,6 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
       proc.sectionHeading ||
       (proc.steps[0]?.pageNumber !== null ? `Page ${proc.steps[0]?.pageNumber}` : proc.heading);
 
-    // Initial step question
     const firstStep = ucFirst(cleanSnippet(proc.steps[0].rawText, 145));
     const stepDistractors = pickDistractorsFromPools(
       firstStep,
@@ -537,7 +558,6 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
       });
     }
 
-    // Subsequent transitions
     for (let i = 0; i < proc.steps.length - 1; i++) {
       const prevStep = cleanSnippet(proc.steps[i].rawText, 120);
       const nextStep = ucFirst(cleanSnippet(proc.steps[i + 1].rawText, 145));
@@ -577,7 +597,6 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
       dist.sectionHeading ||
       (dist.pageNumber !== null ? `Page ${dist.pageNumber}` : 'Comparisons');
 
-    // Pattern: "Unlike B, A <predicate>"
     const unlikeMatch = dist.rawComparison.match(
       /^Unlike\s+([^,]{3,42}),\s+(?:the\s+)?([A-Za-z0-9\s'-]{2,40}?)\s+((?:is|are|has|have|uses|occurs|produces|transfers|takes|requires|does)\s+[^.]{10,130})/i
     );
@@ -633,7 +652,7 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
     }
   }
 
-  // 6. Cause & Effect Relationships
+  // 6. Cause <-> Effect Relationships (Bidirectional: Cause->Effect and Effect->Cause)
   for (const ce of profile.causeEffects) {
     const cleanCause = cleanSnippet(ce.cause, 120);
     const cleanEffect = ucFirst(cleanSnippet(ce.effect, 145));
@@ -667,17 +686,42 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
         salience: ce.salience * 1.18,
       });
     }
+
+    // Reverse: Effect -> Cause
+    const ucCause = ucFirst(cleanCause);
+    const ecDistractors = pickDistractorsFromPools(
+      ucCause,
+      [allCauses, allEntityNames, allDescriptions],
+      3,
+      cleanEffect
+    );
+    if (ecDistractors.length === 3) {
+      candidates.push({
+        idKey: `ec:${normalizedFingerprint(cleanEffect).slice(0, 40)}`,
+        templateType: 'effect_to_cause',
+        cognitiveLevel: 'application',
+        sectionKey,
+        sectionHeading: ce.sectionHeading,
+        pageNumber: ce.pageNumber,
+        question: `According to the study material, which factor or condition ${lcFirstPreserveAcronyms(cleanEffect)}?`,
+        correctAnswer: ucCause,
+        distractors: ecDistractors,
+        evidenceText: ce.relationshipText,
+        factTokens: contentTokens(ce.relationshipText),
+        salience: ce.salience * 1.14,
+      });
+    }
   }
 
-  // 7. Classifications & Groupings
+  // 7. Classifications & Groupings (+ Exception questions when >= 3 members)
   for (const cls of profile.classifications) {
     if (cls.members.length < 2) continue;
     const sectionKey =
       cls.sectionHeading || (cls.pageNumber !== null ? `Page ${cls.pageNumber}` : 'Classifications');
     const correctMember = cls.members[0];
-    const nonMembers = allEntityNames.filter(
-      (e) => !cls.members.some((m) => m.toLowerCase() === e.toLowerCase())
-    );
+    const memberSet = new Set(cls.members.map((m) => m.toLowerCase()));
+    const nonMembers = allEntityNames.filter((e) => !memberSet.has(e.toLowerCase()));
+
     const clsDistractors = pickDistractorsFromPools(
       correctMember,
       [nonMembers, subjectPeers],
@@ -699,14 +743,39 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
         salience: cls.salience * 1.15,
       });
     }
+
+    // Exception MCQ: 3 true members + 1 verified non-member from the document/peers
+    if (cls.members.length >= 3 && nonMembers.length > 0) {
+      const exceptionAnswer = nonMembers.find(
+        (cand) =>
+          isOptionCompatible(cand, cls.members[0], cls.members.slice(0, 3), cls.category)
+      );
+      if (exceptionAnswer) {
+        candidates.push({
+          idKey: `cls-exc:${cls.category.toLowerCase()}:${exceptionAnswer.toLowerCase()}`,
+          templateType: 'classification_exception',
+          cognitiveLevel: 'conceptual',
+          sectionKey,
+          sectionHeading: cls.sectionHeading,
+          pageNumber: cls.pageNumber,
+          question: `Which of the following is NOT listed as a type or example of ${cls.category} in the material?`,
+          correctAnswer: exceptionAnswer,
+          distractors: cls.members.slice(0, 3),
+          evidenceText: cls.statement,
+          factTokens: contentTokens(cls.statement),
+          salience: cls.salience * 1.16,
+        });
+      }
+    }
   }
 
-  // 8. Quantitative & Targeted Concept Cloze (clean grammatical fill-in-the-key-term without raw 80-char truncation)
+  // 8. Quantitative & Targeted Concept Cloze (ranked by TextRank salience)
   const allDocQuantities = Array.from(
     new Set(profile.units.flatMap((u) => u.quantitiesUnits))
   );
 
-  for (const unit of profile.units) {
+  const rankedUnits = [...profile.units].sort((a, b) => b.score - a.score);
+  for (const unit of rankedUnits) {
     const cleanSent = cleanSnippet(stripBoilerplatePrefix(unit.formattedText), 185);
     if (cleanSent.length < 32) continue;
     const sectionKey =
@@ -738,7 +807,7 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
       }
     }
 
-    // 8B: Targeted concept cloze (pick a salient multi-word phrase or terminology item present in this sentence)
+    // 8B: Targeted concept cloze
     if (/[=→⇌]/.test(cleanSent)) continue;
     const termPool = [...profile.keyPhrases, ...profile.keyTerminology];
     let targetTerm: string | null = null;
@@ -748,7 +817,6 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
       const match = cleanSent.match(new RegExp(`\\b(${escaped})\\b`, 'i'));
       if (match) {
         const exactInSentence = match[1];
-        // Make sure the rest of the sentence doesn't still contain the exact target term after replacing once
         const replaced = cleanSent.replace(exactInSentence, '_______');
         if (!new RegExp(`\\b${escaped}\\b`, 'i').test(replaced)) {
           targetTerm = exactInSentence;
@@ -758,7 +826,6 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
     }
 
     if (!targetTerm) {
-      // Fall back to highest-salience non-stopword domain noun in the sentence (>= 6 chars)
       const sentenceWords = cleanSent.match(/\b[A-Za-z][a-zA-Z-]{5,28}\b/g) || [];
       let bestWord: string | null = null;
       let bestTf = -1;
@@ -787,9 +854,10 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
         targetTerm === targetTerm.toLowerCase() ? ucFirst(targetTerm) : targetTerm;
       const clozeDistractors = pickDistractorsFromPools(
         formattedTarget,
-        [allEntityNames, subjectPeers],
+        [allEntityNames, subjectPeers, frequentDocNouns],
         3,
-        formattedTarget
+        formattedTarget,
+        unit.tokens
       );
 
       if (clozeDistractors.length === 3) {
@@ -805,7 +873,7 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
           distractors: clozeDistractors,
           evidenceText: unit.formattedText,
           factTokens: unit.tokens,
-          salience: unit.score * 0.9,
+          salience: unit.score * 0.92,
         });
       }
     }

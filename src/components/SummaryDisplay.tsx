@@ -661,7 +661,7 @@ export function SummaryDisplay({
           </section>
         )}
 
-        {finalRecap.length === 0 && summary.revisionNotes.length > 0 && (
+        {summary.revisionNotes.length > 0 && (
           <section>
             {renderSectionHeader('revision', 'Revision Notes', summary.revisionNotes.length)}
             {expandedSections.revision && (
@@ -684,7 +684,7 @@ export function SummaryDisplay({
           </section>
         )}
 
-        {finalRecap.length === 0 && summary.keyTakeaways.length > 0 && (
+        {summary.keyTakeaways.length > 0 && (
           <section>
             {renderSectionHeader('takeaways', 'Key Takeaways', summary.keyTakeaways.length)}
             {expandedSections.takeaways && (

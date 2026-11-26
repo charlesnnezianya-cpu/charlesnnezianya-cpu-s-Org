@@ -227,6 +227,7 @@ export interface QuizQuestion {
 
 export interface GeneratedQuizPayload {
   sessionId?: string;
+  sessionToken?: string | null;
   quizId?: string | null;
   title: string;
   subjectArea: string;
@@ -242,6 +243,7 @@ export interface GeneratedQuizPayload {
 
 export interface StartQuizSessionResponse {
   sessionId: string;
+  sessionToken?: string | null;
   quizId: string | null;
   title: string;
   subjectArea: string;
@@ -278,6 +280,7 @@ export type RestoredQuizSessionResponse =
   | {
       status: 'active';
       sessionId: string;
+      sessionToken?: string | null;
       quizId: string | null;
       title: string;
       subjectArea: string;
@@ -318,6 +321,7 @@ export interface QuizAnswerCheckResponse {
   explanation: string;
   topicTag?: string;
   options: string[];
+  sessionToken?: string | null;
 }
 
 export interface StudentAnswer {

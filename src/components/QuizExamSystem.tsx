@@ -192,6 +192,7 @@ export function QuizExamSystem({
   const generatingRef = useRef(false);
   const gradingRef = useRef(false);
   const syncTimeoutRef = useRef<number | null>(null);
+  const sessionTokenRef = useRef<string | null>(null);
 
   const [deleteTarget, setDeleteTarget] = useState<
     | { kind: 'quiz'; item: QuizRecord }
@@ -200,9 +201,10 @@ export function QuizExamSystem({
   >(null);
   const [deletingRecord, setDeletingRecord] = useState(false);
 
-  // Active exam / quiz state (server-managed sessionId; zero answer keys stored client-side)
+  // Active exam / quiz state (server-managed sessionId + sealed sessionToken; zero answer keys stored client-side)
   const [activeQuiz, setActiveQuiz] = useState<{
     sessionId: string | null;
+    sessionToken?: string | null;
     quizId: string | null;
     title: string;
     subjectArea: string;
@@ -385,7 +387,7 @@ export function QuizExamSystem({
       if (!sessionId) return;
       try {
         const accessToken = await getOptionalAccessToken();
-        await fetch(
+        const res = await fetch(
           resolveApiUrl(`/api/quizzes/sessions/${encodeURIComponent(sessionId)}/progress`),
           {
             method: 'PATCH',
@@ -394,11 +396,18 @@ export function QuizExamSystem({
               ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
             },
             body: JSON.stringify({
+              sessionToken: sessionTokenRef.current,
               currentQuestionIndex: nextIdx,
               answers: nextAnswers,
             }),
           }
         );
+        if (res.ok) {
+          const saved = (await res.json()) as { sessionToken?: string | null };
+          if (saved.sessionToken) {
+            sessionTokenRef.current = saved.sessionToken;
+          }
+        }
       } catch {
         // Best-effort autosave; active session check or submission remains authoritative
       }
@@ -822,6 +831,16 @@ export function QuizExamSystem({
             : 'text'
           : sourceMode;
 
+      const rawText = resolvedSource.text;
+      const boundedSourceText =
+        rawText.length <= 750_000
+          ? rawText
+          : [
+              rawText.slice(0, 260_000),
+              rawText.slice(Math.floor(rawText.length * 0.4), Math.floor(rawText.length * 0.4) + 240_000),
+              rawText.slice(rawText.length - 250_000),
+            ].join('\n\n');
+
       const res = await fetch(resolveApiUrl('/api/quizzes/generate'), {
         method: 'POST',
         headers: {
@@ -831,7 +850,7 @@ export function QuizExamSystem({
         signal: controller.signal,
         body: JSON.stringify({
           sourceMode: persistedSourceMode,
-          sourceText: resolvedSource.text,
+          sourceText: boundedSourceText,
           topicTitle: resolvedSource.title,
           format: 'objective',
           difficulty,
@@ -857,8 +876,10 @@ export function QuizExamSystem({
         }
       }
 
+      sessionTokenRef.current = generated.sessionToken ?? null;
       prepareExamInstructions({
         sessionId: generated.sessionId || null,
+        sessionToken: generated.sessionToken ?? null,
         quizId: generated.quizId ?? null,
         title: generated.title,
         subjectArea: generated.subjectArea,
@@ -887,6 +908,7 @@ export function QuizExamSystem({
 
   const prepareExamInstructions = (quiz: {
     sessionId: string | null;
+    sessionToken?: string | null;
     quizId: string | null;
     title: string;
     subjectArea: string;
@@ -898,6 +920,7 @@ export function QuizExamSystem({
     insufficientSourceNote?: string | null;
     questions: QuizQuestion[];
   }) => {
+    sessionTokenRef.current = quiz.sessionToken ?? null;
     setActiveQuiz(quiz);
     setCurrentIdx(0);
     setAnswersMap({});
@@ -915,6 +938,7 @@ export function QuizExamSystem({
   const startExamSession = async (
     quiz: {
       sessionId: string | null;
+      sessionToken?: string | null;
       quizId: string | null;
       title: string;
       subjectArea: string;
@@ -944,6 +968,7 @@ export function QuizExamSystem({
         },
         body: JSON.stringify({
           sessionId: quiz.sessionId,
+          sessionToken: quiz.sessionToken ?? sessionTokenRef.current,
           quizId: quiz.quizId,
           assessmentMode: quiz.assessmentMode,
           timeLimitMinutes: quiz.timeLimitMinutes,
@@ -960,8 +985,10 @@ export function QuizExamSystem({
       const effectiveNow = Date.now() + offset;
       setServerClockOffsetMs(offset);
       setNowMs(effectiveNow);
+      sessionTokenRef.current = started.sessionToken ?? quiz.sessionToken ?? null;
       setActiveQuiz({
         sessionId: started.sessionId,
+        sessionToken: started.sessionToken ?? quiz.sessionToken ?? null,
         quizId: started.quizId,
         title: started.title,
         subjectArea: started.subjectArea,
@@ -1013,7 +1040,10 @@ export function QuizExamSystem({
           'Content-Type': 'application/json',
           ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
         },
-        body: JSON.stringify({ sessionId }),
+        body: JSON.stringify({
+          sessionId,
+          sessionToken: sessionTokenRef.current,
+        }),
       });
       const restored = await parseApiJsonResponse<RestoredQuizSessionResponse>(
         res,
@@ -1071,8 +1101,10 @@ export function QuizExamSystem({
       const effectiveNow = Date.now() + offset;
       setServerClockOffsetMs(offset);
       setNowMs(effectiveNow);
+      sessionTokenRef.current = restored.sessionToken ?? null;
       setActiveQuiz({
         sessionId: restored.sessionId,
+        sessionToken: restored.sessionToken ?? null,
         quizId: restored.quizId,
         title: restored.title,
         subjectArea: restored.subjectArea,
@@ -1135,6 +1167,7 @@ export function QuizExamSystem({
         },
         body: JSON.stringify({
           sessionId: activeQuiz.sessionId,
+          sessionToken: activeQuiz.sessionToken ?? sessionTokenRef.current,
           questionId: question.id,
           selectedOptionIndex: selectedIdx,
         }),
@@ -1143,6 +1176,10 @@ export function QuizExamSystem({
         res,
         'checking your answer'
       );
+      if (checked.sessionToken) {
+        sessionTokenRef.current = checked.sessionToken;
+        setActiveQuiz((prev) => (prev ? { ...prev, sessionToken: checked.sessionToken } : prev));
+      }
       setPracticeFeedbackMap((prev) => ({
         ...prev,
         [question.id]: checked,
@@ -1201,6 +1238,7 @@ export function QuizExamSystem({
         signal: controller.signal,
         body: JSON.stringify({
           sessionId: activeQuiz.sessionId,
+          sessionToken: activeQuiz.sessionToken ?? sessionTokenRef.current,
           answers: answersArray,
           timeTakenSeconds: elapsedSeconds,
           autoSubmitted: autoTriggered,
@@ -1214,7 +1252,10 @@ export function QuizExamSystem({
             'Content-Type': 'application/json',
             ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
           },
-          body: JSON.stringify({ sessionId: activeQuiz.sessionId }),
+          body: JSON.stringify({
+            sessionId: activeQuiz.sessionId,
+            sessionToken: activeQuiz.sessionToken ?? sessionTokenRef.current,
+          }),
         });
         if (restoreRes.ok) {
           const restored = (await restoreRes.json()) as RestoredQuizSessionResponse;

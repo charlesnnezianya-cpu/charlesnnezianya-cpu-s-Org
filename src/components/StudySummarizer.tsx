@@ -438,58 +438,89 @@ export function StudySummarizer({
           }
         }
 
-        setExtractionStatus(typeLabel);
-        setUploadState('extracting');
-        try {
-          result = await uploadDirectWithXhrAndFallback(uploadFile);
-        } catch (directErr) {
-          // If direct upload failed and file is large, fall back to Supabase storage staging if signed in
-          if (uploadFile.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES && user && isConfigured) {
-            let preUploadedStoragePath: string | null = stagedStoragePathRef.current;
-            if (!preUploadedStoragePath) {
-              setExtractionStatus('Uploading large file for processing...');
-              setUploadProgress(15);
-              preUploadedStoragePath = await uploadMaterialFileToStorage(user.id, uploadFile, {
-                preBuffered: uploadBuffer,
-                onProgress: (pct) => {
-                  setUploadProgress(15 + Math.round(pct * 0.45));
-                },
-              });
-              stagedStoragePathRef.current = preUploadedStoragePath;
-            }
+        const isLocalOrigin =
+          window.location.hostname === 'localhost' ||
+          window.location.hostname === '127.0.0.1' ||
+          window.location.hostname === '[::1]';
 
-            setUploadProgress(62);
-            setUploadState('extracting');
-            const signedStorageUrl = await getMaterialSignedUrl(preUploadedStoragePath);
+        const runStorageStagingExtraction = async (): Promise<ExtractionResult> => {
+          if (!preUploadedStoragePath) {
+            setExtractionStatus('Uploading large file for processing...');
+            setUploadProgress(15);
+            preUploadedStoragePath = await uploadMaterialFileToStorage(user!.id, uploadFile, {
+              preBuffered: uploadBuffer,
+              onProgress: (pct) => {
+                setUploadProgress(15 + Math.round(pct * 0.45));
+              },
+            });
+            stagedStoragePathRef.current = preUploadedStoragePath;
+          }
+
+          setUploadProgress(62);
+          setUploadState('extracting');
+          const signedStorageUrl = await getMaterialSignedUrl(preUploadedStoragePath);
+          setExtractionStatus(typeLabel);
+          setUploadProgress(70);
+
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 120000);
+          try {
+            const extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              cache: 'no-store',
+              signal: extractControllerSignal(controller),
+              body: JSON.stringify({
+                signedStorageUrl,
+                fileName: uploadFile.name,
+                mimeType: uploadFile.type,
+                fileSizeBytes: uploadFile.size,
+                ...(editableTitle.trim() ? { title: editableTitle.trim() } : {}),
+              }),
+            });
+            setUploadProgress(95);
+            return await parseApiJsonResponse<ExtractionResult>(
+              extractRes,
+              'extracting study content from your file'
+            );
+          } finally {
+            clearTimeout(timer);
+          }
+        };
+
+        const extractControllerSignal = (c: AbortController) => c.signal;
+
+        const shouldStageLargeHostedUpload =
+          !isLocalOrigin && uploadFile.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES;
+
+        if (shouldStageLargeHostedUpload) {
+          if (!user || !isConfigured) {
+            throw new Error(
+              `Files larger than 3.8 MB require signing in with your Brainstine account (file is ${(uploadFile.size / (1024 * 1024)).toFixed(1)} MB). Please sign in or choose a smaller file.`
+            );
+          }
+          try {
+            result = await runStorageStagingExtraction();
+          } catch (stagingErr) {
             setExtractionStatus(typeLabel);
-            setUploadProgress(70);
-
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 120000);
+            setUploadState('extracting');
             try {
-              const extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                cache: 'no-store',
-                signal: controller.signal,
-                body: JSON.stringify({
-                  signedStorageUrl,
-                  fileName: uploadFile.name,
-                  mimeType: uploadFile.type,
-                  fileSizeBytes: uploadFile.size,
-                  ...(editableTitle.trim() ? { title: editableTitle.trim() } : {}),
-                }),
-              });
-              setUploadProgress(95);
-              result = await parseApiJsonResponse<ExtractionResult>(
-                extractRes,
-                'extracting study content from your file'
-              );
-            } finally {
-              clearTimeout(timer);
+              result = await uploadDirectWithXhrAndFallback(uploadFile);
+            } catch {
+              throw stagingErr;
             }
-          } else {
-            throw directErr;
+          }
+        } else {
+          setExtractionStatus(typeLabel);
+          setUploadState('extracting');
+          try {
+            result = await uploadDirectWithXhrAndFallback(uploadFile);
+          } catch (directErr) {
+            if (uploadFile.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES && user && isConfigured) {
+              result = await runStorageStagingExtraction();
+            } else {
+              throw directErr;
+            }
           }
         }
       } else {
@@ -602,12 +633,24 @@ export function StudySummarizer({
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 60000);
     try {
+      const boundedText =
+        sourceText.length <= 750_000
+          ? sourceText
+          : [
+              sourceText.slice(0, 260_000),
+              sourceText.slice(
+                Math.floor(sourceText.length * 0.4),
+                Math.floor(sourceText.length * 0.4) + 240_000
+              ),
+              sourceText.slice(sourceText.length - 250_000),
+            ].join('\n\n');
+
       const res = await fetch(resolveApiUrl('/api/summaries/extractive'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
         body: JSON.stringify({
-          extractedText: sourceText,
+          extractedText: boundedText,
           title: editableTitle.trim() || extraction?.title || 'Document Summary',
           materialType: extraction?.materialType || 'text',
           summaryLevel,

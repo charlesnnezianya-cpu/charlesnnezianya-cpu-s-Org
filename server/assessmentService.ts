@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import zlib from 'zlib';
 import { logServerError } from './errorHandler.ts';
 import type {
   ActiveAssessmentSummary,
@@ -58,6 +59,7 @@ export interface ServerAssessmentSession {
   submitting: boolean;
   answeredPractice: Map<string, QuizAnswerCheckResponse>;
   createdAtMs: number;
+  persistedInSupabase: boolean;
 }
 
 export class AssessmentHttpError extends Error {
@@ -204,6 +206,168 @@ export function unsealAnswerKeyPayload(
       return null;
     }
     return parsed.keys;
+  } catch {
+    return null;
+  }
+}
+
+type CompactQuestionTuple = [
+  string, // id
+  number, // number
+  string, // question
+  string[], // options
+  number, // correctOptionIndex
+  string, // explanation
+  string | undefined, // topicTag
+  number, // maxMarks
+];
+
+interface SealedSessionPayloadV1 {
+  v: 1;
+  sid: string;
+  qid: string | null;
+  uid: string;
+  ttl: string;
+  sub: string;
+  fmt: QuizFormat;
+  dif: QuizDifficulty;
+  mod: QuizAssessmentMode;
+  tlm: number | null;
+  st: 'ready' | 'active' | 'submitting' | 'submitted';
+  idx: number;
+  sa: number | null;
+  dl: number | null;
+  ans: Record<string, StudentAnswer>;
+  lck: Record<string, PracticeQuestionLockEntry>;
+  pis: boolean;
+  qs: CompactQuestionTuple[];
+}
+
+export function sealAssessmentSessionToken(session: ServerAssessmentSession): string {
+  const payload: SealedSessionPayloadV1 = {
+    v: 1,
+    sid: session.sessionId,
+    qid: session.quizId,
+    uid: session.userId,
+    ttl: session.title,
+    sub: session.subjectArea,
+    fmt: session.format,
+    dif: session.difficulty,
+    mod: session.assessmentMode,
+    tlm: session.timeLimitMinutes,
+    st: session.status,
+    idx: session.currentQuestionIndex,
+    sa: session.startedAtMs,
+    dl: session.deadlineAtMs,
+    ans: session.answers,
+    lck: session.questionLocks,
+    pis: session.persistedInSupabase,
+    qs: session.questions.map((q) => [
+      q.id,
+      q.number,
+      q.question,
+      q.options,
+      q.correctOptionIndex,
+      q.explanation,
+      q.topicTag,
+      q.maxMarks,
+    ]),
+  };
+
+  const compressed = zlib.deflateRawSync(Buffer.from(JSON.stringify(payload), 'utf8'));
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', getAssessmentSealKey(), iv);
+  const ciphertext = Buffer.concat([cipher.update(compressed), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `st1.${iv.toString('base64url')}.${tag.toString('base64url')}.${ciphertext.toString('base64url')}`;
+}
+
+export function unsealAssessmentSessionToken(
+  token: string,
+  expectedUserId: string,
+  expectedSessionId?: string
+): ServerAssessmentSession | null {
+  try {
+    if (!token || typeof token !== 'string') return null;
+    const parts = token.split('.');
+    if (parts.length !== 4 || parts[0] !== 'st1') return null;
+
+    const iv = Buffer.from(parts[1], 'base64url');
+    const tag = Buffer.from(parts[2], 'base64url');
+    const ciphertext = Buffer.from(parts[3], 'base64url');
+
+    const decipher = crypto.createDecipheriv('aes-256-gcm', getAssessmentSealKey(), iv);
+    decipher.setAuthTag(tag);
+    const compressed = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    const jsonStr = zlib.inflateRawSync(compressed).toString('utf8');
+    const parsed = JSON.parse(jsonStr) as SealedSessionPayloadV1;
+
+    if (!parsed || parsed.v !== 1 || parsed.uid !== expectedUserId || !Array.isArray(parsed.qs)) {
+      return null;
+    }
+    if (expectedSessionId && parsed.sid !== expectedSessionId) {
+      return null;
+    }
+
+    const questions: ServerQuestionAnswerKey[] = parsed.qs.map((tuple, i) => {
+      const options = Array.isArray(tuple[3]) ? tuple[3] : ['Option A', 'Option B', 'Option C', 'Option D'];
+      const correctIdx = Number.isInteger(tuple[4]) && tuple[4] >= 0 && tuple[4] < options.length ? tuple[4] : 0;
+      return {
+        id: String(tuple[0] || `q-${i + 1}`),
+        number: Number(tuple[1]) || i + 1,
+        type: 'objective',
+        question: String(tuple[2] || ''),
+        options,
+        correctOptionIndex: correctIdx,
+        expectedAnswer: String(options[correctIdx] || ''),
+        explanation: String(tuple[5] || 'Grounded in the provided study material.'),
+        ...(tuple[6] ? { topicTag: String(tuple[6]) } : {}),
+        maxMarks: Number(tuple[7]) || 1,
+      };
+    });
+
+    const answers: Record<string, StudentAnswer> = parsed.ans && typeof parsed.ans === 'object' ? { ...parsed.ans } : {};
+    const questionLocks: Record<string, PracticeQuestionLockEntry> =
+      parsed.lck && typeof parsed.lck === 'object' ? { ...parsed.lck } : {};
+    const questionStatus = computeQuestionStatusMap(questions, answers);
+
+    const answeredPractice = new Map<string, QuizAnswerCheckResponse>();
+    for (const [qId, lock] of Object.entries(questionLocks)) {
+      const q = questions.find((item) => item.id === qId);
+      if (q && lock && Number.isInteger(lock.selectedOptionIndex)) {
+        answeredPractice.set(qId, buildPracticeCheckResult(q, lock.selectedOptionIndex));
+        answers[qId] = { questionId: qId, selectedOptionIndex: lock.selectedOptionIndex };
+        questionStatus[qId] = 'answered';
+      }
+    }
+
+    const now = Date.now();
+    return {
+      sessionId: parsed.sid,
+      quizId: parsed.qid ?? null,
+      userId: parsed.uid,
+      title: parsed.ttl || 'Document Assessment',
+      subjectArea: parsed.sub || 'General Studies',
+      format: parsed.fmt || 'objective',
+      difficulty: parsed.dif || 'intermediate',
+      assessmentMode: parsed.mod === 'exam' ? 'exam' : 'practice',
+      timeLimitMinutes: parsed.tlm ?? null,
+      questions,
+      sealedAnswerKey: sealAnswerKeyPayload(questions, parsed.uid),
+      status: parsed.st || 'ready',
+      currentQuestionIndex: Math.min(Math.max(0, parsed.idx || 0), Math.max(0, questions.length - 1)),
+      answers,
+      questionStatus,
+      questionLocks,
+      startedAtMs: parsed.sa ?? null,
+      deadlineAtMs: parsed.dl ?? null,
+      submittedAtMs: null,
+      lastSavedAtMs: now,
+      submitting: false,
+      answeredPractice,
+      createdAtMs: now,
+      persistedInSupabase: Boolean(parsed.pis),
+    };
   } catch {
     return null;
   }
@@ -453,6 +617,7 @@ function hydrateSessionFromRow(
     submitting: row.status === 'submitting',
     answeredPractice,
     createdAtMs: Number.isFinite(createdAtMs) ? createdAtMs : Date.now(),
+    persistedInSupabase: true,
   };
 }
 
@@ -583,7 +748,8 @@ async function patchSessionInSupabase(
 async function resolveHydratedSession(
   userId: string,
   accessToken: string | null,
-  sessionId: string
+  sessionId: string,
+  sessionToken?: string | null
 ): Promise<ServerAssessmentSession> {
   const cached = assessmentSessions.get(sessionId);
   if (cached) {
@@ -594,18 +760,32 @@ async function resolveHydratedSession(
   }
 
   const cfg = getSupabaseAssessmentConfig();
-  if (!cfg || !accessToken) {
-    throw new AssessmentHttpError(404, 'Assessment session not found or has expired.');
+  if (cfg && accessToken) {
+    try {
+      const row = await fetchSessionFromSupabase(accessToken, userId, sessionId);
+      if (row) {
+        const hydrated = hydrateSessionFromRow(row, userId);
+        storeBoundedSession(hydrated);
+        return hydrated;
+      }
+    } catch (dbErr) {
+      // If sessionToken is present, fall back cleanly instead of blocking on missing DB table
+      if (!sessionToken) {
+        if (dbErr instanceof AssessmentHttpError) throw dbErr;
+        throw new AssessmentHttpError(404, 'Assessment session not found or has expired.');
+      }
+    }
   }
 
-  const row = await fetchSessionFromSupabase(accessToken, userId, sessionId);
-  if (!row) {
-    throw new AssessmentHttpError(404, 'Assessment session not found or access denied.');
+  if (sessionToken) {
+    const unsealed = unsealAssessmentSessionToken(sessionToken, userId, sessionId);
+    if (unsealed) {
+      storeBoundedSession(unsealed);
+      return unsealed;
+    }
   }
 
-  const hydrated = hydrateSessionFromRow(row, userId);
-  storeBoundedSession(hydrated);
-  return hydrated;
+  throw new AssessmentHttpError(404, 'Assessment session not found or has expired.');
 }
 
 async function persistQuizToSupabase(params: {
@@ -814,6 +994,7 @@ export async function createServerAssessmentSession(params: {
   const cfg = getSupabaseAssessmentConfig();
   let persistedQuizId: string | null = null;
   let sessionId: string = crypto.randomUUID();
+  let persistedInSupabase = false;
 
   if (cfg && params.accessToken) {
     try {
@@ -857,6 +1038,7 @@ export async function createServerAssessmentSession(params: {
         deadlineAtMs: null,
         questionStatus: initialQuestionStatus,
       });
+      persistedInSupabase = true;
     } catch (dbErr) {
       logServerError('assessment.supabase_create_session_fallback', dbErr);
     }
@@ -887,6 +1069,7 @@ export async function createServerAssessmentSession(params: {
     submitting: false,
     answeredPractice: new Map(),
     createdAtMs: now,
+    persistedInSupabase,
   };
 
   storeBoundedSession(session);
@@ -897,6 +1080,7 @@ export async function startServerAssessmentSession(params: {
   userId: string;
   accessToken: string | null;
   sessionId?: string | null;
+  sessionToken?: string | null;
   quizId?: string | null;
   assessmentMode?: QuizAssessmentMode;
   timeLimitMinutes?: number | null;
@@ -907,7 +1091,12 @@ export async function startServerAssessmentSession(params: {
     let baseSession: ServerAssessmentSession | undefined;
 
     if (params.sessionId) {
-      baseSession = await resolveHydratedSession(params.userId, params.accessToken, params.sessionId);
+      baseSession = await resolveHydratedSession(
+        params.userId,
+        params.accessToken,
+        params.sessionId,
+        params.sessionToken
+      );
     }
 
     if (baseSession && baseSession.status === 'submitted' && !params.retake && !params.quizId) {
@@ -987,23 +1176,30 @@ export async function startServerAssessmentSession(params: {
           mode === 'exam' && effectiveTimeLimit ? now + effectiveTimeLimit * 60_000 : null;
         const qStatus = computeQuestionStatusMap(mergedQuestions, {});
 
-        const newSessionId = await persistNewSessionToSupabase({
-          accessToken: params.accessToken,
-          userId: params.userId,
-          quizId: row.id,
-          assessmentMode: mode,
-          title: row.title,
-          subjectArea: row.subject_area || 'General Studies',
-          format: 'objective',
-          difficulty: row.difficulty || 'intermediate',
-          timeLimitMinutes: effectiveTimeLimit,
-          sanitizedQuestions: stripAnswerKeysFromQuestions(mergedQuestions),
-          sealedAnswerKey: sealed,
-          status: 'active',
-          startedAtMs: now,
-          deadlineAtMs,
-          questionStatus: qStatus,
-        });
+        let newSessionId: string = crypto.randomUUID();
+        let freshPersisted = false;
+        try {
+          newSessionId = await persistNewSessionToSupabase({
+            accessToken: params.accessToken,
+            userId: params.userId,
+            quizId: row.id,
+            assessmentMode: mode,
+            title: row.title,
+            subjectArea: row.subject_area || 'General Studies',
+            format: 'objective',
+            difficulty: row.difficulty || 'intermediate',
+            timeLimitMinutes: effectiveTimeLimit,
+            sanitizedQuestions: stripAnswerKeysFromQuestions(mergedQuestions),
+            sealedAnswerKey: sealed,
+            status: 'active',
+            startedAtMs: now,
+            deadlineAtMs,
+            questionStatus: qStatus,
+          });
+          freshPersisted = true;
+        } catch (dbErr) {
+          logServerError('assessment.supabase_start_saved_quiz_fallback', dbErr);
+        }
 
         const freshSession: ServerAssessmentSession = {
           sessionId: newSessionId,
@@ -1029,11 +1225,13 @@ export async function startServerAssessmentSession(params: {
           submitting: false,
           answeredPractice: new Map(),
           createdAtMs: now,
+          persistedInSupabase: freshPersisted,
         };
         storeBoundedSession(freshSession);
 
         return {
           sessionId: freshSession.sessionId,
+          sessionToken: sealAssessmentSessionToken(freshSession),
           quizId: freshSession.quizId,
           title: freshSession.title,
           subjectArea: freshSession.subjectArea,
@@ -1069,6 +1267,7 @@ export async function startServerAssessmentSession(params: {
       const now = Date.now();
       return {
         sessionId: baseSession.sessionId,
+        sessionToken: sealAssessmentSessionToken(baseSession),
         quizId: baseSession.quizId,
         title: baseSession.title,
         subjectArea: baseSession.subjectArea,
@@ -1094,6 +1293,7 @@ export async function startServerAssessmentSession(params: {
         mode === 'exam' && effectiveTimeLimit ? now + effectiveTimeLimit * 60_000 : null;
       const qStatus = computeQuestionStatusMap(baseSession.questions, {});
       let newSessionId: string = crypto.randomUUID();
+      let clonedPersisted = false;
       if (getSupabaseAssessmentConfig() && params.accessToken) {
         try {
           newSessionId = await persistNewSessionToSupabase({
@@ -1113,6 +1313,7 @@ export async function startServerAssessmentSession(params: {
             deadlineAtMs,
             questionStatus: qStatus,
           });
+          clonedPersisted = true;
         } catch (dbErr) {
           logServerError('assessment.supabase_retake_session_fallback', dbErr);
         }
@@ -1134,10 +1335,12 @@ export async function startServerAssessmentSession(params: {
         submitting: false,
         answeredPractice: new Map(),
         createdAtMs: now,
+        persistedInSupabase: clonedPersisted,
       };
       storeBoundedSession(cloned);
       return {
         sessionId: cloned.sessionId,
+        sessionToken: sealAssessmentSessionToken(cloned),
         quizId: cloned.quizId,
         title: cloned.title,
         subjectArea: cloned.subjectArea,
@@ -1159,7 +1362,7 @@ export async function startServerAssessmentSession(params: {
     const deadlineAtMs =
       mode === 'exam' && effectiveTimeLimit ? now + effectiveTimeLimit * 60_000 : null;
 
-    if (getSupabaseAssessmentConfig() && params.accessToken) {
+    if (baseSession.persistedInSupabase && getSupabaseAssessmentConfig() && params.accessToken) {
       try {
         const updated = await patchSessionInSupabase(
           params.accessToken,
@@ -1176,33 +1379,33 @@ export async function startServerAssessmentSession(params: {
           'eq.ready'
         );
         if (!updated) {
-          // Re-check DB in case concurrent start already moved it to active
           const refreshed = await fetchSessionFromSupabase(
             params.accessToken,
             params.userId,
             baseSession.sessionId
           );
           if (refreshed && refreshed.status === 'active') {
-          const hydrated = hydrateSessionFromRow(refreshed, params.userId);
-          storeBoundedSession(hydrated);
-          return {
-            sessionId: hydrated.sessionId,
-            quizId: hydrated.quizId,
-            title: hydrated.title,
-            subjectArea: hydrated.subjectArea,
-            format: hydrated.format,
-            difficulty: hydrated.difficulty,
-            assessmentMode: hydrated.assessmentMode,
-            timeLimitMinutes: hydrated.timeLimitMinutes,
-            startedAtMs: hydrated.startedAtMs ?? now,
-            deadlineAtMs: hydrated.deadlineAtMs,
-            serverNowMs: now,
-            remainingSeconds:
-              hydrated.deadlineAtMs !== null
-                ? Math.max(0, Math.ceil((hydrated.deadlineAtMs - now) / 1000))
-                : null,
-            questions: stripAnswerKeysFromQuestions(hydrated.questions),
-          };
+            const hydrated = hydrateSessionFromRow(refreshed, params.userId);
+            storeBoundedSession(hydrated);
+            return {
+              sessionId: hydrated.sessionId,
+              sessionToken: sealAssessmentSessionToken(hydrated),
+              quizId: hydrated.quizId,
+              title: hydrated.title,
+              subjectArea: hydrated.subjectArea,
+              format: hydrated.format,
+              difficulty: hydrated.difficulty,
+              assessmentMode: hydrated.assessmentMode,
+              timeLimitMinutes: hydrated.timeLimitMinutes,
+              startedAtMs: hydrated.startedAtMs ?? now,
+              deadlineAtMs: hydrated.deadlineAtMs,
+              serverNowMs: now,
+              remainingSeconds:
+                hydrated.deadlineAtMs !== null
+                  ? Math.max(0, Math.ceil((hydrated.deadlineAtMs - now) / 1000))
+                  : null,
+              questions: stripAnswerKeysFromQuestions(hydrated.questions),
+            };
           }
           throw new AssessmentHttpError(409, 'This assessment session could not be started.');
         }
@@ -1222,6 +1425,7 @@ export async function startServerAssessmentSession(params: {
 
     return {
       sessionId: baseSession.sessionId,
+      sessionToken: sealAssessmentSessionToken(baseSession),
       quizId: baseSession.quizId,
       title: baseSession.title,
       subjectArea: baseSession.subjectArea,
@@ -1341,18 +1545,25 @@ export async function saveAssessmentProgress(params: {
   userId: string;
   accessToken: string | null;
   sessionId: string;
+  sessionToken?: string | null;
   currentQuestionIndex?: number;
   answers?: Record<string, StudentAnswer> | StudentAnswer[];
 }): Promise<{
   ok: true;
   sessionId: string;
+  sessionToken: string;
   currentQuestionIndex: number;
   answeredCount: number;
   remainingSeconds: number | null;
   lastSavedAt: string;
 }> {
   return runWithSessionLock(params.sessionId, async () => {
-    const session = await resolveHydratedSession(params.userId, params.accessToken, params.sessionId);
+    const session = await resolveHydratedSession(
+      params.userId,
+      params.accessToken,
+      params.sessionId,
+      params.sessionToken
+    );
 
     if (session.status === 'submitted' || session.status === 'submitting' || session.submitting) {
       throw new AssessmentHttpError(
@@ -1401,7 +1612,6 @@ export async function saveAssessmentProgress(params: {
         throw new AssessmentHttpError(400, 'Answer references a question outside this assessment.');
       }
 
-      // Locked Practice Mode questions can never be modified after immediate check
       if (session.questionLocks[q.id]) {
         continue;
       }
@@ -1424,7 +1634,7 @@ export async function saveAssessmentProgress(params: {
     const nextStatusMap = computeQuestionStatusMap(session.questions, nextAnswers);
     const lastSavedIso = new Date(now).toISOString();
 
-    if (getSupabaseAssessmentConfig() && params.accessToken) {
+    if (session.persistedInSupabase && getSupabaseAssessmentConfig() && params.accessToken) {
       try {
         const patched = await patchSessionInSupabase(
           params.accessToken,
@@ -1465,6 +1675,7 @@ export async function saveAssessmentProgress(params: {
     return {
       ok: true,
       sessionId: session.sessionId,
+      sessionToken: sealAssessmentSessionToken(session),
       currentQuestionIndex: nextIdx,
       answeredCount,
       remainingSeconds,
@@ -1477,9 +1688,15 @@ export async function restoreServerAssessmentSession(params: {
   userId: string;
   accessToken: string | null;
   sessionId: string;
+  sessionToken?: string | null;
 }): Promise<RestoredQuizSessionResponse> {
   return runWithSessionLock(params.sessionId, async () => {
-    const session = await resolveHydratedSession(params.userId, params.accessToken, params.sessionId);
+    const session = await resolveHydratedSession(
+      params.userId,
+      params.accessToken,
+      params.sessionId,
+      params.sessionToken
+    );
 
     if (session.status === 'submitted') {
       throw new AssessmentHttpError(
@@ -1488,7 +1705,7 @@ export async function restoreServerAssessmentSession(params: {
       );
     }
 
-    if (params.accessToken && getSupabaseAssessmentConfig()) {
+    if (session.persistedInSupabase && params.accessToken && getSupabaseAssessmentConfig()) {
       const alreadySubmitted = await hasSubmittedSessionInSupabase(
         params.accessToken,
         params.userId,
@@ -1505,7 +1722,6 @@ export async function restoreServerAssessmentSession(params: {
 
     const now = Date.now();
 
-    // Auto-submit if this is a timed exam whose server-calculated deadline has already passed
     if (
       session.assessmentMode === 'exam' &&
       session.deadlineAtMs !== null &&
@@ -1534,7 +1750,6 @@ export async function restoreServerAssessmentSession(params: {
       };
     }
 
-    // If session was still 'ready', activate it once while preserving existing startedAt/deadlineAt if set
     if (session.status === 'ready') {
       const startedAtMs = session.startedAtMs ?? now;
       const deadlineAtMs =
@@ -1542,7 +1757,7 @@ export async function restoreServerAssessmentSession(params: {
           ? session.deadlineAtMs ?? startedAtMs + session.timeLimitMinutes * 60_000
           : null;
 
-      if (getSupabaseAssessmentConfig() && params.accessToken) {
+      if (session.persistedInSupabase && getSupabaseAssessmentConfig() && params.accessToken) {
         try {
           await patchSessionInSupabase(
             params.accessToken,
@@ -1567,7 +1782,6 @@ export async function restoreServerAssessmentSession(params: {
       storeBoundedSession(session);
     }
 
-    // Only return feedback for Practice Mode questions that the student ALREADY locked/checked
     const practiceFeedback: Record<string, QuizAnswerCheckResponse> = {};
     const lockedQuestionIds: string[] = [];
     if (session.assessmentMode === 'practice') {
@@ -1591,6 +1805,7 @@ export async function restoreServerAssessmentSession(params: {
     return {
       status: 'active',
       sessionId: session.sessionId,
+      sessionToken: sealAssessmentSessionToken(session),
       quizId: session.quizId,
       title: session.title,
       subjectArea: session.subjectArea,
@@ -1617,11 +1832,17 @@ export async function checkPracticeQuestionAnswer(params: {
   userId: string;
   accessToken: string | null;
   sessionId: string;
+  sessionToken?: string | null;
   questionId: string;
   selectedOptionIndex: number;
 }): Promise<QuizAnswerCheckResponse> {
   return runWithSessionLock(params.sessionId, async () => {
-    const session = await resolveHydratedSession(params.userId, params.accessToken, params.sessionId);
+    const session = await resolveHydratedSession(
+      params.userId,
+      params.accessToken,
+      params.sessionId,
+      params.sessionToken
+    );
 
     if (session.assessmentMode === 'exam') {
       throw new AssessmentHttpError(
@@ -1647,10 +1868,12 @@ export async function checkPracticeQuestionAnswer(params: {
       throw new AssessmentHttpError(400, 'Invalid selected answer option index.');
     }
 
-    // Once checked, return the locked evaluation so the key cannot be brute-forced
     const existing = session.answeredPractice.get(question.id);
     if (existing) {
-      return existing;
+      return {
+        ...existing,
+        sessionToken: sealAssessmentSessionToken(session),
+      };
     }
 
     const now = Date.now();
@@ -1678,7 +1901,7 @@ export async function checkPracticeQuestionAnswer(params: {
     };
     const nextStatus = computeQuestionStatusMap(session.questions, nextAnswers);
 
-    if (getSupabaseAssessmentConfig() && params.accessToken) {
+    if (session.persistedInSupabase && getSupabaseAssessmentConfig() && params.accessToken) {
       try {
         const patched = await patchSessionInSupabase(
           params.accessToken,
@@ -1712,7 +1935,10 @@ export async function checkPracticeQuestionAnswer(params: {
     session.answeredPractice.set(question.id, result);
     storeBoundedSession(session);
 
-    return result;
+    return {
+      ...result,
+      sessionToken: sealAssessmentSessionToken(session),
+    };
   });
 }
 
@@ -1753,9 +1979,7 @@ async function executeServerAssessmentGrading(params: {
     }
 
     const useSupabase = Boolean(getSupabaseAssessmentConfig() && params.accessToken);
-    if (useSupabase && params.accessToken) {
-
-      // Atomic DB-level lock: transitions ready/active -> submitting; returns null if concurrent/submitted
+    if (session.persistedInSupabase && useSupabase && params.accessToken) {
       const lockedRow = await patchSessionInSupabase(
         params.accessToken,
         params.userId,
@@ -1805,7 +2029,6 @@ async function executeServerAssessmentGrading(params: {
 
     for (let idx = 0; idx < session.questions.length; idx++) {
       const q = session.questions[idx];
-      // Locked Practice answers always take precedence over client payload; fallback to saved session answers
       const practiced = session.answeredPractice.get(q.id);
       const locked = session.questionLocks[q.id];
       const saved = session.answers[q.id];
@@ -1948,44 +2171,53 @@ async function executeServerAssessmentGrading(params: {
     const finalQuestionStatus = computeQuestionStatusMap(session.questions, finalAnswersRecord);
 
     if (useSupabase && params.accessToken) {
-      const persisted = await persistAttemptToSupabase({
-        accessToken: params.accessToken,
-        userId: params.userId,
-        sessionId: session.sessionId,
-        quizId: session.quizId,
-        title: session.title,
-        format: session.format,
-        difficulty: session.difficulty,
-        answers: normalizedAnswers,
-        grading: responsePayload,
-      });
-      if (persisted.duplicate) {
-        await patchSessionInSupabase(
-          params.accessToken,
-          params.userId,
-          session.sessionId,
-          { status: 'submitted', submitted_at: new Date(now).toISOString() },
-          'eq.submitting'
-        ).catch(() => null);
-        session.status = 'submitted';
-        throw new AssessmentHttpError(409, 'This assessment has already been submitted.');
-      }
-      responsePayload.attemptId = persisted.attemptId;
+      try {
+        const persisted = await persistAttemptToSupabase({
+          accessToken: params.accessToken,
+          userId: params.userId,
+          sessionId: session.sessionId,
+          quizId: session.quizId,
+          title: session.title,
+          format: session.format,
+          difficulty: session.difficulty,
+          answers: normalizedAnswers,
+          grading: responsePayload,
+        });
+        if (persisted.duplicate) {
+          if (session.persistedInSupabase) {
+            await patchSessionInSupabase(
+              params.accessToken,
+              params.userId,
+              session.sessionId,
+              { status: 'submitted', submitted_at: new Date(now).toISOString() },
+              'eq.submitting'
+            ).catch(() => null);
+          }
+          session.status = 'submitted';
+          throw new AssessmentHttpError(409, 'This assessment has already been submitted.');
+        }
+        responsePayload.attemptId = persisted.attemptId;
 
-      await patchSessionInSupabase(
-        params.accessToken,
-        params.userId,
-        session.sessionId,
-        {
-          status: 'submitted',
-          submitted_at: new Date(now).toISOString(),
-          answers: finalAnswersRecord,
-          question_status: finalQuestionStatus,
-          last_saved_at: new Date(now).toISOString(),
-        },
-        'eq.submitting'
-      );
-      claimedDbSubmitLock = false;
+        if (session.persistedInSupabase) {
+          await patchSessionInSupabase(
+            params.accessToken,
+            params.userId,
+            session.sessionId,
+            {
+              status: 'submitted',
+              submitted_at: new Date(now).toISOString(),
+              answers: finalAnswersRecord,
+              question_status: finalQuestionStatus,
+              last_saved_at: new Date(now).toISOString(),
+            },
+            'eq.submitting'
+          );
+          claimedDbSubmitLock = false;
+        }
+      } catch (dbErr) {
+        if (dbErr instanceof AssessmentHttpError) throw dbErr;
+        logServerError('assessment.supabase_grade_persist_fallback', dbErr);
+      }
     }
 
     session.answers = finalAnswersRecord;
@@ -1996,7 +2228,7 @@ async function executeServerAssessmentGrading(params: {
     storeBoundedSession(session);
     return responsePayload;
   } catch (err) {
-    if (claimedDbSubmitLock && params.accessToken && session.status !== 'submitted') {
+    if (session.persistedInSupabase && claimedDbSubmitLock && params.accessToken && session.status !== 'submitted') {
       await patchSessionInSupabase(
         params.accessToken,
         params.userId,
@@ -2022,12 +2254,18 @@ export async function submitAndGradeServerAssessment(params: {
   userId: string;
   accessToken: string | null;
   sessionId: string;
+  sessionToken?: string | null;
   answers: StudentAnswer[];
   clientElapsedSeconds?: number;
   autoSubmitted?: boolean;
 }): Promise<QuizGradingResponse> {
   return runWithSessionLock(params.sessionId, async () => {
-    const session = await resolveHydratedSession(params.userId, params.accessToken, params.sessionId);
+    const session = await resolveHydratedSession(
+      params.userId,
+      params.accessToken,
+      params.sessionId,
+      params.sessionToken
+    );
     return executeServerAssessmentGrading({
       session,
       userId: params.userId,

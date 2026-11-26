@@ -132,6 +132,20 @@ export interface DocumentSectionCluster {
   salience: number;
 }
 
+export interface ExtractedSectionRelationship {
+  fromSection: string;
+  toSection: string;
+  sharedConcepts: string[];
+  connectionNote: string;
+}
+
+export interface ExtractedDifficultConcept {
+  concept: string;
+  sourceContext: string;
+  plainExplanation: string;
+  pageNumber: number | null;
+}
+
 export interface ExtractionQualityMetrics {
   wordCount: number;
   alphaWordCount: number;
@@ -151,6 +165,8 @@ export interface DocumentIntelligenceProfile {
   chunks: DocumentChunk[];
   units: AnalyzedUnit[];
   sections: DocumentSectionCluster[];
+  sectionRelationships: ExtractedSectionRelationship[];
+  difficultConcepts: ExtractedDifficultConcept[];
   definitions: ExtractedDefinition[];
   formulas: ExtractedFormula[];
   processes: ExtractedProcess[];
@@ -461,6 +477,15 @@ export function normalizeText(text: string): string {
   return text
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
+    .replace(/\u00AD/g, '')
+    .replace(/ﬁ/g, 'fi')
+    .replace(/ﬂ/g, 'fl')
+    .replace(/ﬀ/g, 'ff')
+    .replace(/ﬃ/g, 'ffi')
+    .replace(/ﬄ/g, 'ffl')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/([a-z]{2,})-\n([a-z]{2,})/g, '$1$2')
     .replace(/[\u0000-\u0008\u000B-\u000C\u000E-\u001F\u007F-\u009F]/g, '')
     .replace(/[ \t]+/g, ' ')
     .replace(/\n[ \t]+/g, '\n')
@@ -1223,10 +1248,11 @@ function extractDefinitionFromUnit(unit: AnalyzedUnit): ExtractedDefinition | nu
     const rawDef = colonMatch[2].trim();
     if (
       rawTerm.split(/\s+/).length <= 5 &&
-      !/^(?:note|example|step\s*\d+|page\s*\d+|figure\s*\d+|warning|summary|recap)/i.test(
+      !/^(?:note|example|formula|equation|reaction|step\s*\d+|page\s*\d+|figure\s*\d+|table\s*\d+|section\s*\d+|chapter\s*\d+|case\s*\d+|warning|caution|tip|hint|important|remember|summary|recap)$/i.test(
         rawTerm
       ) &&
-      !/^\s*[A-Za-z0-9]+\s*=/.test(rawDef)
+      !/^\s*[A-Za-z0-9]+\s*=/.test(rawDef) &&
+      !/\s(?:->|→|=)\s/.test(rawDef)
     ) {
       const cleanTerm = rawTerm.replace(/^(?:the|an?)\s+/i, '');
       return {
@@ -1242,8 +1268,52 @@ function extractDefinitionFromUnit(unit: AnalyzedUnit): ExtractedDefinition | nu
     }
   }
 
+  // Dash / em-dash definition: "Term — definition text"
+  const dashMatch = text.match(/^([A-Za-z0-9ΔαβγλμθωΩ₀-₉⁰-⁹\s'-]{2,45})\s+[—–-]\s+(.{18,})$/);
+  if (dashMatch) {
+    const rawTerm = dashMatch[1].trim().replace(/^(?:the|an?)\s+/i, '');
+    const rawDef = dashMatch[2].trim();
+    if (
+      rawTerm.split(/\s+/).length <= 5 &&
+      !/^(?:note|example|step\s*\d+|page\s*\d+|figure\s*\d+|warning|summary|recap)/i.test(rawTerm)
+    ) {
+      return {
+        term: rawTerm,
+        definition: attachPageCitation(rawDef, unit.pageNumber),
+        rawDefinition: rawDef,
+        origin: 'source',
+        sectionHeading: unit.sectionHeading,
+        pageNumber: unit.pageNumber,
+        salience: unit.score,
+        sourceText: text,
+      };
+    }
+  }
+
+  // Parenthetical definition: "Chlorophyll (a green pigment that absorbs light energy) ..."
+  const parenDefMatch = text.match(
+    /\b([A-Z][A-Za-z0-9ΔαβγλμθωΩ₀-₉⁰-⁹'-]{2,34})\s+\(((?:a|an|the)\s+[^()]{14,130})\)/i
+  );
+  if (parenDefMatch) {
+    const rawTerm = parenDefMatch[1].trim();
+    const rawDef = parenDefMatch[2].trim();
+    if (!/^(?:e\.g\.|i\.e\.|see|page|fig)/i.test(rawDef) && rawTerm.split(/\s+/).length <= 4) {
+      const cleanDef = rawDef.charAt(0).toUpperCase() + rawDef.slice(1);
+      return {
+        term: rawTerm,
+        definition: attachPageCitation(cleanDef, unit.pageNumber),
+        rawDefinition: cleanDef,
+        origin: 'source',
+        sectionHeading: unit.sectionHeading,
+        pageNumber: unit.pageNumber,
+        salience: unit.score * 0.95,
+        sourceText: text,
+      };
+    }
+  }
+
   const defMatch = text.match(
-    /^([A-Za-z0-9ΔαβγλμθωΩ₀-₉⁰-⁹()'-]+(?:\s+[A-Za-z0-9ΔαβγλμθωΩ₀-₉⁰-⁹()'-]+){0,5})\s+(is defined as|are defined as|refers to|means|denotes|describes the|is the process(?: of| by which)?|(?:is|are) (?:a|an|the)\s+(?:[a-z-]+\s+){0,2}(?:process|pathway|reaction|mechanism|molecule|compound|substance|pigment|enzyme|protein|organelle|carrier|force|law|principle|measure|quantity|ratio|rate|property|state|system|bond|energy|unit|branch|study|theory|phenomenon|structure|device|method|movement|transfer|conversion|set|region|layer|fluid|gas|ion|acid|base))\b\s*(.+)$/i
+    /^([A-Za-z0-9ΔαβγλμθωΩ₀-₉⁰-⁹()'-]+(?:\s+[A-Za-z0-9ΔαβγλμθωΩ₀-₉⁰-⁹()'-]+){0,5})\s+(is defined as|are defined as|refers to|means|denotes|represents|describes the|is the process(?: of| by which)?|(?:is|are) (?:a|an|the)\s+(?:[a-z-]+\s+){0,3}(?:process|pathway|reaction|mechanism|molecule|compound|substance|pigment|enzyme|protein|organelle|carrier|force|law|principle|measure|quantity|ratio|rate|property|state|system|bond|energy|unit|branch|study|theory|phenomenon|structure|device|method|movement|transfer|conversion|set|region|layer|fluid|gas|ion|acid|base|technique|algorithm|model|concept|framework|metric|rule|value|field|function|component))\b\s*(.+)$/i
   );
 
   if (defMatch) {
@@ -1258,7 +1328,7 @@ function extractDefinitionFromUnit(unit: AnalyzedUnit): ExtractedDefinition | nu
       rest.length >= 12
     ) {
       let cleanDef = '';
-      if (/^(?:is defined as|are defined as|refers to|means|denotes)$/i.test(connector)) {
+      if (/^(?:is defined as|are defined as|refers to|means|denotes|represents)$/i.test(connector)) {
         cleanDef = rest.replace(/^(?:the|a|an)\s+/i, (m) => m.charAt(0).toUpperCase() + m.slice(1));
         cleanDef = cleanDef.charAt(0).toUpperCase() + cleanDef.slice(1);
       } else if (/^describes the$/i.test(connector)) {
@@ -1533,33 +1603,318 @@ function buildClusterHeading(units: AnalyzedUnit[], fallbackIdx: number): string
 }
 
 function extractKeyPhrases(normalizedText: string, maxPhrases = 12): string[] {
-  const phraseFreq = new Map<string, number>();
-  const words = normalizedText.match(/\b[A-Za-z][A-Za-z0-9'-]{2,}\b/g) || [];
+  // RAKE-inspired delimiter splitting + TF-IDF scoring for multi-word academic phrases
+  const wordFreq = new Map<string, number>();
+  const wordDegree = new Map<string, number>();
+  const candidateCounts = new Map<string, number>();
+  const candidateTokensMap = new Map<string, string[]>();
 
-  for (let i = 0; i < words.length - 1; i++) {
-    const w1 = words[i].toLowerCase();
-    const w2 = words[i + 1].toLowerCase();
-    if (ACADEMIC_STOP_WORDS.has(w1) || ACADEMIC_STOP_WORDS.has(w2)) continue;
-    if (/^\d+$/.test(w1) || /^\d+$/.test(w2)) continue;
-    const phrase = `${words[i]} ${words[i + 1]}`;
-    const key = phrase.toLowerCase();
-    phraseFreq.set(key, (phraseFreq.get(key) || 0) + 1);
+  const chunks = normalizedText.split(/[.,;:!?()\n[\]—–/"]+/);
+  for (const seg of chunks) {
+    const rawTokens = seg.trim().split(/\s+/);
+    let currentPhrase: string[] = [];
+
+    const flushPhrase = () => {
+      if (currentPhrase.length >= 2 && currentPhrase.length <= 4) {
+        const cleanToks = currentPhrase.map((t) => t.replace(/^'+|'+$/g, ''));
+        const lowerKey = cleanToks.map((t) => t.toLowerCase()).join(' ');
+        if (lowerKey.length >= 5 && !/^\d[\d\s]*$/.test(lowerKey)) {
+          candidateCounts.set(lowerKey, (candidateCounts.get(lowerKey) || 0) + 1);
+          if (!candidateTokensMap.has(lowerKey)) {
+            candidateTokensMap.set(lowerKey, cleanToks);
+          }
+          const deg = cleanToks.length - 1;
+          for (const tok of cleanToks) {
+            const lk = tok.toLowerCase();
+            wordFreq.set(lk, (wordFreq.get(lk) || 0) + 1);
+            wordDegree.set(lk, (wordDegree.get(lk) || 0) + deg);
+          }
+        }
+      }
+      currentPhrase = [];
+    };
+
+    for (const raw of rawTokens) {
+      const clean = raw.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9'-]+$/g, '');
+      const lower = clean.toLowerCase();
+      if (!clean || clean.length < 3 || ACADEMIC_STOP_WORDS.has(lower) || /^\d+$/.test(clean)) {
+        flushPhrase();
+      } else {
+        currentPhrase.push(clean);
+      }
+    }
+    flushPhrase();
   }
 
-  return Array.from(phraseFreq.entries())
-    .filter(([, count]) => count >= 1)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, maxPhrases)
-    .map(([phrase]) =>
-      phrase
-        .split(' ')
-        .map((w) =>
-          /^(atp|adp|dna|rna|mrna|nadh|nadph|ph|co2|h2o)$/i.test(w)
-            ? formatScientificText(w.toUpperCase())
-            : w.charAt(0).toUpperCase() + w.slice(1)
-        )
-        .join(' ')
+  const scored = Array.from(candidateCounts.entries()).map(([key, count]) => {
+    const toks = candidateTokensMap.get(key) || key.split(' ');
+    let rakeScore = 0;
+    for (const t of toks) {
+      const lk = t.toLowerCase();
+      const freq = wordFreq.get(lk) || 1;
+      const deg = (wordDegree.get(lk) || 0) + freq;
+      rakeScore += deg / freq;
+    }
+    // Weight by frequency and multi-word academic specificity
+    const totalScore = rakeScore * (1 + Math.log1p(count));
+    return { key, totalScore };
+  });
+
+  scored.sort((a, b) => b.totalScore - a.totalScore);
+
+  const selected: string[] = [];
+  const seenKeys = new Set<string>();
+  for (const item of scored) {
+    if (selected.length >= maxPhrases) break;
+    if (seenKeys.has(item.key)) continue;
+    seenKeys.add(item.key);
+    const formatted = item.key
+      .split(' ')
+      .map((w) =>
+        /^(atp|adp|dna|rna|mrna|trna|nadh|nadph|ph|pka|co2|h2o|o2|gdp|api|http)$/i.test(w)
+          ? formatScientificText(w.toUpperCase())
+          : w.charAt(0).toUpperCase() + w.slice(1)
+      )
+      .join(' ');
+    selected.push(formatted);
+  }
+  return selected;
+}
+
+/**
+ * Graph-based TextRank centrality over AnalyzedUnits using sparse inverted token indexing
+ * (O(N * avgTokens) so even multi-hundred-page textbooks complete in milliseconds).
+ */
+function applyTextRankScoring(units: AnalyzedUnit[]): void {
+  const n = Math.min(units.length, 450); // Graph top 450 units for bounded O(N) runtime
+  if (n < 3) return;
+
+  const sampleUnits = units.slice(0, n);
+  const inverted = new Map<string, number[]>();
+  const df = new Map<string, number>();
+
+  for (let i = 0; i < n; i++) {
+    for (const tok of sampleUnits[i].tokens) {
+      let arr = inverted.get(tok);
+      if (!arr) {
+        arr = [];
+        inverted.set(tok, arr);
+      }
+      arr.push(i);
+      df.set(tok, (df.get(tok) || 0) + 1);
+    }
+  }
+
+  // Precompute sparse weighted adjacency neighbors
+  const neighbors: Array<Array<{ j: number; weight: number }>> = Array.from({ length: n }, () => []);
+  const outSum = new Float64Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const overlapCounts = new Map<number, number>();
+    const uToks = sampleUnits[i].tokens;
+    for (const tok of uToks) {
+      const postings = inverted.get(tok);
+      if (!postings || postings.length > Math.max(40, n * 0.6)) continue; // skip ultra-common words
+      const idf = Math.log(1 + n / (df.get(tok) || 1));
+      for (const j of postings) {
+        if (j === i) continue;
+        overlapCounts.set(j, (overlapCounts.get(j) || 0) + idf);
+      }
+    }
+
+    const denomI = Math.sqrt(Math.max(1, uToks.size));
+    const entries: Array<{ j: number; weight: number }> = [];
+    for (const [j, rawOverlap] of overlapCounts.entries()) {
+      const denomJ = Math.sqrt(Math.max(1, sampleUnits[j].tokens.size));
+      const w = rawOverlap / (denomI * denomJ);
+      if (w > 0.12) {
+        entries.push({ j, weight: w });
+      }
+    }
+    // Keep top 16 neighbors per node for crisp centrality convergence
+    entries.sort((a, b) => b.weight - a.weight);
+    const trimmed = entries.slice(0, 16);
+    neighbors[i] = trimmed;
+    for (const e of trimmed) {
+      outSum[i] += e.weight;
+    }
+  }
+
+  let ranks = new Float64Array(n).fill(1 / n);
+  const nextRanks = new Float64Array(n);
+  const damping = 0.85;
+
+  for (let iter = 0; iter < 15; iter++) {
+    nextRanks.fill((1 - damping) / n);
+    for (let i = 0; i < n; i++) {
+      if (outSum[i] <= 0) continue;
+      const contrib = (damping * ranks[i]) / outSum[i];
+      for (const edge of neighbors[i]) {
+        nextRanks[edge.j] += contrib * edge.weight;
+      }
+    }
+    ranks.set(nextRanks);
+  }
+
+  let maxRank = 0;
+  for (let i = 0; i < n; i++) {
+    if (ranks[i] > maxRank) maxRank = ranks[i];
+  }
+  if (maxRank <= 0) return;
+
+  for (let i = 0; i < n; i++) {
+    const centralityFactor = 0.78 + 0.52 * (ranks[i] / maxRank);
+    sampleUnits[i].score = Number((sampleUnits[i].score * centralityFactor).toFixed(4));
+  }
+}
+
+/**
+ * Deterministic academic plain-language simplification for dense or complex statements
+ * without altering source meaning or inventing facts.
+ */
+export function buildStudentFriendlyClarification(
+  text: string,
+  definitions: ExtractedDefinition[]
+): string {
+  const clean = stripBoilerplatePrefix(text).trim();
+  if (!clean) return '';
+
+  // Clarify overly formal connectors into plain academic phrasing
+  let simplified = clean
+    .replace(/\bconsequently,\s*/gi, 'As a result, ')
+    .replace(/\bnevertheless,\s*/gi, 'Even so, ')
+    .replace(/\bsubsequently,\s*/gi, 'Next, ')
+    .replace(/\bthereby\s+([a-z]+ing)\b/gi, 'which $1')
+    .replace(/\butilized?\b/gi, 'used')
+    .replace(/\bfacilitates?\b/gi, 'helps enable');
+
+  // Attach brief parenthetical reminders for specialized terms defined in the document
+  for (const def of definitions.slice(0, 12)) {
+    const termLower = def.term.toLowerCase();
+    if (
+      termLower.length >= 4 &&
+      simplified.toLowerCase().includes(termLower) &&
+      !simplified.toLowerCase().includes(def.rawDefinition.slice(0, 24).toLowerCase())
+    ) {
+      const shortMeaning = def.rawDefinition.split(/[.;]/)[0].trim();
+      if (shortMeaning.length >= 12 && shortMeaning.length <= 95 && simplified.length < 220) {
+        return `${simplified} — Key context: ${def.term} refers to ${shortMeaning.charAt(0).toLowerCase() + shortMeaning.slice(1)}.`;
+      }
+    }
+  }
+
+  return simplified !== clean ? `In plain terms: ${simplified}` : '';
+}
+
+function detectSectionRelationships(
+  sections: DocumentSectionCluster[]
+): ExtractedSectionRelationship[] {
+  if (sections.length < 2) return [];
+  const relationships: ExtractedSectionRelationship[] = [];
+
+  const sectionTerms = sections.map((sec) => {
+    const freq = new Map<string, number>();
+    for (const u of sec.units) {
+      for (const tok of u.tokens) {
+        if (tok.length >= 4) {
+          freq.set(tok, (freq.get(tok) || 0) + 1);
+        }
+      }
+    }
+    return new Set(
+      Array.from(freq.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 15)
+        .map(([w]) => w)
     );
+  });
+
+  for (let i = 0; i < sections.length - 1; i++) {
+    for (let j = i + 1; j < Math.min(sections.length, i + 4); j++) {
+      if (sections[i].heading === sections[j].heading) continue;
+      const shared: string[] = [];
+      for (const term of sectionTerms[i]) {
+        if (sectionTerms[j].has(term)) {
+          shared.push(term.charAt(0).toUpperCase() + term.slice(1));
+        }
+      }
+      if (shared.length >= 2) {
+        const topShared = shared.slice(0, 4);
+        relationships.push({
+          fromSection: sections[i].heading,
+          toSection: sections[j].heading,
+          sharedConcepts: topShared,
+          connectionNote: `${sections[i].heading} connects directly to ${sections[j].heading} through shared core concepts (${topShared.join(', ')}).`,
+        });
+      }
+    }
+  }
+  return relationships.slice(0, 8);
+}
+
+function extractDifficultConcepts(
+  units: AnalyzedUnit[],
+  definitions: ExtractedDefinition[],
+  formulas: ExtractedFormula[]
+): ExtractedDifficultConcept[] {
+  const results: ExtractedDifficultConcept[] = [];
+  const seenConcepts = new Set<string>();
+
+  // 1. Formula/Equation dense rules simplified for students
+  for (const f of formulas.slice(0, 5)) {
+    const key = f.name.toLowerCase();
+    if (seenConcepts.has(key)) continue;
+    seenConcepts.add(key);
+    const varSummary =
+      f.variables.length > 0
+        ? ` Variables involved: ${f.variables.map((v) => `${v.symbol} (${v.meaning})`).join(', ')}.`
+        : '';
+    results.push({
+      concept: f.name,
+      sourceContext: `${f.expressionOrStructure} — ${f.rawUsage}`,
+      plainExplanation: `Look closely at how ${f.expressionOrStructure} relates the quantities in ${f.sectionHeading || 'this topic'}.${varSummary}`,
+      pageNumber: f.pageNumber,
+    });
+  }
+
+  // 2. High-density technical sentences (multi-syllable terminology + causal/conditional structure)
+  const denseCandidates = [...units]
+    .filter((u) => u.formattedText.length >= 75 && u.formattedText.length <= 290)
+    .map((u) => {
+      const longWords = (u.formattedText.match(/\b[A-Za-z]{9,}\b/g) || []).length;
+      const hasNuance = /\b(?:whereas|however|inverse|proportional|equilibrium|cascade|threshold|gradient|exponential|differential|enzyme|catalyzed)\b/i.test(
+        u.formattedText
+      );
+      return { unit: u, density: longWords + (hasNuance ? 2 : 0) };
+    })
+    .filter((item) => item.density >= 3)
+    .sort((a, b) => b.density * b.unit.score - a.density * a.unit.score);
+
+  for (const { unit } of denseCandidates.slice(0, 5)) {
+    const leadConcept =
+      unit.sectionHeading ||
+      Array.from(unit.tokens)
+        .filter((t) => t.length >= 6)
+        .slice(0, 2)
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' & ');
+    if (!leadConcept || seenConcepts.has(leadConcept.toLowerCase())) continue;
+    seenConcepts.add(leadConcept.toLowerCase());
+
+    const clarified = buildStudentFriendlyClarification(unit.formattedText, definitions);
+    const plain =
+      clarified ||
+      `Break this down step by step: identify the main subject first, then trace how the condition or mechanism changes the outcome.`;
+
+    results.push({
+      concept: leadConcept,
+      sourceContext: attachPageCitation(stripBoilerplatePrefix(unit.formattedText), unit.pageNumber),
+      plainExplanation: plain,
+      pageNumber: unit.pageNumber,
+    });
+  }
+
+  return results.slice(0, 6);
 }
 
 // ============================================================================
@@ -1568,9 +1923,10 @@ function extractKeyPhrases(normalizedText: string, maxPhrases = 12): string[] {
 
 /**
  * Parses and structures any academic document into a unified DocumentIntelligenceProfile:
- * sections, definitions, formulas/reactions + variable meanings, ordered processes,
- * distinctions, cause-and-effect pairs, classifications, structure-function links,
- * examples, key phrases, and BM25/TF-IDF salience scores.
+ * sections, cross-section relationships, difficult concept clarifications, definitions,
+ * formulas/reactions + variable meanings, ordered processes, distinctions, cause-and-effect
+ * pairs, classifications, structure-function links, examples, RAKE keyphrases, and TextRank +
+ * BM25/TF-IDF salience scores.
  *
  * Results are cached by content hash so Summarizer, Quiz Maker, Exam Maker, and RAG
  * reuse identical structural analysis without redundant CPU work. Zero generative AI calls.
@@ -1611,10 +1967,43 @@ export function analyzeDocumentIntelligence(
     }
   }
 
+  // Paragraph-level document frequency (IDF) for true TF-IDF sentence scoring
+  const rawParagraphsForIdf = segmentParagraphs(normalized);
+  const totalIdfParagraphs = Math.max(1, rawParagraphsForIdf.length);
+  const paragraphDf = new Map<string, number>();
+  for (const para of rawParagraphsForIdf.slice(0, 1200)) {
+    const paraToks = contentTokens(para);
+    for (const t of paraToks) {
+      paragraphDf.set(t, (paragraphDf.get(t) || 0) + 1);
+    }
+  }
+
   const units: AnalyzedUnit[] = [];
   const seenExactFp = new Set<string>();
   let orderCounter = 0;
   let detectedHeadingCount = 0;
+
+  const scoreSentenceTfIdf = (formattedText: string, tokens: Set<string>, ordIdx: number) => {
+    let tfidfSum = 0;
+    for (const t of tokens) {
+      const tf = Math.min(8, globalTermFreq.get(t) || 1);
+      const dfVal = paragraphDf.get(t) || 1;
+      const idf = Math.log(1 + totalIdfParagraphs / (dfVal + 0.5));
+      tfidfSum += tf * idf;
+    }
+    let score = tokens.size > 0 ? tfidfSum / Math.sqrt(tokens.size + 1.2) : 1;
+    if (/\d/.test(formattedText)) score *= 1.12;
+    if (/[=→⇌]/.test(formattedText)) score *= 1.22;
+    if (
+      /\b(is defined as|refers to|means|denotes|causes|leads to|produces|converts|whereas|unlike|therefore|concludes)\b/i.test(
+        formattedText
+      )
+    ) {
+      score *= 1.2;
+    }
+    if (ordIdx < 5) score *= 1.12;
+    return Number(score.toFixed(4));
+  };
 
   for (const page of rawPages) {
     const lines = page.text.split('\n');
@@ -1644,21 +2033,7 @@ export function analyzeDocumentIntelligence(
         const tokens = contentTokens(formattedText);
         if (tokens.size < 2 && !isFormulaLine && !/[=→⇌]/.test(formattedText)) continue;
 
-        let tfSum = 0;
-        for (const t of tokens) {
-          tfSum += Math.min(8, globalTermFreq.get(t) || 1);
-        }
-        let score = tokens.size > 0 ? tfSum / Math.sqrt(tokens.size + 1) : 1;
-        if (/\d/.test(formattedText)) score *= 1.12;
-        if (/[=→⇌]/.test(formattedText)) score *= 1.2;
-        if (
-          /\b(is defined as|refers to|means|causes|produces|converts|whereas|unlike)\b/i.test(
-            formattedText
-          )
-        ) {
-          score *= 1.18;
-        }
-        if (orderCounter < 4) score *= 1.1;
+        const score = scoreSentenceTfIdf(formattedText, tokens, orderCounter);
 
         units.push({
           text: cleaned,
@@ -1702,11 +2077,7 @@ export function analyzeDocumentIntelligence(
             seenExactFp.add(fp);
             const formattedText = formatScientificText(itemBody);
             const tokens = contentTokens(formattedText);
-            let tfSum = 0;
-            for (const t of tokens) {
-              tfSum += Math.min(8, globalTermFreq.get(t) || 1);
-            }
-            const score = (tokens.size > 0 ? tfSum / Math.sqrt(tokens.size + 1) : 1) * 1.1;
+            const score = Number((scoreSentenceTfIdf(formattedText, tokens, orderCounter) * 1.08).toFixed(4));
             units.push({
               text: itemBody,
               formattedText,
@@ -1745,16 +2116,20 @@ export function analyzeDocumentIntelligence(
     flushParagraph();
   }
 
-  // Deduplicate near-identical repetitions early while keeping first/richest occurrence
+  // Fast sliding-window + token-indexed deduplication (O(N) even on 300-page PDFs)
   const dedupedUnits: AnalyzedUnit[] = [];
   const earlyPool: Array<{ fp: string; tokens: Set<string> }> = [];
   for (const unit of units) {
-    if (isRedundantAgainstPool(unit.formattedText, unit.tokens, earlyPool, 0.72, 0.85)) {
+    const windowPool = earlyPool.length > 160 ? earlyPool.slice(-160) : earlyPool;
+    if (isRedundantAgainstPool(unit.formattedText, unit.tokens, windowPool, 0.72, 0.85)) {
       continue;
     }
     dedupedUnits.push(unit);
     earlyPool.push({ fp: unit.fingerprint, tokens: unit.tokens });
   }
+
+  // Apply graph-based TextRank centrality refinement across document units
+  applyTextRankScoring(dedupedUnits);
 
   // Extract typed structured knowledge artifacts
   const formulas: ExtractedFormula[] = [];
@@ -1865,6 +2240,9 @@ export function analyzeDocumentIntelligence(
     })
   );
 
+  const sectionRelationships = detectSectionRelationships(sections);
+  const difficultConcepts = extractDifficultConcepts(dedupedUnits, definitions, formulas);
+
   // Key terminology & phrases
   const termCandidates = new Set<string>();
   for (const d of definitions) {
@@ -1906,6 +2284,8 @@ export function analyzeDocumentIntelligence(
     chunks,
     units: dedupedUnits,
     sections,
+    sectionRelationships,
+    difficultConcepts,
     definitions,
     formulas,
     processes,
@@ -1915,7 +2295,7 @@ export function analyzeDocumentIntelligence(
     structureFunctions,
     examples,
     keyTerminology: Array.from(termCandidates).slice(0, 20),
-    keyPhrases: extractKeyPhrases(normalized, 12),
+    keyPhrases: extractKeyPhrases(normalized, 14),
     quality: {
       wordCount,
       alphaWordCount,

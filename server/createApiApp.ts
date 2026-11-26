@@ -76,6 +76,7 @@ import {
   listActiveAssessmentSessions,
   restoreServerAssessmentSession,
   saveAssessmentProgress,
+  sealAssessmentSessionToken,
   startServerAssessmentSession,
   submitAndGradeServerAssessment,
 } from './assessmentService.ts';
@@ -1416,6 +1417,12 @@ export function createApiApp() {
             });
           }
         } else if (materialType === 'image') {
+          if (!isGeminiConfigured()) {
+            return res.status(422).json({
+              error:
+                'Image text extraction (OCR) is unavailable because no AI vision service key is configured. Please upload a text-selectable PDF or .txt/.md file, or paste your study text directly.',
+            });
+          }
           const ai = getGeminiClient();
           const base64Image = file.buffer.toString('base64');
           const { result: ocrResponse } = await runWithGeminiModel(
@@ -1459,6 +1466,12 @@ export function createApiApp() {
             });
           }
         } else if (materialType === 'audio') {
+          if (!isGeminiConfigured()) {
+            return res.status(422).json({
+              error:
+                'Audio lecture transcription requires AI configuration. Please upload a PDF or text document, or paste your notes directly.',
+            });
+          }
           if (file.buffer.byteLength > 20 * 1024 * 1024) {
             return res.status(422).json({
               error:
@@ -1558,10 +1571,11 @@ export function createApiApp() {
           ? summaryLevel
           : 'detailed';
 
+      const boundedText = extractedText.trim().slice(0, 1_200_000);
       const summary = generateExtractiveSummary(
         (title || 'Document Summary').trim(),
         (subjectArea || 'General Studies').trim(),
-        extractedText.trim(),
+        boundedText,
         level
       );
 
@@ -1621,7 +1635,7 @@ export function createApiApp() {
       };
 
       const cleanTitle = (topicTitle || '').trim();
-      const cleanSource = (sourceText || '').trim();
+      const cleanSource = (sourceText || '').trim().slice(0, 1_200_000);
       const mode: QuizSourceMode =
         sourceMode === 'material' ||
         sourceMode === 'summary' ||
@@ -1738,6 +1752,7 @@ export function createApiApp() {
 
       const payload: GeneratedQuizPayload = {
         sessionId: session.sessionId,
+        sessionToken: sealAssessmentSessionToken(session),
         quizId: session.quizId,
         title: session.title,
         subjectArea: session.subjectArea,
@@ -1760,8 +1775,11 @@ export function createApiApp() {
   app.post('/api/quizzes/sessions/start', async (req: Request, res: Response) => {
     try {
       const caller = await resolveQuizCaller(req);
-      const { sessionId, quizId, assessmentMode, timeLimitMinutes, retake } = (req.body || {}) as {
+      const { sessionId, sessionToken, quizId, assessmentMode, timeLimitMinutes, retake } = (
+        req.body || {}
+      ) as {
         sessionId?: string | null;
+        sessionToken?: string | null;
         quizId?: string | null;
         assessmentMode?: 'practice' | 'exam';
         timeLimitMinutes?: number | null;
@@ -1776,6 +1794,7 @@ export function createApiApp() {
         userId: caller.userId,
         accessToken: caller.accessToken,
         sessionId: typeof sessionId === 'string' ? sessionId : null,
+        sessionToken: typeof sessionToken === 'string' ? sessionToken : null,
         quizId: typeof quizId === 'string' ? quizId : null,
         assessmentMode:
           assessmentMode === 'exam' || assessmentMode === 'practice' ? assessmentMode : undefined,
@@ -1806,7 +1825,10 @@ export function createApiApp() {
   app.post('/api/quizzes/sessions/restore', async (req: Request, res: Response) => {
     try {
       const caller = await resolveQuizCaller(req);
-      const { sessionId } = (req.body || {}) as { sessionId?: string };
+      const { sessionId, sessionToken } = (req.body || {}) as {
+        sessionId?: string;
+        sessionToken?: string | null;
+      };
       if (!sessionId || typeof sessionId !== 'string' || !sessionId.trim()) {
         return res.status(400).json({ error: 'An active assessment sessionId is required.' });
       }
@@ -1814,6 +1836,7 @@ export function createApiApp() {
         userId: caller.userId,
         accessToken: caller.accessToken,
         sessionId: sessionId.trim(),
+        sessionToken: typeof sessionToken === 'string' ? sessionToken : null,
       });
       return res.json(restored);
     } catch (err: unknown) {
@@ -1846,7 +1869,8 @@ export function createApiApp() {
       if (!sessionId) {
         return res.status(400).json({ error: 'An assessment sessionId is required.' });
       }
-      const { currentQuestionIndex, answers } = (req.body || {}) as {
+      const { sessionToken, currentQuestionIndex, answers } = (req.body || {}) as {
+        sessionToken?: string | null;
         currentQuestionIndex?: number;
         answers?: Record<string, StudentAnswer> | StudentAnswer[];
       };
@@ -1862,6 +1886,7 @@ export function createApiApp() {
         userId: caller.userId,
         accessToken: caller.accessToken,
         sessionId,
+        sessionToken: typeof sessionToken === 'string' ? sessionToken : null,
         currentQuestionIndex:
           typeof currentQuestionIndex === 'number' ? currentQuestionIndex : undefined,
         answers,
@@ -1878,8 +1903,9 @@ export function createApiApp() {
   app.post('/api/quizzes/answer', async (req: Request, res: Response) => {
     try {
       const caller = await resolveQuizCaller(req);
-      const { sessionId, questionId, selectedOptionIndex } = (req.body || {}) as {
+      const { sessionId, sessionToken, questionId, selectedOptionIndex } = (req.body || {}) as {
         sessionId?: string;
+        sessionToken?: string | null;
         questionId?: string;
         selectedOptionIndex?: number;
       };
@@ -1892,6 +1918,7 @@ export function createApiApp() {
         userId: caller.userId,
         accessToken: caller.accessToken,
         sessionId,
+        sessionToken: typeof sessionToken === 'string' ? sessionToken : null,
         questionId,
         selectedOptionIndex: Number(selectedOptionIndex),
       });
@@ -1905,8 +1932,11 @@ export function createApiApp() {
   app.post('/api/quizzes/grade', async (req: Request, res: Response) => {
     try {
       const caller = await resolveQuizCaller(req);
-      const { sessionId, answers, timeTakenSeconds, autoSubmitted } = (req.body || {}) as {
+      const { sessionId, sessionToken, answers, timeTakenSeconds, autoSubmitted } = (
+        req.body || {}
+      ) as {
         sessionId?: string;
+        sessionToken?: string | null;
         answers?: StudentAnswer[];
         timeTakenSeconds?: number;
         autoSubmitted?: boolean;
@@ -1926,6 +1956,7 @@ export function createApiApp() {
         userId: caller.userId,
         accessToken: caller.accessToken,
         sessionId,
+        sessionToken: typeof sessionToken === 'string' ? sessionToken : null,
         answers: Array.isArray(answers) ? answers : [],
         clientElapsedSeconds: timeTakenSeconds,
         autoSubmitted: Boolean(autoSubmitted),
