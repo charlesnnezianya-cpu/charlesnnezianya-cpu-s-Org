@@ -297,6 +297,20 @@ export function sanitizeStructuredSummary(summary: StructuredSummary): Structure
           })),
         }
       : {}),
+    ...(summary.visualDiagrams ? { visualDiagrams: summary.visualDiagrams } : {}),
+    ...(summary.visualAids
+      ? {
+          visualAids: summary.visualAids.map((v) => ({
+            ...v,
+            conceptTitle: cleanStr(v.conceptTitle),
+            caption: cleanStr(v.caption),
+            verifiedLabels: (v.verifiedLabels || []).map((l) => ({
+              label: cleanStr(l.label),
+              ...(l.detail ? { detail: cleanStr(l.detail) } : {}),
+            })),
+          })),
+        }
+      : {}),
     revisionNotes: (summary.revisionNotes || []).map(cleanStr).filter(Boolean),
     ...(summary.finalRecap
       ? { finalRecap: summary.finalRecap.map(cleanStr).filter(Boolean) }

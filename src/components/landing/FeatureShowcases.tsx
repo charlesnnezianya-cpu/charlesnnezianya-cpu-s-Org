@@ -512,7 +512,7 @@ export function FeatureShowcases({ onOpenAuth }: FeatureShowcasesProps) {
                     {assessmentMode === 'exam' ? (
                       <p>
                         Answer locked for final exam grading. Full question-by-question review,
-                        explanations, and page references unlock upon exam submission.
+                        explanations, and topic breakdowns unlock upon exam submission.
                       </p>
                     ) : (
                       <div className="space-y-1.5">

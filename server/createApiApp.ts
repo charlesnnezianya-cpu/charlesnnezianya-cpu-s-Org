@@ -61,7 +61,7 @@ import {
   retrieveRelevantPassages,
   setBoundedCacheEntry,
 } from './documentEngine.ts';
-import { generateGroundedQuizQuestions } from './quizEngine.ts';
+import { generateGroundedQuizQuestions, getAcademicTopicPrimer } from './quizEngine.ts';
 import { generateExtractiveSummary } from './summaryEngine.ts';
 import {
   buildChatRagContext,
@@ -1693,11 +1693,13 @@ export function createApiApp() {
           ? difficulty
           : 'intermediate';
 
-      const allowedCounts = new Set([5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70]);
-      const totalCount =
-        typeof questionCount === 'number' && allowedCounts.has(questionCount)
+      const rawCount =
+        typeof questionCount === 'number'
           ? questionCount
-          : 10;
+          : parseInt(String(questionCount || '10'), 10);
+      const totalCount = Number.isFinite(rawCount)
+        ? Math.max(5, Math.min(70, rawCount))
+        : 10;
 
       const resolvedAssessmentMode = assessmentMode === 'exam' ? 'exam' : 'practice';
       const resolvedTimeLimit =
@@ -1730,9 +1732,7 @@ export function createApiApp() {
       }
 
       if (mode === 'topic' && sourceContent.length < 30) {
-        return res.status(400).json({
-          error: `No uploaded study material or pasted notes covering "${cleanTitle}" were found. Upload a document, select a saved summary, or paste study text to generate grounded questions.`,
-        });
+        sourceContent = getAcademicTopicPrimer(cleanTitle);
       }
 
       const safeTitle = cleanTitle || 'Document Assessment';

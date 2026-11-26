@@ -173,6 +173,22 @@ References: https://storage.example.supabase.co/storage/v1/object/sign/study-mat
   assert.ok(histDump.includes('Chapter 3') || histDump.includes('17'), 'Legitimate chapter/article numbers must be preserved');
   console.log('Test 6 [Zero PDF/URL/Page Refs + Preserved Academic Numbers]: PASS');
 
+  // 7. Visual Learning Engine (4K Curated Educational Visuals + Algorithmic Vector Diagrams)
+  assert.ok((bioSummary.visualAids?.length ?? 0) >= 1, 'Should attach visual learning aids');
+  assert.ok(
+    bioSummary.visualAids?.some((v) => v.resolution === '4K'),
+    'Visual aid must provide high resolution 4K metadata'
+  );
+  assert.ok(
+    bioSummary.visualAids?.some((v) => v.verifiedLabels && v.verifiedLabels.length >= 3),
+    'Visual aid must include verified component callouts'
+  );
+  assert.ok(
+    (bioSummary.visualDiagrams?.length ?? 0) >= 1,
+    'Should generate educational diagram spec for process steps'
+  );
+  console.log('Test 7 [Visual Learning Engine 4K Photography & Vector Diagrams]: PASS');
+
   console.log('[SummaryEngine Test Suite] Overall Status: ALL TESTS PASSED SUCCESSFULLY');
 }
 

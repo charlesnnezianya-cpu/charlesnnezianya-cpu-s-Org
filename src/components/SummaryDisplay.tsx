@@ -18,6 +18,7 @@ import { DocumentFlashcardsModal } from './DocumentFlashcardsModal';
 import { EducationalDiagramRenderer } from './EducationalDiagramRenderer';
 import { ScientificText } from './ScientificText';
 import { SummaryVisualBlock } from './SummaryVisualBlock';
+import { evaluateVisualLearningNeeds } from '../lib/visualLearningEngine';
 
 interface SummaryDisplayProps {
   summary: StructuredSummary;
@@ -163,12 +164,35 @@ export function SummaryDisplay({
   const distinctions = summary.importantDistinctions ?? [];
   const finalRecap = summary.finalRecap ?? [];
   const comparisons = summary.comparisonTables ?? [];
-  const diagrams = summary.visualDiagrams ?? [];
-  const visualAids = summary.visualAids ?? [];
+  const { fallbackVisuals, fallbackDiagrams } = useMemo(() => {
+    if (
+      (summary.visualAids && summary.visualAids.length > 0) ||
+      (summary.visualDiagrams && summary.visualDiagrams.length > 0)
+    ) {
+      return { fallbackVisuals: [], fallbackDiagrams: [] };
+    }
+    const evaluated = evaluateVisualLearningNeeds(summary);
+    return {
+      fallbackVisuals: evaluated.visualAids,
+      fallbackDiagrams: evaluated.visualDiagrams,
+    };
+  }, [summary]);
+
+  const diagrams =
+    summary.visualDiagrams && summary.visualDiagrams.length > 0
+      ? summary.visualDiagrams
+      : fallbackDiagrams;
+
+  const visualAids =
+    summary.visualAids && summary.visualAids.length > 0
+      ? summary.visualAids
+      : fallbackVisuals;
 
   const getVisualsForSection = (section: SummaryVisualTargetSection, index?: number) =>
     visualAids.filter(
-      (v) => v.targetSection === section && (index === undefined || (v.targetIndex ?? 0) === index)
+      (v) =>
+        v.targetSection === section &&
+        (index === undefined || (v.targetIndex === undefined ? index === 0 : v.targetIndex === index))
     );
 
   return (

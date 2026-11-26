@@ -15,6 +15,7 @@ import {
   stripSourceFilenameFromTitle,
   stripSummarySourceAndPageRefs,
 } from '../src/lib/summarySanitizer.ts';
+import { evaluateVisualLearningNeeds } from '../src/lib/visualLearningEngine.ts';
 import type {
   ClassificationGroup,
   ClassificationTypeEntry,
@@ -439,6 +440,7 @@ export function generateExtractiveSummary(
       finalRecap: [],
       comparisonTables: [],
       visualDiagrams: [],
+      visualAids: [],
       revisionNotes: [],
       keyTakeaways: [],
       wordCount: 0,
@@ -1249,6 +1251,7 @@ export function generateExtractiveSummary(
     ...(sourceNotice ? { sourceNotice } : {}),
     comparisonTables,
     visualDiagrams: [],
+    visualAids: [],
     revisionNotes,
     keyTakeaways,
     validationReport,
@@ -1258,8 +1261,12 @@ export function generateExtractiveSummary(
     generationMode: 'extractive',
   };
 
+  const { visualAids, visualDiagrams } = evaluateVisualLearningNeeds(baseSummary);
+
   return {
     ...baseSummary,
+    visualDiagrams,
+    visualAids,
     markdown: buildDocumentSummaryMarkdown(baseSummary),
   };
 }

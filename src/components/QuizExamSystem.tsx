@@ -1463,7 +1463,7 @@ export function QuizExamSystem({
                   </li>
                   <li>
                     After checking each answer, the correct option highlights in green along with
-                    an explanation and source page reference.
+                    an explanation and academic concept context.
                   </li>
                   <li>
                     Quiz mode is untimed. When you finish the final question, your full score
@@ -1728,9 +1728,9 @@ export function QuizExamSystem({
                 <span className="font-semibold text-slate-900 dark:text-white">Explanation: </span>
                 {feedback.explanation}
               </p>
-              {feedback.topicTag && (
+              {feedback.topicTag && !/^(page\s*\d+|p\.\s*\d+|doc)/i.test(feedback.topicTag.trim()) && (
                 <p className="mt-1.5 text-xs font-medium text-blue-700 dark:text-cyan-400">
-                  Source Page Reference: {feedback.topicTag}
+                  Topic: {feedback.topicTag}
                 </p>
               )}
             </div>
@@ -2893,7 +2893,7 @@ export function QuizExamSystem({
                   </p>
                   <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
                     One question at a time with instant answer verification, green correct answer
-                    highlighting, explanation, and source page reference.
+                    highlighting, and detailed academic explanation.
                   </p>
                 </button>
 

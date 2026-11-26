@@ -28,6 +28,7 @@ import {
   uploadMaterialFileToStorage,
 } from '../lib/supabase';
 import { stripSourceFilenameFromTitle } from '../lib/summarySanitizer';
+import { evaluateVisualLearningNeeds } from '../lib/visualLearningEngine';
 import type {
   ExtractionResult,
   MaterialSourceType,
@@ -670,10 +671,22 @@ export function StudySummarizer({
         res,
         'generating your document summary'
       );
-      const generated: StructuredSummary = {
+      let generated: StructuredSummary = {
         ...generatedRaw,
         generationMode: generatedRaw.generationMode ?? 'extractive',
       };
+
+      if (
+        (!generated.visualAids || generated.visualAids.length === 0) &&
+        (!generated.visualDiagrams || generated.visualDiagrams.length === 0)
+      ) {
+        const enriched = evaluateVisualLearningNeeds(generated);
+        generated = {
+          ...generated,
+          visualAids: enriched.visualAids,
+          visualDiagrams: enriched.visualDiagrams,
+        };
+      }
       setSummary(generated);
 
       let savedRecordId: string | null = null;
@@ -714,40 +727,9 @@ export function StudySummarizer({
         onActivityRecorded?.();
       }
 
-      // Optional non-blocking Nano Banana visual enhancement: silently skips if unavailable
-      void (async () => {
-        try {
-          const visualRes = await fetch(resolveApiUrl('/api/summaries/visuals'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ summary: generated }),
-          });
-          if (!visualRes.ok || visualSeq !== visualReqSeqRef.current) return;
-          const payload = (await visualRes.json()) as {
-            status?: 'generated' | 'skipped';
-            visuals?: SummaryVisualAid[];
-          };
-          if (
-            visualSeq !== visualReqSeqRef.current ||
-            payload.status !== 'generated' ||
-            !Array.isArray(payload.visuals) ||
-            payload.visuals.length === 0
-          ) {
-            return;
-          }
-          const validVisuals = payload.visuals.filter(
-            (v) => v && typeof v.imageDataUrl === 'string' && v.imageDataUrl.startsWith('data:image/')
-          );
-          if (validVisuals.length === 0) return;
-
-          setSummary((prev) => (prev ? { ...prev, visualAids: validVisuals } : prev));
-          if (user && isConfigured && savedRecordId) {
-            await updateStudySummaryVisuals(user.id, savedRecordId, validVisuals).catch(() => {});
-          }
-        } catch {
-          // Optional enhancement: written summary displays normally when unavailable
-        }
-      })();
+      if (user && isConfigured && savedRecordId && generated.visualAids && generated.visualAids.length > 0) {
+        void updateStudySummaryVisuals(user.id, savedRecordId, generated.visualAids).catch(() => {});
+      }
     } catch (err: unknown) {
       setErrorMsg(
         formatClientApiError(

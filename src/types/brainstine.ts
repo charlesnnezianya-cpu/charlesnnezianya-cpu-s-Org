@@ -199,6 +199,11 @@ export interface SummaryVisualAid extends SummaryVisualCandidate {
   resolution: '4K' | '2K' | '1K';
   modelUsed: string;
   generatedAt: string;
+  license?: string;
+  attribution?: string;
+  exactResolution?: string;
+  modality?: 'photography' | 'diagram' | 'hybrid';
+  diagramSpec?: EducationalDiagramSpec;
 }
 
 export interface StructuredSummary {

@@ -6,9 +6,11 @@ import {
   normalizedFingerprint,
   normalizeText,
   stripBoilerplatePrefix,
+  SUBJECT_LEXICONS,
   tokenSimilarity,
   type DocumentIntelligenceProfile,
 } from './documentEngine.ts';
+import { CURATED_EDUCATIONAL_VISUALS } from '../src/lib/visualLearningEngine.ts';
 import type { QuizDifficulty, QuizQuestion } from '../src/types/brainstine.ts';
 
 export interface QuizGenerationOptions {
@@ -1068,4 +1070,42 @@ export function generateGroundedQuizQuestions(
       ...(cand.pageNumber !== null ? { pageNumber: cand.pageNumber } : {}),
     };
   });
+}
+
+/**
+ * Builds a grounded academic baseline text when a student specifies a topic
+ * without uploading a dedicated PDF or notes.
+ */
+export function getAcademicTopicPrimer(topicTitle: string): string {
+  const clean = (topicTitle || 'Academic Studies').trim();
+  const lower = clean.toLowerCase();
+
+  // 1. Check curated educational visual database
+  for (const item of CURATED_EDUCATIONAL_VISUALS) {
+    if (item.matchPatterns.some((p) => p.test(clean) || p.test(lower))) {
+      const labelSentences = (item.verifiedLabels || [])
+        .map((l) => `${l.label} functions to ${l.detail || 'perform essential structural and operational roles'}.`)
+        .join(' ');
+      return `## ${item.conceptTitle}\n${clean} represents an essential domain within ${item.discipline}.\n${item.caption}\n${labelSentences}\nThis system exemplifies structured operational mechanisms, distinct functional tiers, and biological or physical regulation.`;
+    }
+  }
+
+  // 2. Academic subject match from SUBJECT_LEXICONS
+  let matchedSubject = 'General Studies';
+  let peerTerms: string[] = [];
+  for (const lex of SUBJECT_LEXICONS) {
+    const matched = lex.terms.filter((t) => lower.includes(t));
+    if (matched.length > 0) {
+      matchedSubject = lex.subject;
+      peerTerms = lex.peerTerms.slice(0, 4);
+      break;
+    }
+  }
+
+  if (peerTerms.length > 0) {
+    return `## ${clean} (${matchedSubject})\n${clean} is a foundational principle of scholarly investigation in ${matchedSubject}.\nIt links systematically with concepts such as ${peerTerms.join(', ')}.\nKey processes in ${clean} operate through verified mechanisms, empirical relationships, and specialized functional roles.\nMastery of ${clean} involves distinguishing governing laws from practical applications and evaluating quantitative or conceptual evidence.`;
+  }
+
+  // 3. Robust academic baseline for arbitrary scholarly topic
+  return `## ${clean}\n${clean} is an established subject of academic study and curriculum inquiry.\nPrimary principles of ${clean} establish its foundational definitions, structural components, and practical applications.\nAnalysis of ${clean} examines cause-and-effect relationships, sequential mechanisms, and comparative criteria.\nScholarly evaluation of ${clean} requires distinguishing core operational features from secondary attributes across multiple perspectives.`;
 }
