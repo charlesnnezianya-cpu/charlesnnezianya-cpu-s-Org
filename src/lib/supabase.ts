@@ -18,6 +18,7 @@ import type {
   StudyMaterialRecord,
   StudySummaryRecord,
   SummaryLevel,
+  SummaryVisualAid,
   ThemeMode,
   TutorMode,
   UserProfile,
@@ -568,6 +569,38 @@ export async function renameStudySummary(
     );
   }
   return data as StudySummaryRecord;
+}
+
+export async function updateStudySummaryVisuals(
+  userId: string,
+  summaryId: string,
+  visualAids: SummaryVisualAid[]
+): Promise<void> {
+  if (!visualAids || visualAids.length === 0) return;
+  const client = requireSupabase();
+  const { data: existing, error: fetchError } = await client
+    .from('study_summaries')
+    .select('structured_content')
+    .eq('id', summaryId)
+    .eq('user_id', userId)
+    .single();
+
+  if (fetchError || !existing) return;
+
+  const prevStructured = (existing.structured_content || {}) as StructuredSummary;
+  const updatedStructured: StructuredSummary = {
+    ...prevStructured,
+    visualAids,
+  };
+
+  await client
+    .from('study_summaries')
+    .update({
+      structured_content: updatedStructured,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', summaryId)
+    .eq('user_id', userId);
 }
 
 export async function deleteStudySummary(userId: string, summaryId: string): Promise<void> {

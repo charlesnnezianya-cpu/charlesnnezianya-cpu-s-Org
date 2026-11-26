@@ -1045,22 +1045,14 @@ export function generateGroundedQuizQuestions(
       opts[targetIdx] = tmp;
     }
 
-    // Preserve exact /^Page \d+$/ topicTag format when pageNumber exists
     const topicTag =
       cand.pageNumber !== null
         ? `Page ${cand.pageNumber}`
-        : cand.sectionHeading || profile.subjectArea || 'Source Document';
+        : cand.sectionHeading || profile.subjectArea || 'Study Material';
 
-    const locationNote = [
-      cand.sectionHeading ? `Section: ${cand.sectionHeading}` : '',
-      cand.pageNumber !== null ? `Page ${cand.pageNumber}` : '',
-    ]
-      .filter(Boolean)
-      .join(' · ');
-
-    const explanation = locationNote
-      ? `${locationNote}. Grounded in source text: "${cand.evidenceText}"`
-      : `Grounded in source text: "${cand.evidenceText}"`;
+    const explanation = cand.sectionHeading
+      ? `Section: ${cand.sectionHeading}. Explanation: ${cleanSnippet(cand.evidenceText, 180)}`
+      : `Explanation: ${cleanSnippet(cand.evidenceText, 180)}`;
 
     return {
       id: `q-${qNum}`,
@@ -1073,6 +1065,7 @@ export function generateGroundedQuizQuestions(
       maxMarks: 1,
       explanation,
       topicTag,
+      ...(cand.pageNumber !== null ? { pageNumber: cand.pageNumber } : {}),
     };
   });
 }

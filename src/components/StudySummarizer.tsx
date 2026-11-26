@@ -24,14 +24,17 @@ import {
   getMaterialSignedUrl,
   recordStudyActivity,
   saveStudySummaryRecord,
+  updateStudySummaryVisuals,
   uploadMaterialFileToStorage,
 } from '../lib/supabase';
+import { stripSourceFilenameFromTitle } from '../lib/summarySanitizer';
 import type {
   ExtractionResult,
   MaterialSourceType,
   StructuredSummary,
   StudyMaterialRecord,
   SummaryLevel,
+  SummaryVisualAid,
 } from '../types/brainstine';
 import { compressImageFile } from './SnapPhotoControl';
 import { SubjectVisualBanner } from './SubjectVisualBanner';
@@ -147,6 +150,7 @@ export function StudySummarizer({
   const [noticeMsg, setNoticeMsg] = useState<string | null>(null);
   const extractingRef = useRef(false);
   const generatingRef = useRef(false);
+  const visualReqSeqRef = useRef(0);
   const bufferedBufferRef = useRef<ArrayBuffer | null>(null);
   const stagedStoragePathRef = useRef<string | null>(null);
   const fileSelectionSeqRef = useRef(0);
@@ -168,19 +172,20 @@ export function StudySummarizer({
         extractionMethod: 'direct-text',
       });
       setEditableExtractedText(initialMaterial.extracted_text);
-      setEditableTitle(initialMaterial.title);
+      setEditableTitle(stripSourceFilenameFromTitle(initialMaterial.title));
       setSavedMaterialId(initialMaterial.id);
       setUploadState('uploaded');
       setSummary(null);
       setSummarySaved(false);
       setErrorMsg(null);
-      setNoticeMsg(`Loaded "${initialMaterial.title}" from your uploaded materials.`);
+      setNoticeMsg(`Loaded "${stripSourceFilenameFromTitle(initialMaterial.title)}" from your study materials.`);
       onConsumeInitialMaterial?.();
     }
   }, [initialMaterial, onConsumeInitialMaterial]);
 
   const resetAll = () => {
     fileSelectionSeqRef.current += 1;
+    visualReqSeqRef.current += 1;
     bufferedBufferRef.current = null;
     stagedStoragePathRef.current = null;
     setSelectedFile(null);
@@ -552,7 +557,7 @@ export function StudySummarizer({
       setUploadState('uploaded');
       setExtraction(result);
       setEditableExtractedText(result.extractedText);
-      setEditableTitle(result.title);
+      setEditableTitle(stripSourceFilenameFromTitle(result.title));
 
       if (user && isConfigured) {
         try {
@@ -630,6 +635,7 @@ export function StudySummarizer({
     setGenerating(true);
     setSummarySaved(false);
 
+    const visualSeq = ++visualReqSeqRef.current;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 60000);
     try {
@@ -645,13 +651,17 @@ export function StudySummarizer({
               sourceText.slice(sourceText.length - 250_000),
             ].join('\n\n');
 
+      const cleanRequestTitle = stripSourceFilenameFromTitle(
+        editableTitle.trim() || extraction?.title || 'Document Summary'
+      );
+
       const res = await fetch(resolveApiUrl('/api/summaries/extractive'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
         body: JSON.stringify({
           extractedText: boundedText,
-          title: editableTitle.trim() || extraction?.title || 'Document Summary',
+          title: cleanRequestTitle,
           materialType: extraction?.materialType || 'text',
           summaryLevel,
         }),
@@ -666,13 +676,16 @@ export function StudySummarizer({
       };
       setSummary(generated);
 
+      let savedRecordId: string | null = null;
+
       if (user && isConfigured) {
         try {
-          await saveStudySummaryRecord({
+          const savedRecord = await saveStudySummaryRecord({
             userId: user.id,
             materialId: savedMaterialId,
             summary: generated,
           });
+          savedRecordId = savedRecord.id;
           setSummarySaved(true);
           setNoticeMsg(
             'Document Summary generated and automatically saved to your Academic History.'
@@ -700,6 +713,41 @@ export function StudySummarizer({
         });
         onActivityRecorded?.();
       }
+
+      // Optional non-blocking Nano Banana visual enhancement: silently skips if unavailable
+      void (async () => {
+        try {
+          const visualRes = await fetch(resolveApiUrl('/api/summaries/visuals'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ summary: generated }),
+          });
+          if (!visualRes.ok || visualSeq !== visualReqSeqRef.current) return;
+          const payload = (await visualRes.json()) as {
+            status?: 'generated' | 'skipped';
+            visuals?: SummaryVisualAid[];
+          };
+          if (
+            visualSeq !== visualReqSeqRef.current ||
+            payload.status !== 'generated' ||
+            !Array.isArray(payload.visuals) ||
+            payload.visuals.length === 0
+          ) {
+            return;
+          }
+          const validVisuals = payload.visuals.filter(
+            (v) => v && typeof v.imageDataUrl === 'string' && v.imageDataUrl.startsWith('data:image/')
+          );
+          if (validVisuals.length === 0) return;
+
+          setSummary((prev) => (prev ? { ...prev, visualAids: validVisuals } : prev));
+          if (user && isConfigured && savedRecordId) {
+            await updateStudySummaryVisuals(user.id, savedRecordId, validVisuals).catch(() => {});
+          }
+        } catch {
+          // Optional enhancement: written summary displays normally when unavailable
+        }
+      })();
     } catch (err: unknown) {
       setErrorMsg(
         formatClientApiError(
@@ -797,7 +845,7 @@ export function StudySummarizer({
           visualKey="summarizer"
           variant="compact"
           title="Document Intelligence Summarizer"
-          subtitle="Structured concepts, definitions, processes, formulas, and page-grounded study notes extracted directly from your material."
+          subtitle="Structured concepts, definitions, processes, and frameworks extracted directly from your study material."
           className="mt-5"
         />
 

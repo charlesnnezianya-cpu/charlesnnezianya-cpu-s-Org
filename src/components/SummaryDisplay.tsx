@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   AlertCircle,
   BookmarkCheck,
@@ -12,10 +12,12 @@ import {
   ListChecks,
 } from 'lucide-react';
 import { exportSummaryToPdf } from '../lib/pdfExport';
-import type { StructuredSummary, SummaryLevel } from '../types/brainstine';
+import { sanitizeStructuredSummary } from '../lib/summarySanitizer';
+import type { StructuredSummary, SummaryLevel, SummaryVisualTargetSection } from '../types/brainstine';
 import { DocumentFlashcardsModal } from './DocumentFlashcardsModal';
 import { EducationalDiagramRenderer } from './EducationalDiagramRenderer';
 import { ScientificText } from './ScientificText';
+import { SummaryVisualBlock } from './SummaryVisualBlock';
 
 interface SummaryDisplayProps {
   summary: StructuredSummary;
@@ -71,12 +73,13 @@ const ALL_SECTIONS: SectionKey[] = [
 ];
 
 export function SummaryDisplay({
-  summary,
+  summary: rawSummary,
   onSave,
   isSaving = false,
   isSaved = false,
   onCreateQuizFromSummary,
 }: SummaryDisplayProps) {
+  const summary = useMemo(() => sanitizeStructuredSummary(rawSummary), [rawSummary]);
   const [copied, setCopied] = useState(false);
   const [flashcardsOpen, setFlashcardsOpen] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>({
@@ -161,6 +164,12 @@ export function SummaryDisplay({
   const finalRecap = summary.finalRecap ?? [];
   const comparisons = summary.comparisonTables ?? [];
   const diagrams = summary.visualDiagrams ?? [];
+  const visualAids = summary.visualAids ?? [];
+
+  const getVisualsForSection = (section: SummaryVisualTargetSection, index?: number) =>
+    visualAids.filter(
+      (v) => v.targetSection === section && (index === undefined || (v.targetIndex ?? 0) === index)
+    );
 
   return (
     <article className="rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0D162B]">
@@ -175,7 +184,7 @@ export function SummaryDisplay({
             <span>{LEVEL_LABELS[summary.summaryLevel]}</span>
             <span aria-hidden="true">·</span>
             <span className="font-mono tabular-nums">
-              {summary.wordCount.toLocaleString()} source words
+              {summary.wordCount.toLocaleString()} words
             </span>
           </div>
           <h2 className="mt-2 font-display text-xl font-bold tracking-tight text-slate-900 academic-selectable sm:text-2xl dark:text-white">
@@ -271,9 +280,14 @@ export function SummaryDisplay({
           <section>
             {renderSectionHeader('overview', 'Topic Overview')}
             {expandedSections.overview && (
-              <p className="pb-6 max-w-[74ch] text-[15px] leading-[1.7] text-slate-800 academic-selectable dark:text-slate-200">
-                <ScientificText text={summary.topicOverview} />
-              </p>
+              <div className="pb-6 max-w-[74ch]">
+                <p className="text-[15px] leading-[1.7] text-slate-800 academic-selectable dark:text-slate-200">
+                  <ScientificText text={summary.topicOverview} />
+                </p>
+                {getVisualsForSection('overview').map((vis) => (
+                  <SummaryVisualBlock key={vis.id} visual={vis} />
+                ))}
+              </div>
             )}
           </section>
         )}
@@ -357,6 +371,10 @@ export function SummaryDisplay({
                         </ul>
                       </div>
                     )}
+
+                    {getVisualsForSection('concepts', idx).map((vis) => (
+                      <SummaryVisualBlock key={vis.id} visual={vis} />
+                    ))}
                   </div>
                 ))}
               </div>
@@ -492,6 +510,10 @@ export function SummaryDisplay({
                         <ScientificText text={cls.comparisonNote} />
                       </p>
                     )}
+
+                    {getVisualsForSection('classifications', cIdx).map((vis) => (
+                      <SummaryVisualBlock key={vis.id} visual={vis} />
+                    ))}
                   </div>
                 ))}
               </div>
@@ -567,6 +589,10 @@ export function SummaryDisplay({
                         </li>
                       ))}
                     </ol>
+
+                    {getVisualsForSection('processes', idx).map((vis) => (
+                      <SummaryVisualBlock key={vis.id} visual={vis} />
+                    ))}
                   </div>
                 ))}
               </div>
@@ -619,6 +645,10 @@ export function SummaryDisplay({
                         ))}
                       </p>
                     )}
+
+                    {getVisualsForSection('formulas', idx).map((vis) => (
+                      <SummaryVisualBlock key={vis.id} visual={vis} />
+                    ))}
                   </div>
                 ))}
               </div>
@@ -750,6 +780,9 @@ export function SummaryDisplay({
                       {': '}
                     </span>
                     <ScientificText text={item.comparison} />
+                    {getVisualsForSection('distinctions', idx).map((vis) => (
+                      <SummaryVisualBlock key={vis.id} visual={vis} />
+                    ))}
                   </div>
                 ))}
               </div>

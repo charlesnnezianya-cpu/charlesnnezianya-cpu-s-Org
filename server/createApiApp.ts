@@ -17,6 +17,7 @@ import type {
   QuizQuestion,
   QuizSourceMode,
   StudentAnswer,
+  StructuredSummary,
   SummaryLevel,
   TutorMode,
 } from '../src/types/brainstine.ts';
@@ -1611,6 +1612,8 @@ export function createApiApp() {
       return sendSafeApiError(res, 'summaries.document', err);
     }
   });
+
+
 
   const resolveQuizCaller = async (
     req: Request

@@ -13,6 +13,7 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
+import { stripSummarySourceAndPageRefs } from '../lib/summarySanitizer';
 import type { StructuredSummary } from '../types/brainstine';
 import { ScientificText } from './ScientificText';
 
@@ -47,9 +48,8 @@ export function DocumentFlashcardsModal({
           list.push({
             id: `def-${counter++}`,
             category: 'Definition',
-            front: def.term,
-            back: def.definition,
-            context: def.origin === 'source' ? 'From Source Document' : undefined,
+            front: stripSummarySourceAndPageRefs(def.term),
+            back: stripSummarySourceAndPageRefs(def.definition),
           });
         }
       }

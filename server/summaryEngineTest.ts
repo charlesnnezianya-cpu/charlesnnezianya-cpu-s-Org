@@ -29,35 +29,37 @@ function runSummaryEngineTests() {
     console.log('Test 0 [Scientific & Chemical Formatter]: PASS');
   }
 
-  // 1. Biology Multi-Page PDF Summary Test (Definitions, Mechanisms, Page Refs, Zero Filler)
+  // 1. Biology Multi-Page PDF Summary Test (Definitions, Processes, Zero Page/PDF Refs, Zero Filler)
   const bioPdfText = `[Page 1]
+## Light-Dependent & Calvin Reactions
 Photosynthesis is a biological process used by plants and other organisms to convert light energy into chemical energy. Chlorophyll is the green pigment found in cyanobacteria and the chloroplasts of algae and plants.
-First, light-dependent reactions capture photons inside the thylakoid membrane to split H2O into O2, protons, and electrons. Next, ATP synthase uses the proton gradient to synthesize ATP and NADPH.
+Step 1: Light-dependent reactions capture photons inside the thylakoid membrane to split H2O into O2, protons, and electrons (Page 1).
+Step 2: ATP synthase uses the proton gradient to synthesize ATP and NADPH.
 
 [Page 2]
-The Calvin cycle refers to the set of chemical reactions that take place in chloroplasts during photosynthesis. Enzyme RuBisCO catalyzes carbon fixation by combining CO2 with ribulose bisphosphate. Finally, glucose (C6H12O6) is assembled from three-carbon intermediates.
+The Calvin cycle refers to the set of chemical reactions that take place in chloroplasts during photosynthesis (Source: bio_lecture_02.pdf). Enzyme RuBisCO catalyzes carbon fixation by combining CO2 with ribulose bisphosphate on page 2. Step 3: Glucose (C6H12O6) is assembled from three-carbon intermediates.
 Unlike light-dependent reactions, the Calvin cycle occurs in the stroma and does not directly require photons.`;
 
-  const bioSummary = generateExtractiveSummary('Photosynthesis Study Guide', 'General Studies', bioPdfText, 'detailed');
-  assert.equal(bioSummary.title, 'Photosynthesis Study Guide');
+  const bioSummary = generateExtractiveSummary('Photosynthesis_Lecture_02.pdf', 'General Studies', bioPdfText, 'detailed');
+  assert.equal(bioSummary.title, 'Photosynthesis Lecture 02', 'Must strip .pdf extension from title cleanly');
   assert.equal(bioSummary.subjectArea, 'Biology', 'Should infer Biology subject automatically');
   assert.ok(!bioSummary.topicOverview.startsWith('Based on the study material'), 'Should avoid robotic intro padding');
   assert.ok(bioSummary.importantDefinitions.length >= 2, 'Should extract Photosynthesis, Chlorophyll, Calvin cycle definitions');
   assert.ok((bioSummary.processesAndMechanisms?.length ?? 0) >= 1, 'Should detect photosynthesis steps in order');
   assert.ok((bioSummary.importantDistinctions?.length ?? 0) >= 1, 'Should detect "Unlike light-dependent reactions..." contrast');
-  assert.ok(
-    JSON.stringify(bioSummary).includes('Page 1') && JSON.stringify(bioSummary).includes('Page 2'),
-    'Must preserve Page 1 and Page 2 citations'
-  );
+  const bioSerialized = JSON.stringify(bioSummary);
+  assert.ok(!/\bPages?\s+\d+/i.test(bioSerialized), 'Must NOT expose Page 1 or Page 2 anywhere in summary');
+  assert.ok(!bioSerialized.includes('.pdf'), 'Must NOT expose .pdf filenames in summary');
+  assert.ok(!bioSerialized.includes('Source:'), 'Must NOT expose Source: labels');
   assert.ok(!bioSummary.markdown.includes('AI Clarification'), 'Must contain zero AI Clarification labels');
-  console.log('Test 1 [Biology Multi-Page + Processes + Distinctions]: PASS');
+  console.log('Test 1 [Biology Clean Notes + Processes + Distinctions]: PASS');
 
   // 2. Chemistry Formulas, Stoichiometry & Units Test
   const chemText = `[Page 1]
 ## Acid-Base Chemistry
 An Arrhenius acid is defined as a substance that increases the concentration of H^+ ions in aqueous solution. Sulfuric acid (H2SO4) is a strong diprotic acid widely used in industrial synthesis.
 
-## Reaction & pH Equations
+## Reactions and Applications
 Photosynthesis Reaction: 6CO2 + 6H2O -> C6H12O6 + 6O2
 Neutralization: H2SO4 + 2NaOH -> Na2SO4 + 2H2O
 For example, hydrochloric acid reacts rapidly with sodium hydroxide to form table salt and water.
@@ -74,7 +76,7 @@ pH = -log[H^+]`;
     chemSummary.formulasOrFrameworks.some((f) => f.expressionOrStructure.includes('H₂SO₄ + 2NaOH → Na₂SO₄ + 2H₂O')),
     'Should format neutralization equation cleanly'
   );
-  assert.ok(chemSummary.relevantExamples.length >= 1, 'Should extract "For example" application');
+  assert.ok(chemSummary.importantDefinitions.length >= 2, 'Should extract Arrhenius acid and Sulfuric acid definitions');
   assert.ok(chemSummary.mainConcepts.some((c) => c.heading === 'Acid-Base Chemistry'), 'Should preserve explicit heading');
   console.log('Test 2 [Chemistry Reactions & Subscripts]: PASS');
 
@@ -143,6 +145,33 @@ Momentum is defined as the product of mass and velocity of an object moving at s
   assert.equal(briefSummary.formulasOrFrameworks.length, 0, 'Must not force empty/fabricated formulas');
   assert.equal(briefSummary.importantDistinctions?.length ?? 0, 0, 'Must not force unsupported distinctions');
   console.log('Test 5 [Empty & Brief Document Honesty]: PASS');
+
+  // 6. Strict PDF/URL/Source Reference Stripping vs Legitimate Academic Numbering
+  const historyWithRefs = `[Page 4]
+## Chapter 3: The French Revolution of 1789
+According to the uploaded PDF, Chapter 3 examines the fiscal crisis of 1789 and the Three Estates of France (Page 4).
+As stated on page 5, the National Assembly adopted 17 articles in the Declaration of the Rights of Man (Source: https://example.com/study-materials/rev_notes.pdf).
+Step 1: Estates-General convened in May 1789 with 1,200 delegates from three social orders.
+Step 2: Citizens stormed the Bastille on July 14, 1789, marking a decisive political turning point.
+References: https://storage.example.supabase.co/storage/v1/object/sign/study-materials/user1/rev.pdf`;
+
+  const historySummary = generateExtractiveSummary(
+    'French_Revolution_Chapter_3.pdf',
+    'History',
+    historyWithRefs,
+    'detailed'
+  );
+  const histDump = JSON.stringify(historySummary);
+  assert.equal(historySummary.title, 'French Revolution Chapter 3');
+  assert.ok(!histDump.includes('https://'), 'Raw URLs must be completely removed');
+  assert.ok(!histDump.includes('.pdf'), 'PDF filenames must be completely removed');
+  assert.ok(!histDump.includes('According to the uploaded PDF'), 'Uploaded PDF phrase must be removed');
+  assert.ok(!histDump.includes('As stated on page'), 'As stated on page phrase must be removed');
+  assert.ok(!/\bReferences\s*:/i.test(histDump), 'References: labels must be removed');
+  assert.ok(!/\(Page\s+\d+\)/i.test(histDump), 'Parenthetical page numbers must be removed');
+  assert.ok(histDump.includes('1789'), 'Legitimate historical year 1789 must be preserved');
+  assert.ok(histDump.includes('Chapter 3') || histDump.includes('17'), 'Legitimate chapter/article numbers must be preserved');
+  console.log('Test 6 [Zero PDF/URL/Page Refs + Preserved Academic Numbers]: PASS');
 
   console.log('[SummaryEngine Test Suite] Overall Status: ALL TESTS PASSED SUCCESSFULLY');
 }

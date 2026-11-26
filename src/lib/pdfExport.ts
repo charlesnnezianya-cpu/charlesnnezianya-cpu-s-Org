@@ -1,4 +1,5 @@
 import type { StructuredSummary, SummaryLevel } from '../types/brainstine';
+import { sanitizeStructuredSummary } from './summarySanitizer';
 
 const LEVEL_LABELS: Record<SummaryLevel, string> = {
   short: 'Short Summary',
@@ -128,7 +129,8 @@ interface PdfLine {
   spacingAfter: number;
 }
 
-export function exportSummaryToPdf(summary: StructuredSummary): void {
+export function exportSummaryToPdf(rawSummary: StructuredSummary): void {
+  const summary = sanitizeStructuredSummary(rawSummary);
   const lines: PdfLine[] = [];
 
   const pushHeading = (text: string, size = 13) => {
@@ -158,7 +160,7 @@ export function exportSummaryToPdf(summary: StructuredSummary): void {
     lines.push({ text: wrapped, font: 'F2', size: 17, spacingAfter: 5 });
   }
   pushBody(
-    `Brainstine Document Summary | Subject: ${summary.subjectArea} | Format: ${LEVEL_LABELS[summary.summaryLevel]}`
+    `Brainstine Study Notes | Subject: ${summary.subjectArea} | Format: ${LEVEL_LABELS[summary.summaryLevel]}`
   );
 
   pushHeading('Topic Overview');
@@ -338,9 +340,8 @@ export function exportSummaryToPdf(summary: StructuredSummary): void {
   let y = topY;
 
   const flushPage = () => {
-    const pageNum = pagesContent.length + 1;
     currentOps.push(
-      `BT /F1 8 Tf 50 32 Td (Brainstine Document Summary | Page ${pageNum}) Tj ET`
+      `BT /F1 8 Tf 50 32 Td (Brainstine Study Notes) Tj ET`
     );
     pagesContent.push(currentOps.join('\n'));
     currentOps = [];

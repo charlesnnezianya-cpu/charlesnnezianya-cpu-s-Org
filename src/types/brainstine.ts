@@ -158,6 +158,49 @@ export interface DistinctionItem {
   comparison: string;
 }
 
+export type SummaryVisualTargetSection =
+  | 'overview'
+  | 'concepts'
+  | 'classifications'
+  | 'processes'
+  | 'distinctions'
+  | 'formulas';
+
+export type SummaryVisualType =
+  | 'illustration'
+  | 'diagram'
+  | 'concept_map'
+  | 'process_sequence'
+  | 'comparative_visual'
+  | 'spatial_scene';
+
+export interface SummaryVisualVerifiedLabel {
+  label: string;
+  detail?: string;
+}
+
+export interface SummaryVisualCandidate {
+  id: string;
+  targetSection: SummaryVisualTargetSection;
+  targetIndex?: number;
+  conceptTitle: string;
+  subjectDiscipline: string;
+  visualType: SummaryVisualType;
+  necessityReason: string;
+  visualScore: number;
+  caption: string;
+  generationPrompt: string;
+  verifiedLabels: SummaryVisualVerifiedLabel[];
+  aspectRatio: '16:9' | '4:3';
+}
+
+export interface SummaryVisualAid extends SummaryVisualCandidate {
+  imageDataUrl: string;
+  resolution: '4K' | '2K' | '1K';
+  modelUsed: string;
+  generatedAt: string;
+}
+
 export interface StructuredSummary {
   title: string;
   subjectArea: string;
@@ -178,6 +221,7 @@ export interface StructuredSummary {
   sourceNotice?: string;
   comparisonTables?: ComparisonTable[];
   visualDiagrams?: EducationalDiagramSpec[];
+  visualAids?: SummaryVisualAid[];
   revisionNotes: string[];
   keyTakeaways: string[];
   validationReport?: SummaryValidationReport;
