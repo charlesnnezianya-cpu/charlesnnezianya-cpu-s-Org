@@ -438,68 +438,59 @@ export function StudySummarizer({
           }
         }
 
-        const isLocalOrigin =
-          window.location.hostname === 'localhost' ||
-          window.location.hostname === '127.0.0.1' ||
-          window.location.hostname === '[::1]';
-
-        if (!isLocalOrigin && uploadFile.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES) {
-          if (!user || !isConfigured) {
-            throw new Error(
-              `Files larger than 3.8 MB require signing in to your Brainstine account (file is ${formatBytes(uploadFile.size)}). Please sign in to upload files up to 25 MB, or choose a smaller file.`
-            );
-          }
-
-          if (!preUploadedStoragePath) {
-            setExtractionStatus('Uploading large file for processing...');
-            setUploadProgress(15);
-            preUploadedStoragePath = await uploadMaterialFileToStorage(user.id, uploadFile, {
-              preBuffered: uploadBuffer,
-              onProgress: (pct) => {
-                setUploadProgress(15 + Math.round(pct * 0.45));
-              },
-            });
-            stagedStoragePathRef.current = preUploadedStoragePath;
-          }
-
-          setUploadProgress(62);
-          setUploadState('extracting');
-          const signedStorageUrl = await getMaterialSignedUrl(preUploadedStoragePath);
-          setExtractionStatus(typeLabel);
-          setUploadProgress(70);
-
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 120000);
-          try {
-            const extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              cache: 'no-store',
-              signal: controller.signal,
-              body: JSON.stringify({
-                signedStorageUrl,
-                fileName: uploadFile.name,
-                mimeType: uploadFile.type,
-                fileSizeBytes: uploadFile.size,
-                ...(editableTitle.trim() ? { title: editableTitle.trim() } : {}),
-              }),
-            });
-            setUploadProgress(95);
-            result = await parseApiJsonResponse<ExtractionResult>(
-              extractRes,
-              'extracting study content from your file'
-            );
-          } catch (extractErr) {
-            // Reset staged path on failure so a subsequent retry can re-upload cleanly
-            stagedStoragePathRef.current = null;
-            throw extractErr;
-          } finally {
-            clearTimeout(timer);
-          }
-        } else {
-          setExtractionStatus(typeLabel);
-          setUploadState('extracting');
+        setExtractionStatus(typeLabel);
+        setUploadState('extracting');
+        try {
           result = await uploadDirectWithXhrAndFallback(uploadFile);
+        } catch (directErr) {
+          // If direct upload failed and file is large, fall back to Supabase storage staging if signed in
+          if (uploadFile.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES && user && isConfigured) {
+            let preUploadedStoragePath: string | null = stagedStoragePathRef.current;
+            if (!preUploadedStoragePath) {
+              setExtractionStatus('Uploading large file for processing...');
+              setUploadProgress(15);
+              preUploadedStoragePath = await uploadMaterialFileToStorage(user.id, uploadFile, {
+                preBuffered: uploadBuffer,
+                onProgress: (pct) => {
+                  setUploadProgress(15 + Math.round(pct * 0.45));
+                },
+              });
+              stagedStoragePathRef.current = preUploadedStoragePath;
+            }
+
+            setUploadProgress(62);
+            setUploadState('extracting');
+            const signedStorageUrl = await getMaterialSignedUrl(preUploadedStoragePath);
+            setExtractionStatus(typeLabel);
+            setUploadProgress(70);
+
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 120000);
+            try {
+              const extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                cache: 'no-store',
+                signal: controller.signal,
+                body: JSON.stringify({
+                  signedStorageUrl,
+                  fileName: uploadFile.name,
+                  mimeType: uploadFile.type,
+                  fileSizeBytes: uploadFile.size,
+                  ...(editableTitle.trim() ? { title: editableTitle.trim() } : {}),
+                }),
+              });
+              setUploadProgress(95);
+              result = await parseApiJsonResponse<ExtractionResult>(
+                extractRes,
+                'extracting study content from your file'
+              );
+            } finally {
+              clearTimeout(timer);
+            }
+          } else {
+            throw directErr;
+          }
         }
       } else {
         setUploadState('extracting');

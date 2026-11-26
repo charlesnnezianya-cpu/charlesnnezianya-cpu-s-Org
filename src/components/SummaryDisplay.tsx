@@ -8,10 +8,12 @@ import {
   ChevronUp,
   Copy,
   FileDown,
+  Layers,
   ListChecks,
 } from 'lucide-react';
 import { exportSummaryToPdf } from '../lib/pdfExport';
 import type { StructuredSummary, SummaryLevel } from '../types/brainstine';
+import { DocumentFlashcardsModal } from './DocumentFlashcardsModal';
 import { EducationalDiagramRenderer } from './EducationalDiagramRenderer';
 import { ScientificText } from './ScientificText';
 
@@ -72,6 +74,7 @@ export function SummaryDisplay({
   onCreateQuizFromSummary,
 }: SummaryDisplayProps) {
   const [copied, setCopied] = useState(false);
+  const [flashcardsOpen, setFlashcardsOpen] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>({
     overview: true,
     concepts: true,
@@ -235,6 +238,15 @@ export function SummaryDisplay({
               <span>Test Myself</span>
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={() => setFlashcardsOpen(true)}
+            className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-purple-200 bg-purple-50 px-3 py-1.5 text-xs font-semibold text-purple-800 transition-colors hover:bg-purple-100 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-purple-900/60 dark:bg-purple-950/50 dark:text-purple-300 dark:hover:bg-purple-900"
+          >
+            <Layers className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Flashcards</span>
+          </button>
         </div>
       </header>
 
@@ -695,6 +707,12 @@ export function SummaryDisplay({
           </section>
         )}
       </div>
+
+      <DocumentFlashcardsModal
+        summary={summary}
+        isOpen={flashcardsOpen}
+        onClose={() => setFlashcardsOpen(false)}
+      />
     </article>
   );
 }

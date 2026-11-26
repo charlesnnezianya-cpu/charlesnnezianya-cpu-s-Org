@@ -753,7 +753,7 @@ export function createApiApp() {
   });
 
   app.use(
-    ['/api/materials', '/api/summaries', '/api/quizzes', '/api/ai'],
+    ['/api/ai'],
     async (_req: Request, _res: Response, next: NextFunction) => {
       try {
         await ensureResolvedGeminiModel();
@@ -1578,12 +1578,6 @@ export function createApiApp() {
     req: Request
   ): Promise<{ userId: string; accessToken: string | null }> => {
     const verifiedAuth = await resolveAuthorizedUserFromBearer(req.headers.authorization);
-    if (getSupabaseAssessmentConfig() !== null && !verifiedAuth) {
-      throw new AssessmentHttpError(
-        401,
-        'Please sign in to access quizzes and examinations.'
-      );
-    }
     return {
       userId: verifiedAuth?.userId || 'local-user',
       accessToken: verifiedAuth?.accessToken || null,

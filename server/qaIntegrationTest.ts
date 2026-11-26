@@ -658,7 +658,7 @@ async function runQaIntegrationTests() {
         (err: unknown) => err instanceof AssessmentHttpError && err.status === 403
       );
 
-      // Also verify HTTP 401 when Supabase is configured and caller lacks valid Bearer JWT
+      // Also verify unauthenticated/guest users can generate and take quizzes safely in-memory
       process.env.VITE_SUPABASE_URL = 'https://myproject.supabase.co';
       process.env.VITE_SUPABASE_ANON_KEY = 'anon-key-placeholder';
       const unauthGen = await fetch(`${baseUrl}/api/quizzes/generate`, {
@@ -670,8 +670,8 @@ async function runQaIntegrationTests() {
           questionCount: 10,
         }),
       });
-      assert.equal(unauthGen.status, 401);
-      console.log('PASS [10/12] Ownership 403 & authenticated 401 gate verified');
+      assert.equal(unauthGen.status, 200);
+      console.log('PASS [10/12] Ownership 403 & guest in-memory quiz access verified');
     }
 
     // 11. Unauthenticated studyMaterials isolation in RAG services when Supabase is configured

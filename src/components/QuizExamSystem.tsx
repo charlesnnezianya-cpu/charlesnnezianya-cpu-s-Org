@@ -626,7 +626,7 @@ export function QuizExamSystem({
         window.location.hostname === '127.0.0.1' ||
         window.location.hostname === '[::1]';
 
-      let extractRes: Response;
+      let extractRes!: Response;
       const shouldUseStorageStaging =
         !isLocalOrigin && preparedFile.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES;
 
@@ -637,40 +637,74 @@ export function QuizExamSystem({
           );
         }
 
+        let stagingSuccess = false;
         let storagePath = stagedStoragePathRef.current;
         if (!storagePath) {
-          setUploadProgress(25);
-          storagePath = await uploadMaterialFileToStorage(user.id, preparedFile, {
-            preBuffered: arrayBuffer,
-            onProgress: (pct) => {
-              setUploadProgress(25 + Math.round(pct * 0.4));
-            },
-          });
-          stagedStoragePathRef.current = storagePath;
+          try {
+            setUploadProgress(25);
+            storagePath = await uploadMaterialFileToStorage(user.id, preparedFile, {
+              preBuffered: arrayBuffer,
+              onProgress: (pct) => {
+                setUploadProgress(25 + Math.round(pct * 0.4));
+              },
+            });
+            stagedStoragePathRef.current = storagePath;
+            stagingSuccess = true;
+          } catch (storageErr) {
+            console.warn('Quiz storage staging failed, falling back to direct upload:', storageErr);
+          }
+        } else {
+          stagingSuccess = true;
         }
 
-        setUploadProgress(70);
-        const signedStorageUrl = await getMaterialSignedUrl(storagePath);
+        if (stagingSuccess && storagePath) {
+          try {
+            setUploadProgress(70);
+            const signedStorageUrl = await getMaterialSignedUrl(storagePath);
 
-        setUploadProgress(85);
-        const extractController = new AbortController();
-        const extractTimer = setTimeout(() => extractController.abort(), 120000);
-        try {
-          extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            cache: 'no-store',
-            signal: extractController.signal,
-            body: JSON.stringify({
-              signedStorageUrl,
-              fileName: preparedFile.name,
-              mimeType: finalMime,
-              fileSizeBytes: preparedFile.size,
-              title: file.name.replace(/\.[^/.]+$/, ''),
-            }),
-          });
-        } finally {
-          clearTimeout(extractTimer);
+            setUploadProgress(85);
+            const extractController = new AbortController();
+            const extractTimer = setTimeout(() => extractController.abort(), 120000);
+            try {
+              extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                cache: 'no-store',
+                signal: extractController.signal,
+                body: JSON.stringify({
+                  signedStorageUrl,
+                  fileName: preparedFile.name,
+                  mimeType: finalMime,
+                  fileSizeBytes: preparedFile.size,
+                  title: file.name.replace(/\.[^/.]+$/, ''),
+                }),
+              });
+            } finally {
+              clearTimeout(extractTimer);
+            }
+          } catch (signedErr) {
+            console.warn('Quiz signed URL extraction failed, falling back to direct upload:', signedErr);
+            stagingSuccess = false;
+          }
+        }
+
+        if (!stagingSuccess) {
+          const formData = new FormData();
+          formData.append('file', preparedFile, preparedFile.name);
+          formData.append('title', file.name.replace(/\.[^/.]+$/, ''));
+
+          setUploadProgress(50);
+          const directController = new AbortController();
+          const directTimer = setTimeout(() => directController.abort(), 120000);
+          try {
+            extractRes = await fetch(resolveApiUrl('/api/materials/extract'), {
+              method: 'POST',
+              signal: directController.signal,
+              body: formData,
+            });
+          } finally {
+            clearTimeout(directTimer);
+          }
         }
       } else {
         const formData = new FormData();
