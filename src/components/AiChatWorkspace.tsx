@@ -74,25 +74,6 @@ interface AiChatWorkspaceProps {
   onSendImageToTutor: (attachment: SnapImageAttachment) => void;
 }
 
-const STARTER_PROMPTS = [
-  {
-    subject: 'Biology & Medicine',
-    prompt: 'Explain the mechanism of action potentials across a neuronal membrane step by step.',
-  },
-  {
-    subject: 'Chemistry',
-    prompt: 'Compare SN1 and SN2 nucleophilic substitution reactions with energy diagrams and examples.',
-  },
-  {
-    subject: 'Mathematics',
-    prompt: 'Solve the integral of x * e^(2x) dx using integration by parts and show every step.',
-  },
-  {
-    subject: 'Computer Science',
-    prompt: 'Explain time and space complexity differences between Merge Sort and Quick Sort with code.',
-  },
-];
-
 export function AiChatWorkspace({
   materials,
   summaries,
@@ -981,48 +962,16 @@ export function AiChatWorkspace({
               <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
             </div>
           ) : messages.length === 0 ? (
-            <div className="mx-auto flex max-w-2xl flex-col items-center justify-center py-4 text-center">
-              <SubjectVisualBanner
-                visualKey="chatbot"
-                variant="hero"
-                title="AI Academic Chatbot · Research & Problem Solving"
-                subtitle="Work through equations step by step, compare concepts with structured tables, attach your notes, or snap a photo of a diagram."
-                className="w-full text-left"
-              />
-
-              <div className="mt-5 grid w-full grid-cols-1 gap-3 text-left sm:grid-cols-2">
-                {STARTER_PROMPTS.map((item) => {
-                  const thumb = resolveSubjectVisual(`${item.subject} ${item.prompt}`, 'chatbot');
-                  return (
-                    <button
-                      key={item.subject}
-                      type="button"
-                      disabled={sending}
-                      onClick={() => sendMessage({ overrideText: item.prompt })}
-                      className="group overflow-hidden rounded-xl border border-slate-200 bg-slate-50/70 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-blue-300 hover:bg-blue-50/60 hover:shadow-sm disabled:opacity-50 select-none dark:border-slate-800 dark:bg-slate-900/50 dark:hover:border-cyan-700 dark:hover:bg-slate-800/80"
-                    >
-                      <div className="aspect-[16/9] w-full overflow-hidden border-b border-slate-200/80 bg-slate-900 dark:border-slate-800">
-                        <img
-                          src={thumb.src}
-                          alt={thumb.alt}
-                          loading="lazy"
-                          decoding="async"
-                          referrerPolicy="no-referrer"
-                          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                        />
-                      </div>
-                      <div className="p-3.5">
-                        <p className="text-[11px] font-semibold text-blue-700 dark:text-cyan-400">
-                          {item.subject}
-                        </p>
-                        <p className="mt-1 text-xs leading-relaxed text-slate-700 dark:text-slate-200">
-                          {item.prompt}
-                        </p>
-                      </div>
-                    </button>
-                  );
-                })}
+            <div className="mx-auto flex max-w-xl flex-col items-center justify-center py-20 text-center">
+              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-100 text-blue-700 shadow-xs dark:bg-blue-950/60 dark:text-cyan-400">
+                <Sparkles className="h-7 w-7" aria-hidden="true" />
               </div>
+              <h3 className="mt-4 text-base font-bold text-slate-900 dark:text-white">
+                AI Academic Chatbot
+              </h3>
+              <p className="mt-1.5 text-xs leading-relaxed text-slate-600 dark:text-slate-400">
+                Type any academic question, problem, or topic below. Ask for step-by-step solutions, explanations, or attach your study materials for targeted answers.
+              </p>
             </div>
           ) : (
             <div className="mx-auto max-w-3xl space-y-5">

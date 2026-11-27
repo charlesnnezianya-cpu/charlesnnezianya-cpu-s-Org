@@ -124,15 +124,6 @@ const INTERACTIVE_TUTOR_PROMPTS: { label: string; command: string }[] = [
   },
 ];
 
-const TOPIC_STARTERS = [
-  { title: 'Cellular Respiration', area: 'Biology' },
-  { title: 'Acid-Base Equilibria & Buffers', area: 'Chemistry' },
-  { title: 'Eigenvalues & Eigenvectors', area: 'Linear Algebra' },
-  { title: 'Cardiac Cycle Physiology', area: 'Medicine' },
-  { title: 'Dynamic Programming Fundamentals', area: 'Computer Science' },
-  { title: 'Thermodynamics & Entropy', area: 'Physics' },
-];
-
 export function AiTutorWorkspace({
   materials,
   summaries,
@@ -1070,85 +1061,16 @@ export function AiTutorWorkspace({
               <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
             </div>
           ) : messages.length === 0 ? (
-            <div className="mx-auto flex max-w-2xl flex-col items-center justify-center py-4 text-center">
-              <SubjectVisualBanner
-                visualKey="tutor"
-                variant="hero"
-                title="Personal AI Tutor · Step-by-Step Studio"
-                subtitle="Choose a learning depth above, pick a subject below, or snap a photo of a lesson problem for guided mastery."
-                className="w-full text-left"
-              />
-
-              {/* Mode Overview Strip */}
-              <div className="mt-5 grid w-full grid-cols-1 gap-2.5 text-left sm:grid-cols-3">
-                {TUTOR_MODES.map((m) => (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => handleModeChange(m.id)}
-                    className={`min-h-11 rounded-xl border p-3.5 text-left transition-all duration-200 select-none ${
-                      tutorMode === m.id
-                        ? 'border-blue-500 bg-blue-50/75 shadow-xs dark:border-cyan-500 dark:bg-cyan-950/30'
-                        : 'border-slate-200 bg-slate-50/60 hover:border-slate-300 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-900/40 dark:hover:bg-slate-800/70'
-                    }`}
-                  >
-                    <p className="text-xs font-bold text-slate-900 dark:text-white">
-                      {m.label}
-                    </p>
-                    <p className="mt-1 text-[11px] leading-relaxed text-slate-600 dark:text-slate-400">
-                      {m.description}
-                    </p>
-                  </button>
-                ))}
+            <div className="mx-auto flex max-w-xl flex-col items-center justify-center py-20 text-center">
+              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-100 text-blue-700 shadow-xs dark:bg-blue-950/60 dark:text-cyan-400">
+                <GraduationCap className="h-7 w-7" aria-hidden="true" />
               </div>
-
-              <div className="mt-5 w-full">
-                <p className="mb-2.5 text-left text-xs font-semibold text-slate-500 select-none dark:text-slate-400">
-                  Start Teaching a Topic Immediately
-                </p>
-                <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                  {TOPIC_STARTERS.map((topic) => {
-                    const thumb = resolveSubjectVisual(`${topic.area} ${topic.title}`, 'tutor');
-                    return (
-                      <button
-                        key={topic.title}
-                        type="button"
-                        disabled={sending}
-                        onClick={() =>
-                          sendTutorTurn({
-                            overrideText: `Teach me ${topic.title} from the beginning, step by step.`,
-                            quickAction: 'Teach me this topic from the beginning',
-                          })
-                        }
-                        className="group flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-2.5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-blue-300 hover:bg-blue-50/40 hover:shadow-sm disabled:opacity-50 select-none dark:border-slate-800 dark:bg-slate-900/50 dark:hover:border-cyan-700 dark:hover:bg-slate-800"
-                      >
-                        <div className="h-14 w-20 shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-slate-100 dark:border-slate-700 dark:bg-slate-950">
-                          <img
-                            src={thumb.src}
-                            alt={thumb.alt}
-                            loading="lazy"
-                            decoding="async"
-                            referrerPolicy="no-referrer"
-                            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                          />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-xs font-semibold text-slate-900 dark:text-white">
-                            {topic.title}
-                          </p>
-                          <p className="mt-0.5 text-[11px] font-medium text-blue-700 dark:text-cyan-400">
-                            {topic.area}
-                          </p>
-                        </div>
-                        <Sparkles
-                          className="mr-1 h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-cyan-400"
-                          aria-hidden="true"
-                        />
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
+              <h3 className="mt-4 text-base font-bold text-slate-900 dark:text-white">
+                Personal AI Tutor
+              </h3>
+              <p className="mt-1.5 text-xs leading-relaxed text-slate-600 dark:text-slate-400">
+                Type any topic, concept, or question below. Your AI tutor will guide you step-by-step through clear explanations and structured lessons.
+              </p>
             </div>
           ) : (
             <div className="mx-auto max-w-3xl space-y-5">
