@@ -6,7 +6,7 @@ import type {
   SummaryVisualType,
   SummaryVisualVerifiedLabel,
 } from '../types/brainstine';
-import { stripSummarySourceAndPageRefs } from './summarySanitizer';
+import { stripSummarySourceAndPageRefs } from './summarySanitizer.ts';
 
 export interface CuratedEducationalVisual {
   id: string;

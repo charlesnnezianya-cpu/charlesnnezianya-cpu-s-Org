@@ -4,7 +4,7 @@ import {
   parseApiJsonResponse,
   resolveApiUrl,
   sanitizeUserErrorMessage,
-} from './apiClient';
+} from './apiClient.ts';
 
 export interface SseStreamOptions<TDone> {
   url: string;

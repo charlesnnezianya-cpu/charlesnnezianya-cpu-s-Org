@@ -1,5 +1,5 @@
 import type { StructuredSummary, SummaryLevel } from '../types/brainstine';
-import { sanitizeStructuredSummary } from './summarySanitizer';
+import { sanitizeStructuredSummary } from './summarySanitizer.ts';
 
 const LEVEL_LABELS: Record<SummaryLevel, string> = {
   short: 'Short Summary',
