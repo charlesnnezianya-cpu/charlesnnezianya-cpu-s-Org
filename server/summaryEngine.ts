@@ -249,6 +249,15 @@ export function buildDocumentSummaryMarkdown(
     lines.push('');
   }
 
+  // I. Final Recap
+  if (summary.finalRecap && summary.finalRecap.length > 0) {
+    lines.push('## Final Recap');
+    for (const recap of summary.finalRecap) {
+      lines.push(`- ${recap}`);
+    }
+    lines.push('');
+  }
+
   return stripSummarySourceAndPageRefs(lines.join('\n').trim());
 }
 
@@ -1166,6 +1175,17 @@ export function generateExtractiveSummary(
     }
   }
 
+  const finalRecap: string[] = [];
+  const recapTarget = summaryLevel === 'comprehensive' ? 5 : summaryLevel === 'detailed' ? 4 : 2;
+  for (const kt of keyTakeaways.slice(0, recapTarget)) {
+    finalRecap.push(sanitizeOut(`Mastery Synthesis: ${kt}`));
+  }
+  if (profile.causeEffects.length > 0 && finalRecap.length < recapTarget) {
+    for (const ce of profile.causeEffects.slice(0, 2)) {
+      finalRecap.push(sanitizeOut(`Core Mechanism: ${ce.cause} results in ${ce.effect}.`));
+    }
+  }
+
   // --------------------------------------------------------------------------
   // QUALITY CONTROL VALIDATION STAGE
   // Check section coverage, named-type explanations, page refs & deduplication
@@ -1278,7 +1298,7 @@ export function generateExtractiveSummary(
     formulasOrFrameworks,
     processesAndMechanisms,
     importantDistinctions,
-    finalRecap: [],
+    finalRecap,
     ...(sourceNotice ? { sourceNotice } : {}),
     comparisonTables,
     visualDiagrams: [],
