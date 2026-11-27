@@ -876,7 +876,16 @@ async function persistQuizToSupabase(params: {
       sealed_answer_key: params.sealedAnswerKey,
     });
     if (!res.ok && res.status === 400) {
-      res = await tryInsert(basePayload);
+      const questionsWithFallback = params.sanitizedQuestions.map((q, idx) =>
+        idx === 0 ? { ...q, _sealedKey: params.sealedAnswerKey } : q
+      );
+      res = await tryInsert({
+        ...basePayload,
+        questions: questionsWithFallback,
+      });
+      if (!res.ok) {
+        res = await tryInsert(basePayload);
+      }
     }
     if (!res.ok) return null;
     const rows = (await res.json()) as Array<{ id?: string }>;
@@ -1162,30 +1171,36 @@ export async function startServerAssessmentSession(params: {
         }
 
         let mergedQuestions: ServerQuestionAnswerKey[] | null = null;
-        if (row.sealed_answer_key) {
-          const unsealed = unsealAnswerKeyPayload(row.sealed_answer_key, params.userId);
-          if (!unsealed) {
-            throw new AssessmentHttpError(
-              500,
-              'Unable to decrypt saved assessment answer keys. Verify ASSESSMENT_KEY_SECRET.'
+        const sealedKeyCandidate =
+          row.sealed_answer_key ||
+          (Array.isArray(row.questions) && row.questions[0] && (row.questions[0] as unknown as { _sealedKey?: string })._sealedKey
+            ? String((row.questions[0] as unknown as { _sealedKey?: string })._sealedKey)
+            : null);
+
+        if (sealedKeyCandidate) {
+          const unsealed = unsealAnswerKeyPayload(sealedKeyCandidate, params.userId);
+          if (unsealed) {
+            const keyMap = new Map(unsealed.map((k) => [k.id, k]));
+            mergedQuestions = normalizeServerQuestionKeys(
+              (row.questions || []).map((q, idx) => {
+                const k = keyMap.get(String(q.id || `q-${idx + 1}`));
+                return {
+                  ...q,
+                  correctOptionIndex: k?.correctOptionIndex ?? q.correctOptionIndex,
+                  expectedAnswer: k?.expectedAnswer ?? q.expectedAnswer,
+                  explanation: k?.explanation ?? q.explanation,
+                  maxMarks: k?.maxMarks ?? q.maxMarks,
+                  topicTag: k?.topicTag ?? q.topicTag,
+                  cognitiveBand: k?.cognitiveBand ?? q.cognitiveBand,
+                  questionCategory: k?.questionCategory ?? q.questionCategory,
+                };
+              })
             );
           }
-          const keyMap = new Map(unsealed.map((k) => [k.id, k]));
-          mergedQuestions = normalizeServerQuestionKeys(
-            (row.questions || []).map((q, idx) => {
-              const k = keyMap.get(String(q.id || `q-${idx + 1}`));
-              return {
-                ...q,
-                correctOptionIndex: k?.correctOptionIndex ?? q.correctOptionIndex,
-                expectedAnswer: k?.expectedAnswer ?? q.expectedAnswer,
-                explanation: k?.explanation ?? q.explanation,
-                maxMarks: k?.maxMarks ?? q.maxMarks,
-                topicTag: k?.topicTag ?? q.topicTag,
-                cognitiveBand: k?.cognitiveBand ?? q.cognitiveBand,
-                questionCategory: k?.questionCategory ?? q.questionCategory,
-              };
-            })
-          );
+        }
+
+        if (!mergedQuestions && baseSession && baseSession.questions?.length > 0) {
+          mergedQuestions = baseSession.questions;
         }
 
         if (!mergedQuestions) {
@@ -1463,7 +1478,8 @@ export async function startServerAssessmentSession(params: {
           throw new AssessmentHttpError(409, 'This assessment session could not be started.');
         }
       } catch (dbErr) {
-        if (dbErr instanceof AssessmentHttpError) throw dbErr;
+        if (dbErr instanceof AssessmentHttpError && dbErr.status !== 503) throw dbErr;
+        baseSession.persistedInSupabase = false;
         logServerError('assessment.supabase_start_session_fallback', dbErr);
       }
     }

@@ -11,6 +11,7 @@ import {
   ListFilter,
   Loader2,
   RefreshCw,
+  Sparkles,
   Trash2,
   Upload,
 } from 'lucide-react';
@@ -1283,9 +1284,9 @@ export function StudySummarizer({
             <div className="flex flex-wrap items-center gap-2.5 shrink-0 select-none">
               <button
                 type="button"
-                onClick={() => setIsSectionModalOpen(true)}
+                onClick={handleGenerateSummary}
                 disabled={generating}
-                className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 whitespace-nowrap shrink-0 sm:w-auto dark:bg-blue-600 dark:hover:bg-blue-500"
+                className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-500 disabled:opacity-50 whitespace-nowrap shrink-0 sm:w-auto"
               >
                 {generating ? (
                   <>
@@ -1294,10 +1295,20 @@ export function StudySummarizer({
                   </>
                 ) : (
                   <>
-                    <ListFilter className="h-4 w-4" aria-hidden="true" />
-                    <span>Select summary parts</span>
+                    <Sparkles className="h-4 w-4" aria-hidden="true" />
+                    <span>Generate Summary</span>
                   </>
                 )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsSectionModalOpen(true)}
+                disabled={generating}
+                className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap shrink-0 sm:w-auto dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <ListFilter className="h-4 w-4" aria-hidden="true" />
+                <span>Select summary parts</span>
               </button>
 
               <button
