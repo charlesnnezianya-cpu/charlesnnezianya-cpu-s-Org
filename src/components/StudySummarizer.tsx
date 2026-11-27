@@ -1,11 +1,14 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   FileAudio,
   FileText,
   Image as ImageIcon,
   Layers,
+  ListFilter,
   Loader2,
   RefreshCw,
   Trash2,
@@ -30,15 +33,15 @@ import {
 import { stripSourceFilenameFromTitle } from '../lib/summarySanitizer';
 import { evaluateVisualLearningNeeds } from '../lib/visualLearningEngine';
 import type {
+  ExtractedDocumentSection,
   ExtractionResult,
   MaterialSourceType,
   StructuredSummary,
   StudyMaterialRecord,
   SummaryLevel,
-  SummaryVisualAid,
 } from '../types/brainstine';
+import { SectionSelectorModal } from './SectionSelectorModal';
 import { compressImageFile } from './SnapPhotoControl';
-import { SubjectVisualBanner } from './SubjectVisualBanner';
 import { SummaryDisplay } from './SummaryDisplay';
 
 interface StudySummarizerProps {
@@ -54,6 +57,12 @@ const HOSTED_DIRECT_UPLOAD_LIMIT_BYTES = Math.floor(3.8 * 1024 * 1024);
 
 const ACCEPTED_EXTENSIONS =
   '.pdf,.png,.jpg,.jpeg,.webp,.gif,.heic,.mp3,.wav,.m4a,.webm,.ogg,.aac,.flac,.txt,.md';
+
+const STYLE_LABELS: Record<SummaryLevel, string> = {
+  short: 'Simple',
+  detailed: 'Detailed',
+  comprehensive: 'Comprehensive',
+};
 
 function inferUploadMimeType(fileName: string, rawType?: string | null): string {
   const cleaned = (rawType || '').split(';')[0].trim().toLowerCase();
@@ -115,6 +124,25 @@ function formatBytes(bytes: number | null): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function buildFallbackSections(text: string, title: string): ExtractedDocumentSection[] {
+  const clean = text.trim();
+  if (!clean) return [];
+  const words = clean.split(/\s+/).filter(Boolean).length;
+  const snippet = clean.replace(/\s+/g, ' ').slice(0, 127);
+  return [
+    {
+      id: 'sec-full-0',
+      index: 0,
+      heading: stripSourceFilenameFromTitle(title) || 'Document Overview',
+      preview: snippet.length >= 127 ? `${snippet}…` : snippet,
+      wordCount: words,
+      unitCount: 1,
+      pageNumbers: [],
+      text: clean,
+    },
+  ];
+}
+
 export function StudySummarizer({
   initialMaterial,
   onConsumeInitialMaterial,
@@ -123,6 +151,7 @@ export function StudySummarizer({
 }: StudySummarizerProps) {
   const { user, isConfigured } = useAuth();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const summaryContainerRef = useRef<HTMLDivElement | null>(null);
 
   const [inputMode, setInputMode] = useState<'file' | 'text'>('file');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -141,6 +170,11 @@ export function StudySummarizer({
   const [editableTitle, setEditableTitle] = useState('');
   const [savedMaterialId, setSavedMaterialId] = useState<string | null>(null);
 
+  const [extractedSections, setExtractedSections] = useState<ExtractedDocumentSection[]>([]);
+  const [selectedSectionIds, setSelectedSectionIds] = useState<string[]>([]);
+  const [isSectionModalOpen, setIsSectionModalOpen] = useState(false);
+  const [showRawTextDrawer, setShowRawTextDrawer] = useState(false);
+
   const [summaryLevel, setSummaryLevel] = useState<SummaryLevel>('detailed');
   const [generating, setGenerating] = useState(false);
   const [summary, setSummary] = useState<StructuredSummary | null>(null);
@@ -149,44 +183,120 @@ export function StudySummarizer({
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [noticeMsg, setNoticeMsg] = useState<string | null>(null);
+
   const extractingRef = useRef(false);
   const generatingRef = useRef(false);
-  const visualReqSeqRef = useRef(0);
   const bufferedBufferRef = useRef<ArrayBuffer | null>(null);
   const stagedStoragePathRef = useRef<string | null>(null);
-  const fileSelectionSeqRef = useRef(0);
+  const documentSessionSeqRef = useRef(0);
+
+  // Sync sections when user edits raw text in the optional drawer
+  const activeSections = useMemo(() => {
+    if (
+      extraction &&
+      editableExtractedText.trim() === extraction.extractedText.trim() &&
+      extractedSections.length > 0
+    ) {
+      return extractedSections;
+    }
+    if (extractedSections.length > 0 && editableExtractedText.trim() === extraction?.extractedText.trim()) {
+      return extractedSections;
+    }
+    return buildFallbackSections(
+      editableExtractedText,
+      editableTitle || extraction?.title || 'Study Material'
+    );
+  }, [extraction, editableExtractedText, extractedSections, editableTitle]);
 
   useEffect(() => {
-    if (initialMaterial) {
-      setExtraction({
-        title: initialMaterial.title,
-        materialType: initialMaterial.material_type,
-        fileName: initialMaterial.file_name,
-        fileSizeBytes: initialMaterial.file_size,
-        mimeType: initialMaterial.mime_type,
-        extractedText: initialMaterial.extracted_text,
-        chunks: [initialMaterial.extracted_text],
-        chunkCount: initialMaterial.chunk_count || 1,
-        wordCount: initialMaterial.word_count,
-        characterCount: initialMaterial.extracted_text.length,
-        pageCount: null,
-        extractionMethod: 'direct-text',
-      });
-      setEditableExtractedText(initialMaterial.extracted_text);
-      setEditableTitle(stripSourceFilenameFromTitle(initialMaterial.title));
-      setSavedMaterialId(initialMaterial.id);
-      setUploadState('uploaded');
-      setSummary(null);
-      setSummarySaved(false);
-      setErrorMsg(null);
-      setNoticeMsg(`Loaded "${stripSourceFilenameFromTitle(initialMaterial.title)}" from your study materials.`);
-      onConsumeInitialMaterial?.();
-    }
+    if (!initialMaterial) return;
+    const seq = ++documentSessionSeqRef.current;
+    const cleanTitle = stripSourceFilenameFromTitle(initialMaterial.title);
+    const fallbackSecs = buildFallbackSections(initialMaterial.extracted_text, cleanTitle);
+
+    setExtraction({
+      extractionId: `mat-${initialMaterial.id}-${seq}`,
+      title: initialMaterial.title,
+      materialType: initialMaterial.material_type,
+      fileName: initialMaterial.file_name,
+      fileSizeBytes: initialMaterial.file_size,
+      mimeType: initialMaterial.mime_type,
+      extractedText: initialMaterial.extracted_text,
+      chunks: [initialMaterial.extracted_text],
+      chunkCount: initialMaterial.chunk_count || 1,
+      wordCount: initialMaterial.word_count,
+      characterCount: initialMaterial.extracted_text.length,
+      pageCount: null,
+      extractionMethod: 'direct-text',
+      sections: fallbackSecs,
+    });
+    setEditableExtractedText(initialMaterial.extracted_text);
+    setEditableTitle(cleanTitle);
+    setSavedMaterialId(initialMaterial.id);
+    setExtractedSections(fallbackSecs);
+    setSelectedSectionIds(fallbackSecs.map((s) => s.id));
+    setShowRawTextDrawer(false);
+    setUploadState('uploaded');
+    setSummary(null);
+    setSummarySaved(false);
+    setErrorMsg(null);
+    setNoticeMsg(`Loaded "${cleanTitle}" from your study materials.`);
+    onConsumeInitialMaterial?.();
+
+    // Fetch structured sections and detected subject from server for saved library material
+    void (async () => {
+      try {
+        const res = await fetch(resolveApiUrl('/api/materials/sections'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            extractedText: initialMaterial.extracted_text.slice(0, 1_200_000),
+            title: cleanTitle,
+          }),
+        });
+        if (!res.ok) return;
+        const parsed = (await res.json()) as {
+          contentHash?: string;
+          detectedSubject?: string;
+          sections?: ExtractedDocumentSection[];
+        };
+        if (seq !== documentSessionSeqRef.current) return;
+        if (Array.isArray(parsed.sections) && parsed.sections.length > 0) {
+          setExtractedSections(parsed.sections);
+          setSelectedSectionIds(parsed.sections.map((s) => s.id));
+          setExtraction((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  contentHash: parsed.contentHash,
+                  detectedSubject: parsed.detectedSubject,
+                  sections: parsed.sections,
+                }
+              : prev
+          );
+        }
+      } catch {
+        // Fallback single section remains intact
+      }
+    })();
   }, [initialMaterial, onConsumeInitialMaterial]);
 
+  const scrollToSummary = () => {
+    window.requestAnimationFrame(() => {
+      window.setTimeout(() => {
+        const el = summaryContainerRef.current;
+        if (!el) return;
+        const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        el.scrollIntoView({
+          behavior: prefersReduced ? 'auto' : 'smooth',
+          block: 'start',
+        });
+      }, 60);
+    });
+  };
+
   const resetAll = () => {
-    fileSelectionSeqRef.current += 1;
-    visualReqSeqRef.current += 1;
+    documentSessionSeqRef.current += 1;
     bufferedBufferRef.current = null;
     stagedStoragePathRef.current = null;
     setSelectedFile(null);
@@ -195,6 +305,10 @@ export function StudySummarizer({
     setUploadProgress(0);
     setUploadState('idle');
     setExtraction(null);
+    setExtractedSections([]);
+    setSelectedSectionIds([]);
+    setIsSectionModalOpen(false);
+    setShowRawTextDrawer(false);
     setEditableExtractedText('');
     setEditableTitle('');
     setSavedMaterialId(null);
@@ -209,12 +323,16 @@ export function StudySummarizer({
 
   const handleFileChosen = async (file: File | null) => {
     if (!file) return;
-    const seq = ++fileSelectionSeqRef.current;
+    const seq = ++documentSessionSeqRef.current;
     bufferedBufferRef.current = null;
     stagedStoragePathRef.current = null;
     setErrorMsg(null);
     setNoticeMsg(null);
     setExtraction(null);
+    setExtractedSections([]);
+    setSelectedSectionIds([]);
+    setIsSectionModalOpen(false);
+    setShowRawTextDrawer(false);
     setEditableExtractedText('');
     setEditableTitle('');
     setSavedMaterialId(null);
@@ -240,9 +358,8 @@ export function StudySummarizer({
     setSelectedFile(file);
 
     try {
-      // Materialize file bytes immediately while mobile content:// URI picker permissions are fresh
       const buffer = await file.arrayBuffer();
-      if (seq !== fileSelectionSeqRef.current) return;
+      if (seq !== documentSessionSeqRef.current) return;
 
       if (buffer.byteLength === 0) {
         setSelectedFile(null);
@@ -261,7 +378,7 @@ export function StudySummarizer({
       setSelectedFile(materializedFile);
       setUploadState('ready');
     } catch {
-      if (seq !== fileSelectionSeqRef.current) return;
+      if (seq !== documentSessionSeqRef.current) return;
       bufferedBufferRef.current = null;
       setSelectedFile(null);
       setUploadState('error');
@@ -330,9 +447,7 @@ export function StudySummarizer({
               const json = JSON.parse(xhr.responseText);
               resolve(json as ExtractionResult);
             } catch {
-              reject(
-                new Error("We couldn't process your study material. Please try again.")
-              );
+              reject(new Error("We couldn't process your study material. Please try again."));
             }
           } else {
             reject(
@@ -371,7 +486,6 @@ export function StudySummarizer({
       if (!(xhrErr as { isTransportError?: boolean })?.isTransportError) {
         throw xhrErr;
       }
-      // Mobile HTTP/2 idle-socket or XHR drop recovery: retry once via fresh fetch()
       await new Promise((r) => setTimeout(r, 650));
       setUploadProgress(25);
       return uploadViaFetchFallback(buildFormData());
@@ -388,6 +502,10 @@ export function StudySummarizer({
     setErrorMsg(null);
     setNoticeMsg(null);
     setExtraction(null);
+    setExtractedSections([]);
+    setSelectedSectionIds([]);
+    setIsSectionModalOpen(false);
+    setShowRawTextDrawer(false);
     setSummary(null);
     setSummarySaved(false);
 
@@ -400,6 +518,7 @@ export function StudySummarizer({
       return;
     }
 
+    const extractSeq = ++documentSessionSeqRef.current;
     extractingRef.current = true;
     setExtracting(true);
     setUploadState('uploading');
@@ -413,7 +532,7 @@ export function StudySummarizer({
         const fileCheck = validateFile(selectedFile);
         const typeLabel =
           fileCheck.type === 'pdf'
-            ? 'Extracting text from PDF...'
+            ? 'Extracting text and sections from PDF...'
             : fileCheck.type === 'image'
               ? 'Running OCR on image notes...'
               : fileCheck.type === 'audio'
@@ -421,7 +540,6 @@ export function StudySummarizer({
                 : 'Reading text file...';
         setExtractionStatus('Preparing file for upload...');
 
-        // Ensure we have an in-memory File & ArrayBuffer even if selectedFile came from compression
         let uploadFile = selectedFile;
         let uploadBuffer = bufferedBufferRef.current;
 
@@ -475,7 +593,7 @@ export function StudySummarizer({
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               cache: 'no-store',
-              signal: extractControllerSignal(controller),
+              signal: controller.signal,
               body: JSON.stringify({
                 signedStorageUrl,
                 fileName: uploadFile.name,
@@ -493,8 +611,6 @@ export function StudySummarizer({
             clearTimeout(timer);
           }
         };
-
-        const extractControllerSignal = (c: AbortController) => c.signal;
 
         const shouldStageLargeHostedUpload =
           !isLocalOrigin && uploadFile.size > HOSTED_DIRECT_UPLOAD_LIMIT_BYTES;
@@ -531,7 +647,7 @@ export function StudySummarizer({
         }
       } else {
         setUploadState('extracting');
-        setExtractionStatus('Chunking and indexing pasted study text...');
+        setExtractionStatus('Extracting topics and sections...');
         setUploadProgress(50);
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 75000);
@@ -539,6 +655,7 @@ export function StudySummarizer({
           const res = await fetch(resolveApiUrl('/api/materials/extract'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            cache: 'no-store',
             signal: controller.signal,
             body: JSON.stringify({
               text: pastedText.trim(),
@@ -554,11 +671,22 @@ export function StudySummarizer({
         }
       }
 
+      if (extractSeq !== documentSessionSeqRef.current) return;
+
+      const cleanTitle = stripSourceFilenameFromTitle(result.title);
+      const resolvedSections =
+        result.sections && result.sections.length > 0
+          ? result.sections
+          : buildFallbackSections(result.extractedText, cleanTitle);
+
       setUploadProgress(100);
       setUploadState('uploaded');
-      setExtraction(result);
+      setExtraction({ ...result, sections: resolvedSections });
+      setExtractedSections(resolvedSections);
+      setSelectedSectionIds(resolvedSections.map((s) => s.id));
       setEditableExtractedText(result.extractedText);
-      setEditableTitle(stripSourceFilenameFromTitle(result.title));
+      setEditableTitle(cleanTitle);
+      setShowRawTextDrawer(false);
 
       if (user && isConfigured) {
         try {
@@ -582,19 +710,21 @@ export function StudySummarizer({
             wordCount: result.wordCount,
             chunkCount: result.chunkCount,
           });
+          if (extractSeq !== documentSessionSeqRef.current) return;
           setSavedMaterialId(materialRecord.id);
 
           await recordStudyActivity({
             userId: user.id,
             activityType: inputMode === 'file' ? 'upload' : 'extract',
             title: result.title,
-            detail: `Extracted ${result.wordCount.toLocaleString()} words (${result.chunkCount} ${
-              result.chunkCount === 1 ? 'chunk' : 'chunks'
+            detail: `Extracted ${result.wordCount.toLocaleString()} words (${resolvedSections.length} ${
+              resolvedSections.length === 1 ? 'section' : 'sections'
             })`,
             materialType: result.materialType,
           });
           onActivityRecorded?.();
         } catch (storageErr) {
+          if (extractSeq !== documentSessionSeqRef.current) return;
           setNoticeMsg(
             `Content extracted, but your study library could not sync right now: ${sanitizeUserErrorMessage(
               storageErr,
@@ -604,8 +734,11 @@ export function StudySummarizer({
         }
       }
     } catch (err: unknown) {
+      if (extractSeq !== documentSessionSeqRef.current) return;
       setUploadState('error');
       setExtraction(null);
+      setExtractedSections([]);
+      setSelectedSectionIds([]);
       setErrorMsg(
         formatClientApiError(
           err,
@@ -621,6 +754,20 @@ export function StudySummarizer({
     }
   };
 
+  const handleToggleSection = (sectionId: string) => {
+    setSelectedSectionIds((prev) =>
+      prev.includes(sectionId) ? prev.filter((id) => id !== sectionId) : [...prev, sectionId]
+    );
+  };
+
+  const handleSelectAllSections = () => {
+    setSelectedSectionIds(activeSections.map((s) => s.id));
+  };
+
+  const handleClearSectionSelection = () => {
+    setSelectedSectionIds([]);
+  };
+
   const handleGenerateSummary = async () => {
     if (generatingRef.current) return;
     setErrorMsg(null);
@@ -632,45 +779,54 @@ export function StudySummarizer({
       return;
     }
 
+    const selectedSet = new Set(selectedSectionIds);
+    const chosenSections = activeSections.filter((s) => selectedSet.has(s.id));
+    if (activeSections.length > 0 && chosenSections.length === 0) {
+      setErrorMsg('Please select at least one document section to summarize.');
+      return;
+    }
+
+    const generateSeq = documentSessionSeqRef.current;
     generatingRef.current = true;
     setGenerating(true);
     setSummarySaved(false);
 
-    const visualSeq = ++visualReqSeqRef.current;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 60000);
     try {
-      const boundedText =
-        sourceText.length <= 750_000
-          ? sourceText
-          : [
-              sourceText.slice(0, 260_000),
-              sourceText.slice(
-                Math.floor(sourceText.length * 0.4),
-                Math.floor(sourceText.length * 0.4) + 240_000
-              ),
-              sourceText.slice(sourceText.length - 250_000),
-            ].join('\n\n');
-
       const cleanRequestTitle = stripSourceFilenameFromTitle(
         editableTitle.trim() || extraction?.title || 'Document Summary'
       );
 
+      const hasEditedRawText =
+        extraction && editableExtractedText.trim() !== extraction.extractedText.trim();
+
       const res = await fetch(resolveApiUrl('/api/summaries/extractive'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
         signal: controller.signal,
         body: JSON.stringify({
-          extractedText: boundedText,
+          extractedText: sourceText.slice(0, 1_200_000),
           title: cleanRequestTitle,
+          subjectArea: extraction?.detectedSubject || undefined,
           materialType: extraction?.materialType || 'text',
           summaryLevel,
+          ...(!hasEditedRawText && chosenSections.length > 0 && chosenSections.length < activeSections.length
+            ? {
+                selectedSectionIndices: chosenSections.map((s) => s.index),
+                selectedSectionTexts: chosenSections.map((s) => s.text),
+              }
+            : {}),
         }),
       });
+
       const generatedRaw = await parseApiJsonResponse<StructuredSummary>(
         res,
         'generating your document summary'
       );
+      if (generateSeq !== documentSessionSeqRef.current) return;
+
       let generated: StructuredSummary = {
         ...generatedRaw,
         generationMode: generatedRaw.generationMode ?? 'extractive',
@@ -687,7 +843,10 @@ export function StudySummarizer({
           visualDiagrams: enriched.visualDiagrams,
         };
       }
+
+      setIsSectionModalOpen(false);
       setSummary(generated);
+      scrollToSummary();
 
       let savedRecordId: string | null = null;
 
@@ -698,10 +857,11 @@ export function StudySummarizer({
             materialId: savedMaterialId,
             summary: generated,
           });
+          if (generateSeq !== documentSessionSeqRef.current) return;
           savedRecordId = savedRecord.id;
           setSummarySaved(true);
           setNoticeMsg(
-            'Document Summary generated and automatically saved to your Academic History.'
+            'Summary generated and saved to your Academic History.'
           );
         } catch (autoSaveErr) {
           console.warn('Automatic summary save warning:', autoSaveErr);
@@ -714,13 +874,7 @@ export function StudySummarizer({
           userId: user.id,
           activityType: 'summarize',
           title: generated.title,
-          detail: `Generated ${
-            summaryLevel === 'short'
-              ? 'Short Summary'
-              : summaryLevel === 'detailed'
-                ? 'Detailed Summary'
-                : 'Comprehensive Study Notes'
-          }`,
+          detail: `Generated ${STYLE_LABELS[summaryLevel]} Summary`,
           materialType: extraction?.materialType || 'text',
           summaryLevel,
         });
@@ -731,6 +885,7 @@ export function StudySummarizer({
         void updateStudySummaryVisuals(user.id, savedRecordId, generated.visualAids).catch(() => {});
       }
     } catch (err: unknown) {
+      if (generateSeq !== documentSessionSeqRef.current) return;
       setErrorMsg(
         formatClientApiError(
           err,
@@ -774,18 +929,21 @@ export function StudySummarizer({
   };
 
   const selectedFileCheck = selectedFile ? validateFile(selectedFile) : null;
+  const selectedSectionCount = activeSections.filter((s) =>
+    selectedSectionIds.includes(s.id)
+  ).length;
 
   return (
     <div className="space-y-6">
-      {/* Input Workspace Card */}
+      {/* Step 1: Document Input Workspace */}
       <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
-        <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-5 sm:flex-row sm:items-center dark:border-slate-800">
+        <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-4 sm:flex-row sm:items-center dark:border-slate-800">
           <div>
             <h2 className="font-display text-xl font-bold text-slate-900 select-none dark:text-white">
               Document Summarizer
             </h2>
             <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-              Upload a PDF, photo of notes, or lecture audio, or paste study text directly.
+              Upload a PDF, note image, or lecture recording, or paste study text directly.
             </p>
           </div>
 
@@ -823,14 +981,6 @@ export function StudySummarizer({
           </div>
         </div>
 
-        <SubjectVisualBanner
-          visualKey="summarizer"
-          variant="compact"
-          title="Document Intelligence Summarizer"
-          subtitle="Structured concepts, definitions, processes, and frameworks extracted directly from your study material."
-          className="mt-5"
-        />
-
         {errorMsg && (
           <div
             role="alert"
@@ -844,7 +994,7 @@ export function StudySummarizer({
               <button
                 type="button"
                 onClick={extractContent}
-                className="inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 dark:border-red-800 dark:bg-red-950 dark:text-red-200 dark:hover:bg-red-900/60"
+                className="inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 whitespace-nowrap dark:border-red-800 dark:bg-red-950 dark:text-red-200 dark:hover:bg-red-900/60"
               >
                 <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>Retry Upload</span>
@@ -938,10 +1088,10 @@ export function StudySummarizer({
                             : uploadState === 'extracting'
                               ? 'Extracting...'
                               : uploadState === 'uploaded'
-                                ? 'Uploaded & extracted'
+                                ? 'Extraction complete'
                                 : uploadState === 'error'
                                   ? 'Upload failed'
-                                  : 'Ready to upload'}
+                                  : 'Ready to extract'}
                       </span>
                     </p>
                   </div>
@@ -952,7 +1102,7 @@ export function StudySummarizer({
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                     disabled={extracting || uploadState === 'reading'}
-                    className="inline-flex min-h-10 sm:min-h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-800"
+                    className="inline-flex min-h-10 sm:min-h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-800"
                   >
                     <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
                     <span>Replace</span>
@@ -961,7 +1111,7 @@ export function StudySummarizer({
                     type="button"
                     onClick={resetAll}
                     disabled={extracting}
-                    className="inline-flex min-h-10 sm:min-h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-red-400 dark:hover:bg-red-950/30"
+                    className="inline-flex min-h-10 sm:min-h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-950 dark:text-red-400 dark:hover:bg-red-950/30"
                   >
                     <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                     <span>Remove</span>
@@ -988,28 +1138,30 @@ export function StudySummarizer({
               </div>
             )}
 
-            <div className="flex justify-end select-none">
-              <button
-                type="button"
-                onClick={extractContent}
-                disabled={!selectedFile || extracting || uploadState === 'reading'}
-                className="inline-flex min-h-11 w-full justify-center sm:w-auto items-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500"
-              >
-                {extracting ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                    <span>Extracting Content...</span>
-                  </>
-                ) : uploadState === 'reading' ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                    <span>Loading File...</span>
-                  </>
-                ) : (
-                  <span>Extract Study Content</span>
-                )}
-              </button>
-            </div>
+            {!extraction && (
+              <div className="flex justify-end select-none">
+                <button
+                  type="button"
+                  onClick={extractContent}
+                  disabled={!selectedFile || extracting || uploadState === 'reading'}
+                  className="inline-flex min-h-11 w-full justify-center sm:w-auto items-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 whitespace-nowrap dark:bg-blue-600 dark:hover:bg-blue-500"
+                >
+                  {extracting ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                      <span>Extracting Content...</span>
+                    </>
+                  ) : uploadState === 'reading' ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                      <span>Loading File...</span>
+                    </>
+                  ) : (
+                    <span>Extract Study Content</span>
+                  )}
+                </button>
+              </div>
+            )}
           </div>
         ) : (
           <div className="mt-5 space-y-4">
@@ -1025,7 +1177,7 @@ export function StudySummarizer({
                 type="text"
                 value={pastedTitle}
                 onChange={(e) => setPastedTitle(e.target.value)}
-                placeholder="e.g. Lecture 06 — Cellular Respiration & ATP Synthesis"
+                placeholder="e.g. Forex Price Action — Candlesticks & Support/Resistance"
                 className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500"
               />
             </div>
@@ -1039,7 +1191,7 @@ export function StudySummarizer({
               </label>
               <textarea
                 id="pasted-material-body"
-                rows={7}
+                rows={6}
                 value={pastedText}
                 onChange={(e) => setPastedText(e.target.value)}
                 placeholder="Paste your textbook passage, transcript, or raw notes here..."
@@ -1055,15 +1207,15 @@ export function StudySummarizer({
                 type="button"
                 onClick={extractContent}
                 disabled={extracting || pastedText.trim().length < 20}
-                className="inline-flex min-h-11 w-full justify-center sm:w-auto items-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500"
+                className="inline-flex min-h-11 w-full justify-center sm:w-auto items-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 whitespace-nowrap dark:bg-blue-600 dark:hover:bg-blue-500"
               >
                 {extracting ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                    <span>Preparing Text...</span>
+                    <span>Preparing Sections...</span>
                   </>
                 ) : (
-                  <span>Prepare Content for Summary</span>
+                  <span>Extract Study Content</span>
                 )}
               </button>
             </div>
@@ -1071,52 +1223,114 @@ export function StudySummarizer({
         )}
       </section>
 
-      {/* Extracted Content & Summary Configuration */}
+      {/* Step 2: Compact Extraction Summary + "Select summary parts" Modal Trigger */}
       {extraction && (
         <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
-          <div className="flex flex-col justify-between gap-3 border-b border-slate-200 pb-4 sm:flex-row sm:items-center dark:border-slate-800">
-            <div>
-              <h3 className="font-display text-lg font-bold text-slate-900 select-none dark:text-white">
-                Extracted Study Content
-              </h3>
-              <p className="mt-1 font-mono text-xs text-slate-500 tabular-nums select-none dark:text-slate-400">
-                Method: {extraction.extractionMethod} · {extraction.wordCount.toLocaleString()} words ·{' '}
-                {extraction.chunkCount} {extraction.chunkCount === 1 ? 'chunk' : 'chunks'}
-                {extraction.pageCount ? ` · ${extraction.pageCount} pages` : ''}
+          <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+            <div className="min-w-0 flex-1 space-y-1.5">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-medium text-slate-500 dark:text-slate-400">
+                <span className="font-semibold text-emerald-700 dark:text-emerald-400">
+                  Extraction complete
+                </span>
+                {extraction.detectedSubject && extraction.detectedSubject !== 'General Studies' && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-semibold text-blue-700 dark:text-cyan-400">
+                      {extraction.detectedSubject}
+                    </span>
+                  </>
+                )}
+                <span aria-hidden="true">·</span>
+                <span className="font-mono tabular-nums">
+                  {activeSections.length} {activeSections.length === 1 ? 'section' : 'sections'}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono tabular-nums">
+                  {extraction.wordCount.toLocaleString()} words
+                </span>
+                {extraction.pageCount ? (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono tabular-nums">
+                      {extraction.pageCount} {extraction.pageCount === 1 ? 'page' : 'pages'}
+                    </span>
+                  </>
+                ) : null}
+              </div>
+
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <label htmlFor="extracted-title" className="sr-only">
+                  Document Title
+                </label>
+                <input
+                  id="extracted-title"
+                  type="text"
+                  value={editableTitle}
+                  onChange={(e) => setEditableTitle(e.target.value)}
+                  className="w-full max-w-xl rounded-lg border border-transparent bg-transparent px-0 py-0.5 font-display text-lg font-bold text-slate-900 transition-colors hover:border-slate-200 focus:border-blue-600 focus:bg-slate-50 focus:px-2.5 focus:outline-none dark:text-white dark:hover:border-slate-700 dark:focus:bg-slate-900"
+                />
+              </div>
+
+              <p className="text-xs text-slate-500 tabular-nums dark:text-slate-400">
+                Ready: {selectedSectionCount} of {activeSections.length}{' '}
+                {activeSections.length === 1 ? 'part' : 'parts'} selected · Style:{' '}
+                <span className="font-semibold text-slate-700 dark:text-slate-200">
+                  {STYLE_LABELS[summaryLevel]}
+                </span>
               </p>
             </div>
-            <button
-              type="button"
-              onClick={resetAll}
-              className="text-xs font-medium text-slate-500 hover:text-slate-800 select-none dark:text-slate-400 dark:hover:text-slate-200"
-            >
-              Clear Workspace
-            </button>
+
+            <div className="flex flex-wrap items-center gap-2.5 shrink-0 select-none">
+              <button
+                type="button"
+                onClick={() => setIsSectionModalOpen(true)}
+                disabled={generating}
+                className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 whitespace-nowrap shrink-0 sm:w-auto dark:bg-blue-600 dark:hover:bg-blue-500"
+              >
+                {generating ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    <span>Generating Summary...</span>
+                  </>
+                ) : (
+                  <>
+                    <ListFilter className="h-4 w-4" aria-hidden="true" />
+                    <span>Select summary parts</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowRawTextDrawer((prev) => !prev)}
+                className="inline-flex min-h-11 sm:min-h-10 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <span>{showRawTextDrawer ? 'Hide Extracted Text' : 'Inspect Text'}</span>
+                {showRawTextDrawer ? (
+                  <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                ) : (
+                  <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={resetAll}
+                className="inline-flex min-h-11 sm:min-h-10 items-center rounded-xl px-3 py-2 text-xs font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800 whitespace-nowrap shrink-0 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+              >
+                Clear
+              </button>
+            </div>
           </div>
 
-          <div className="mt-4 space-y-4">
-            <div>
-              <label
-                htmlFor="extracted-title"
-                className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
-              >
-                Study Material Title
-              </label>
-              <input
-                id="extracted-title"
-                type="text"
-                value={editableTitle}
-                onChange={(e) => setEditableTitle(e.target.value)}
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-sm font-medium text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-              />
-            </div>
-
-            <div>
+          {/* Optional Collapsed Raw Text Drawer */}
+          {showRawTextDrawer && (
+            <div className="mt-4 border-t border-slate-200 pt-4 dark:border-slate-800">
               <label
                 htmlFor="extracted-text-preview"
                 className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
               >
-                Extracted Text (inspect, select, or refine before summarizing)
+                Extracted Text (optional manual edit before summarizing)
               </label>
               <textarea
                 id="extracted-text-preview"
@@ -1126,95 +1340,60 @@ export function StudySummarizer({
                 className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3.5 font-sans text-sm leading-relaxed text-slate-800 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
               />
             </div>
-
-
-            {/* Summary Depth Selector */}
-            <div className="pt-2">
-              <p className="mb-2.5 text-xs font-semibold text-slate-700 select-none dark:text-slate-300">
-                Select Summary Depth
-              </p>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                {(
-                  [
-                    {
-                      id: 'short' as SummaryLevel,
-                      title: 'Short Summary',
-                      desc: 'Concise overview & essential points',
-                    },
-                    {
-                      id: 'detailed' as SummaryLevel,
-                      title: 'Detailed Summary',
-                      desc: 'Thorough explanation of key concepts',
-                    },
-                    {
-                      id: 'comprehensive' as SummaryLevel,
-                      title: 'Comprehensive Study Notes',
-                      desc: 'Extensive academic guide & revision notes',
-                    },
-                  ] as const
-                ).map((opt) => {
-                  const active = summaryLevel === opt.id;
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => setSummaryLevel(opt.id)}
-                      className={`rounded-xl border p-3.5 text-left transition-colors select-none ${
-                        active
-                          ? 'border-blue-600 bg-blue-50/70 dark:border-cyan-400 dark:bg-blue-950/40'
-                          : 'border-slate-200 bg-white hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900/50 dark:hover:bg-slate-900'
-                      }`}
-                    >
-                      <p
-                        className={`font-display text-sm font-semibold ${
-                          active
-                            ? 'text-blue-800 dark:text-cyan-300'
-                            : 'text-slate-900 dark:text-white'
-                        }`}
-                      >
-                        {opt.title}
-                      </p>
-                      <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
-                        {opt.desc}
-                      </p>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="flex justify-end pt-2 select-none">
-              <button
-                type="button"
-                onClick={handleGenerateSummary}
-                disabled={generating}
-                className="inline-flex min-h-11 w-full justify-center sm:w-auto items-center gap-2 rounded-xl bg-[#0F1E3D] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500"
-              >
-                {generating ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                    <span>Building Document Summary...</span>
-                  </>
-                ) : (
-                  <span>Generate Document Summary</span>
-                )}
-              </button>
-            </div>
-          </div>
+          )}
         </section>
       )}
 
-      {/* Generated Structured Academic Summary */}
-      {summary && (
-        <SummaryDisplay
-          summary={summary}
-          onSave={user && isConfigured ? handleSaveSummary : undefined}
-          isSaving={savingSummary}
-          isSaved={summarySaved}
-          onCreateQuizFromSummary={
-            onGenerateQuizFromSummary ? () => onGenerateQuizFromSummary(summary) : undefined
-          }
+      {/* Section & Style Modal / Mobile Bottom Sheet */}
+      {extraction && (
+        <SectionSelectorModal
+          isOpen={isSectionModalOpen}
+          documentTitle={editableTitle || stripSourceFilenameFromTitle(extraction.title)}
+          detectedSubject={extraction.detectedSubject}
+          sections={activeSections}
+          selectedSectionIds={selectedSectionIds}
+          summaryLevel={summaryLevel}
+          generating={generating}
+          onToggleSection={handleToggleSection}
+          onSelectAll={handleSelectAllSections}
+          onClearSelection={handleClearSectionSelection}
+          onChangeSummaryLevel={setSummaryLevel}
+          onGenerate={handleGenerateSummary}
+          onClose={() => setIsSectionModalOpen(false)}
         />
+      )}
+
+      {/* Step 3: Generated Structured Academic Summary (Auto-Scroll Target) */}
+      {summary && (
+        <div ref={summaryContainerRef} className="scroll-mt-6 space-y-3">
+          {extraction && (
+            <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+              <p className="text-xs text-slate-500 tabular-nums dark:text-slate-400">
+                Showing {selectedSectionCount} of {activeSections.length}{' '}
+                {activeSections.length === 1 ? 'section' : 'sections'} ·{' '}
+                {STYLE_LABELS[summary.summaryLevel]} style
+              </p>
+              <button
+                type="button"
+                onClick={() => setIsSectionModalOpen(true)}
+                className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <ListFilter className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Select summary parts</span>
+              </button>
+            </div>
+          )}
+
+          <SummaryDisplay
+            summary={summary}
+            onSave={user && isConfigured ? handleSaveSummary : undefined}
+            isSaving={savingSummary}
+            isSaved={summarySaved}
+            onCreateQuizFromSummary={
+              onGenerateQuizFromSummary ? () => onGenerateQuizFromSummary(summary) : undefined
+            }
+          />
+        </div>
       )}
     </div>
   );

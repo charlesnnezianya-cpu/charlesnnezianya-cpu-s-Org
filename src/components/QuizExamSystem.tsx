@@ -7,8 +7,8 @@ import {
   Clock,
   FileCheck2,
   FileText,
+  Flag,
   History,
-  Image as ImageIcon,
   ListChecks,
   Loader2,
   Play,
@@ -37,11 +37,13 @@ import {
 } from '../lib/supabase';
 import type {
   ActiveAssessmentSummary,
+  AssessmentBlueprint,
   GeneratedQuizPayload,
   MaterialSourceType,
   QuizAnswerCheckResponse,
   QuizAssessmentMode,
   QuizAttemptRecord,
+  QuizCognitiveBand,
   QuizDifficulty,
   QuizFormat,
   QuizGradingResponse,
@@ -55,15 +57,105 @@ import type {
   StudentAnswer,
   StudyMaterialRecord,
   StudySummaryRecord,
+  TopicPerformanceInsight,
 } from '../types/brainstine';
 import {
   hasSubjectVisualMatch,
   resolveSubjectVisual,
 } from '../lib/educationalVisuals';
+import {
+  stripSourceFilenameFromTitle,
+  stripSummarySourceAndPageRefs,
+} from '../lib/summarySanitizer';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 import { EducationalDiagramRenderer } from './EducationalDiagramRenderer';
+import { ScientificText } from './ScientificText';
 import { compressImageFile } from './SnapPhotoControl';
 import { SubjectVisualBanner } from './SubjectVisualBanner';
+
+function getVisibleQuizTopicTag(tag?: string | null): string | null {
+  if (!tag) return null;
+  const cleaned = stripSummarySourceAndPageRefs(tag).trim();
+  if (!cleaned) return null;
+  if (/^(page\s*\d+|p\.\s*\d+|doc(ument)?\b|source\b|file\b|section\s*\d+)$/i.test(cleaned)) {
+    return null;
+  }
+  return cleaned;
+}
+
+const COGNITIVE_BAND_LABELS: Record<QuizCognitiveBand, string> = {
+  knowledge: 'Recall',
+  comprehension: 'Understanding',
+  application: 'Application',
+  analysis: 'Analysis',
+};
+
+function computeClientBlueprint(questions: QuizQuestion[]): AssessmentBlueprint {
+  const topicCounts = new Map<string, number>();
+  const cognitiveMix: Record<QuizCognitiveBand, number> = {
+    knowledge: 0,
+    comprehension: 0,
+    application: 0,
+    analysis: 0,
+  };
+  for (const q of questions) {
+    const topic = getVisibleQuizTopicTag(q.topicTag) || 'Core Concepts';
+    topicCounts.set(topic, (topicCounts.get(topic) || 0) + 1);
+    const band: QuizCognitiveBand = q.cognitiveBand || 'comprehension';
+    if (band in cognitiveMix) {
+      cognitiveMix[band] += 1;
+    }
+  }
+  return {
+    totalQuestions: questions.length,
+    topics: Array.from(topicCounts.entries())
+      .map(([topic, count]) => ({ topic, count }))
+      .sort((a, b) => b.count - a.count),
+    cognitiveMix,
+  };
+}
+
+interface StoredQuizRecoveryPointer {
+  sessionId: string;
+  sessionToken: string | null;
+  title: string;
+  subjectArea: string;
+  assessmentMode: QuizAssessmentMode;
+  difficulty: QuizDifficulty;
+  questionCount: number;
+  answeredCount: number;
+  currentQuestionIndex: number;
+  deadlineAtMs: number | null;
+  answers: Record<string, StudentAnswer>;
+  flaggedIds: Record<string, boolean>;
+  lastSavedAt: string;
+}
+
+const ACTIVE_QUIZ_STORAGE_KEY = 'brainstine_active_quiz_recovery_v1';
+
+function saveLocalQuizPointer(pointer: StoredQuizRecoveryPointer | null) {
+  try {
+    if (!pointer) {
+      window.sessionStorage.removeItem(ACTIVE_QUIZ_STORAGE_KEY);
+      return;
+    }
+    window.sessionStorage.setItem(ACTIVE_QUIZ_STORAGE_KEY, JSON.stringify(pointer));
+  } catch {
+    // Ignore storage quota or private browsing errors
+  }
+}
+
+function readLocalQuizPointer(): StoredQuizRecoveryPointer | null {
+  try {
+    const raw = window.sessionStorage.getItem(ACTIVE_QUIZ_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredQuizRecoveryPointer;
+    if (!parsed || typeof parsed.sessionId !== 'string') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
 
 interface QuizExamSystemProps {
   materials: StudyMaterialRecord[];
@@ -216,13 +308,18 @@ export function QuizExamSystem({
     deadlineAtMs?: number | null;
     requestedQuestionCount?: number;
     insufficientSourceNote?: string | null;
+    blueprint?: AssessmentBlueprint;
     questions: QuizQuestion[];
   } | null>(null);
   const [currentIdx, setCurrentIdx] = useState<number>(0);
   const [answersMap, setAnswersMap] = useState<Record<string, StudentAnswer>>({});
+  const [flaggedIds, setFlaggedIds] = useState<Record<string, boolean>>({});
   const [practiceFeedbackMap, setPracticeFeedbackMap] = useState<
     Record<string, QuizAnswerCheckResponse>
   >({});
+  const [localRecoveryPointer, setLocalRecoveryPointer] =
+    useState<StoredQuizRecoveryPointer | null>(null);
+  const [reviewFilter, setReviewFilter] = useState<'all' | 'missed' | 'correct'>('all');
   const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
   const [serverClockOffsetMs, setServerClockOffsetMs] = useState<number>(0);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
@@ -378,6 +475,38 @@ export function QuizExamSystem({
     };
   }, [flushPendingSyncTimer]);
 
+  const persistLocalSnapshot = useCallback(
+    (
+      quiz: typeof activeQuiz,
+      nextIdx: number,
+      nextAnswers: Record<string, StudentAnswer>,
+      nextFlags: Record<string, boolean>
+    ) => {
+      if (!quiz?.sessionId) return;
+      const answeredCountLocal = Object.values(nextAnswers).filter(
+        (a) => a.selectedOptionIndex !== undefined && a.selectedOptionIndex !== null
+      ).length;
+      const ptr: StoredQuizRecoveryPointer = {
+        sessionId: quiz.sessionId,
+        sessionToken: quiz.sessionToken ?? sessionTokenRef.current ?? null,
+        title: quiz.title,
+        subjectArea: quiz.subjectArea,
+        assessmentMode: quiz.assessmentMode,
+        difficulty: quiz.difficulty,
+        questionCount: quiz.questions.length,
+        answeredCount: answeredCountLocal,
+        currentQuestionIndex: nextIdx,
+        deadlineAtMs: quiz.deadlineAtMs ?? null,
+        answers: nextAnswers,
+        flaggedIds: nextFlags,
+        lastSavedAt: new Date().toISOString(),
+      };
+      saveLocalQuizPointer(ptr);
+      setLocalRecoveryPointer(ptr);
+    },
+    []
+  );
+
   const syncProgressToServer = useCallback(
     async (
       sessionId: string | null,
@@ -409,7 +538,7 @@ export function QuizExamSystem({
           }
         }
       } catch {
-        // Best-effort autosave; active session check or submission remains authoritative
+        // Best-effort autosave; local recovery snapshot + online retry handle intermittent disconnects
       }
     },
     []
@@ -420,8 +549,12 @@ export function QuizExamSystem({
       sessionId: string | null,
       nextIdx: number,
       nextAnswers: Record<string, StudentAnswer>,
-      immediate = false
+      immediate = false,
+      nextFlags?: Record<string, boolean>
     ) => {
+      if (activeQuiz && activeQuiz.sessionId === sessionId) {
+        persistLocalSnapshot(activeQuiz, nextIdx, nextAnswers, nextFlags ?? flaggedIds);
+      }
       if (!sessionId) return;
       flushPendingSyncTimer();
       if (immediate) {
@@ -433,10 +566,25 @@ export function QuizExamSystem({
         void syncProgressToServer(sessionId, nextIdx, nextAnswers);
       }, 250);
     },
-    [flushPendingSyncTimer, syncProgressToServer]
+    [activeQuiz, flaggedIds, flushPendingSyncTimer, persistLocalSnapshot, syncProgressToServer]
   );
 
+  // Flush queued progress immediately when connectivity returns
+  useEffect(() => {
+    if (stage !== 'exam' || !activeQuiz?.sessionId || grading) return;
+    const handleOnline = () => {
+      void syncProgressToServer(activeQuiz.sessionId, currentIdx, answersMap);
+    };
+    window.addEventListener('online', handleOnline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+    };
+  }, [stage, activeQuiz, currentIdx, answersMap, grading, syncProgressToServer]);
+
   const loadActiveSessions = useCallback(async () => {
+    const ptr = readLocalQuizPointer();
+    setLocalRecoveryPointer(ptr);
+
     if (isConfigured && !user) {
       setActiveSessions([]);
       return;
@@ -889,6 +1037,7 @@ export function QuizExamSystem({
         timeLimitMinutes: generated.timeLimitMinutes ?? effectiveTimeLimit,
         requestedQuestionCount: generated.requestedQuestionCount ?? questionCount,
         insufficientSourceNote: generated.insufficientSourceNote ?? null,
+        blueprint: generated.blueprint ?? computeClientBlueprint(generated.questions),
         questions: generated.questions,
       });
     } catch (err: unknown) {
@@ -918,13 +1067,16 @@ export function QuizExamSystem({
     timeLimitMinutes: number | null;
     requestedQuestionCount?: number;
     insufficientSourceNote?: string | null;
+    blueprint?: AssessmentBlueprint;
     questions: QuizQuestion[];
   }) => {
     sessionTokenRef.current = quiz.sessionToken ?? null;
     setActiveQuiz(quiz);
     setCurrentIdx(0);
     setAnswersMap({});
+    setFlaggedIds({});
     setPracticeFeedbackMap({});
+    setReviewFilter('all');
     setElapsedSeconds(0);
     setShowSubmitConfirm(false);
     setGradingResult(null);
@@ -948,6 +1100,7 @@ export function QuizExamSystem({
       timeLimitMinutes: number | null;
       requestedQuestionCount?: number;
       insufficientSourceNote?: string | null;
+      blueprint?: AssessmentBlueprint;
       questions: QuizQuestion[];
     },
     retake = false
@@ -986,7 +1139,7 @@ export function QuizExamSystem({
       setServerClockOffsetMs(offset);
       setNowMs(effectiveNow);
       sessionTokenRef.current = started.sessionToken ?? quiz.sessionToken ?? null;
-      setActiveQuiz({
+      const startedQuizState = {
         sessionId: started.sessionId,
         sessionToken: started.sessionToken ?? quiz.sessionToken ?? null,
         quizId: started.quizId,
@@ -1000,11 +1153,16 @@ export function QuizExamSystem({
         deadlineAtMs: started.deadlineAtMs,
         requestedQuestionCount: quiz.requestedQuestionCount,
         insufficientSourceNote: quiz.insufficientSourceNote,
+        blueprint: started.blueprint ?? quiz.blueprint ?? computeClientBlueprint(started.questions),
         questions: started.questions,
-      });
+      };
+      setActiveQuiz(startedQuizState);
       setCurrentIdx(0);
       setAnswersMap({});
+      setFlaggedIds({});
       setPracticeFeedbackMap({});
+      setReviewFilter('all');
+      persistLocalSnapshot(startedQuizState, 0, {}, {});
       setElapsedSeconds(
         started.startedAtMs ? Math.max(0, Math.floor((effectiveNow - started.startedAtMs) / 1000)) : 0
       );
@@ -1025,7 +1183,7 @@ export function QuizExamSystem({
     }
   };
 
-  const handleResumeSession = async (sessionId: string) => {
+  const handleResumeSession = async (sessionId: string, overrideToken?: string | null) => {
     if (resumingSessionId) return;
     setResumingSessionId(sessionId);
     setErrorMsg(null);
@@ -1033,6 +1191,12 @@ export function QuizExamSystem({
     setRestoredNotice(null);
 
     try {
+      const localPtr = readLocalQuizPointer();
+      const tokenForRestore =
+        overrideToken ??
+        (localPtr?.sessionId === sessionId ? localPtr.sessionToken : null) ??
+        sessionTokenRef.current;
+
       const accessToken = await getOptionalAccessToken();
       const res = await fetch(resolveApiUrl('/api/quizzes/sessions/restore'), {
         method: 'POST',
@@ -1042,7 +1206,7 @@ export function QuizExamSystem({
         },
         body: JSON.stringify({
           sessionId,
-          sessionToken: sessionTokenRef.current,
+          sessionToken: tokenForRestore,
         }),
       });
       const restored = await parseApiJsonResponse<RestoredQuizSessionResponse>(
@@ -1052,6 +1216,8 @@ export function QuizExamSystem({
 
       if (restored.status === 'expired_submitted') {
         setActiveSessions((prev) => prev.filter((s) => s.sessionId !== sessionId));
+        saveLocalQuizPointer(null);
+        setLocalRecoveryPointer(null);
         setGradingResult(restored.grading);
         setResultMeta({
           attemptId: restored.grading.attemptId ?? null,
@@ -1101,10 +1267,22 @@ export function QuizExamSystem({
       const effectiveNow = Date.now() + offset;
       setServerClockOffsetMs(offset);
       setNowMs(effectiveNow);
-      sessionTokenRef.current = restored.sessionToken ?? null;
-      setActiveQuiz({
+      sessionTokenRef.current = restored.sessionToken ?? tokenForRestore ?? null;
+
+      // Merge any unsynced answers from local recovery pointer without overriding locked answers
+      const mergedAnswers: Record<string, StudentAnswer> = { ...(restored.answers || {}) };
+      if (localPtr && localPtr.sessionId === restored.sessionId && localPtr.answers) {
+        const lockedSet = new Set(restored.lockedQuestionIds || []);
+        for (const [qId, ans] of Object.entries(localPtr.answers)) {
+          if (!lockedSet.has(qId) && !mergedAnswers[qId] && ans.selectedOptionIndex !== undefined) {
+            mergedAnswers[qId] = ans;
+          }
+        }
+      }
+
+      const restoredQuizState = {
         sessionId: restored.sessionId,
-        sessionToken: restored.sessionToken ?? null,
+        sessionToken: restored.sessionToken ?? tokenForRestore ?? null,
         quizId: restored.quizId,
         title: restored.title,
         subjectArea: restored.subjectArea,
@@ -1114,16 +1292,21 @@ export function QuizExamSystem({
         timeLimitMinutes: restored.timeLimitMinutes,
         startedAtMs: restored.startedAtMs,
         deadlineAtMs: restored.deadlineAtMs,
+        blueprint: restored.blueprint ?? computeClientBlueprint(restored.questions),
         questions: restored.questions,
-      });
-      setCurrentIdx(
-        Math.min(
-          Math.max(0, restored.currentQuestionIndex || 0),
-          Math.max(0, restored.questions.length - 1)
-        )
+      };
+      setActiveQuiz(restoredQuizState);
+      const nextIdx = Math.min(
+        Math.max(0, restored.currentQuestionIndex || 0),
+        Math.max(0, restored.questions.length - 1)
       );
-      setAnswersMap(restored.answers || {});
+      const nextFlags =
+        localPtr && localPtr.sessionId === restored.sessionId ? localPtr.flaggedIds || {} : {};
+      setCurrentIdx(nextIdx);
+      setAnswersMap(mergedAnswers);
+      setFlaggedIds(nextFlags);
       setPracticeFeedbackMap(restored.practiceFeedback || {});
+      persistLocalSnapshot(restoredQuizState, nextIdx, mergedAnswers, nextFlags);
       setElapsedSeconds(
         restored.startedAtMs ? Math.max(0, Math.floor((effectiveNow - restored.startedAtMs) / 1000)) : 0
       );
@@ -1137,6 +1320,8 @@ export function QuizExamSystem({
       );
       setStage('exam');
     } catch (err: unknown) {
+      saveLocalQuizPointer(null);
+      setLocalRecoveryPointer(null);
       await loadActiveSessions();
       setErrorMsg(
         formatClientApiError(
@@ -1288,6 +1473,8 @@ export function QuizExamSystem({
       );
       const mode: QuizAssessmentMode = activeQuiz.assessmentMode;
       setActiveSessions((prev) => prev.filter((s) => s.sessionId !== activeQuiz.sessionId));
+      saveLocalQuizPointer(null);
+      setLocalRecoveryPointer(null);
       setRestoredNotice(null);
 
       if (user && isConfigured) {
@@ -1313,6 +1500,7 @@ export function QuizExamSystem({
       }
 
       setGradingResult(graded);
+      setReviewFilter('all');
       setResultMeta({
         attemptId: graded.attemptId ?? null,
         quizId: activeQuiz.quizId,
@@ -1358,14 +1546,100 @@ export function QuizExamSystem({
     }
   };
 
+  // Keyboard shortcuts during active quiz / exam stage
+  useEffect(() => {
+    if (stage !== 'exam' || !activeQuiz || showSubmitConfirm || grading) return;
+    const currentQ = activeQuiz.questions[currentIdx];
+    if (!currentQ) return;
+    const isPracticeLocked =
+      activeQuiz.assessmentMode === 'practice' && Boolean(practiceFeedbackMap[currentQ.id]);
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (e.key === 'ArrowLeft' && currentIdx > 0) {
+        e.preventDefault();
+        const nextIdx = currentIdx - 1;
+        setCurrentIdx(nextIdx);
+        scheduleProgressSync(activeQuiz.sessionId, nextIdx, answersMap, true);
+        return;
+      }
+      if (e.key === 'ArrowRight' && currentIdx < activeQuiz.questions.length - 1) {
+        e.preventDefault();
+        const nextIdx = currentIdx + 1;
+        setCurrentIdx(nextIdx);
+        scheduleProgressSync(activeQuiz.sessionId, nextIdx, answersMap, true);
+        return;
+      }
+
+      const keyLower = e.key.toLowerCase();
+      let optIdx: number | null = null;
+      if (keyLower === 'a' || e.key === '1') optIdx = 0;
+      else if (keyLower === 'b' || e.key === '2') optIdx = 1;
+      else if (keyLower === 'c' || e.key === '3') optIdx = 2;
+      else if (keyLower === 'd' || e.key === '4') optIdx = 3;
+
+      if (
+        optIdx !== null &&
+        !isPracticeLocked &&
+        currentQ.options &&
+        optIdx < currentQ.options.length
+      ) {
+        e.preventDefault();
+        const nextAnswers: Record<string, StudentAnswer> = {
+          ...answersMap,
+          [currentQ.id]: {
+            questionId: currentQ.id,
+            selectedOptionIndex: optIdx,
+          },
+        };
+        setAnswersMap(nextAnswers);
+        scheduleProgressSync(
+          activeQuiz.sessionId,
+          currentIdx,
+          nextAnswers,
+          activeQuiz.assessmentMode === 'practice'
+        );
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    stage,
+    activeQuiz,
+    currentIdx,
+    answersMap,
+    practiceFeedbackMap,
+    showSubmitConfirm,
+    grading,
+    scheduleProgressSync,
+  ]);
+
   // ============================================================================
-  // STAGE 1B: PRE-EXAM / PRE-QUIZ INSTRUCTIONS SCREEN
+  // STAGE 1B: PRE-EXAM / PRE-QUIZ INSTRUCTIONS SCREEN + ASSESSMENT BLUEPRINT
   // ============================================================================
   if (stage === 'instructions' && activeQuiz) {
     const isTimedExam =
       activeQuiz.assessmentMode === 'exam' &&
       Boolean(activeQuiz.timeLimitMinutes && activeQuiz.timeLimitMinutes > 0);
     const totalMarks = activeQuiz.questions.reduce((acc, q) => acc + (q.maxMarks || 1), 0);
+    const effectiveBlueprint = activeQuiz.blueprint ?? computeClientBlueprint(activeQuiz.questions);
+    const cognitiveOrder: Array<{ key: QuizCognitiveBand; label: string }> = [
+      { key: 'knowledge', label: 'Recall' },
+      { key: 'comprehension', label: 'Understanding' },
+      { key: 'application', label: 'Application' },
+      { key: 'analysis', label: 'Analysis' },
+    ];
 
     return (
       <div className="mx-auto max-w-3xl space-y-6">
@@ -1401,11 +1675,11 @@ export function QuizExamSystem({
 
         <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-8 dark:border-slate-800 dark:bg-[#0D162B]">
           <p className="text-xs font-semibold tracking-wide text-[#1D4ED8] dark:text-[#38BDF8]">
-            {isTimedExam ? 'Timed Exam Instructions' : 'Quiz Mode Instructions'} ·{' '}
+            {isTimedExam ? 'Timed Exam Briefing' : 'Practice Quiz Briefing'} ·{' '}
             {activeQuiz.subjectArea}
           </p>
           <h2 className="mt-1.5 font-display text-xl font-bold tracking-tight text-slate-900 sm:text-2xl dark:text-white">
-            {activeQuiz.title}
+            {stripSourceFilenameFromTitle(activeQuiz.title)}
           </h2>
 
           <div className="mt-5 grid grid-cols-1 gap-3 min-[360px]:grid-cols-2 sm:mt-6 sm:grid-cols-4 sm:gap-3.5">
@@ -1422,9 +1696,15 @@ export function QuizExamSystem({
               </p>
             </div>
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
-              <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Format</p>
+              <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Difficulty</p>
               <p className="mt-1 text-xs font-semibold capitalize text-slate-900 sm:text-sm dark:text-white">
-                {activeQuiz.format} · {activeQuiz.difficulty}
+                {activeQuiz.difficulty === 'easy'
+                  ? 'Beginner (Easy)'
+                  : activeQuiz.difficulty === 'intermediate'
+                    ? 'Intermediate'
+                    : activeQuiz.difficulty === 'advanced'
+                      ? 'Advanced'
+                      : 'Mixed'}
               </p>
             </div>
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
@@ -1435,44 +1715,114 @@ export function QuizExamSystem({
             </div>
           </div>
 
-          <div className="mt-6 space-y-2.5 rounded-xl border border-slate-200 bg-slate-50/70 p-4 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
+          {effectiveBlueprint.totalQuestions > 0 && (
+            <div className="mt-6 grid grid-cols-1 gap-4 rounded-xl border border-slate-200 bg-slate-50/70 p-4 sm:grid-cols-2 dark:border-slate-800 dark:bg-slate-900/40">
+              <div>
+                <h3 className="font-display text-xs font-semibold uppercase tracking-wide text-slate-700 dark:text-slate-300">
+                  Topic Coverage Blueprint
+                </h3>
+                <div className="mt-2.5 space-y-2">
+                  {effectiveBlueprint.topics.slice(0, 5).map((entry) => {
+                    const sharePct = Math.round(
+                      (entry.count / effectiveBlueprint.totalQuestions) * 100
+                    );
+                    return (
+                      <div key={entry.topic} className="space-y-1">
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="truncate font-medium text-slate-800 dark:text-slate-200">
+                            {entry.topic}
+                          </span>
+                          <span className="shrink-0 font-mono text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
+                            {entry.count} ({sharePct}%)
+                          </span>
+                        </div>
+                        <div className="h-1 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                          <div
+                            className="h-full rounded-full bg-[#1D4ED8] dark:bg-cyan-400"
+                            style={{ width: `${sharePct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <h3 className="font-display text-xs font-semibold uppercase tracking-wide text-slate-700 dark:text-slate-300">
+                  Cognitive Depth Distribution
+                </h3>
+                <div className="mt-2.5 space-y-2">
+                  {cognitiveOrder.map(({ key, label }) => {
+                    const count = effectiveBlueprint.cognitiveMix[key] || 0;
+                    const sharePct =
+                      effectiveBlueprint.totalQuestions > 0
+                        ? Math.round((count / effectiveBlueprint.totalQuestions) * 100)
+                        : 0;
+                    return (
+                      <div key={key} className="space-y-1">
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="font-medium text-slate-800 dark:text-slate-200">
+                            {label}
+                          </span>
+                          <span className="font-mono text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
+                            {count} ({sharePct}%)
+                          </span>
+                        </div>
+                        <div className="h-1 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                          <div
+                            className="h-full rounded-full bg-slate-700 dark:bg-slate-300"
+                            style={{ width: `${sharePct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="mt-5 space-y-2.5 rounded-xl border border-slate-200 bg-slate-50/70 p-4 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
             <h3 className="font-display text-sm font-semibold text-slate-900 dark:text-white">
-              Before You Begin
+              Assessment Guidelines
             </h3>
             <ul className="list-disc space-y-1.5 pl-5 text-xs leading-relaxed">
               {isTimedExam ? (
                 <>
                   <li>
-                    Use the Question Navigator panel to jump directly to any question; your selected
-                    options are preserved automatically during the session.
+                    Navigate freely across questions, modify selections before submission, and mark
+                    uncertain items with <strong>Flag for Review</strong>.
                   </li>
                   <li>
-                    Answer keys remain strictly protected on the server until you submit or time
-                    expires.
+                    Answer keys remain strictly secured on the server until submission or expiry.
                   </li>
                   <li>
-                    Your {activeQuiz.timeLimitMinutes}-minute server-tracked countdown starts
-                    immediately when you click Begin Assessment and will auto-submit on expiry.
+                    Your {activeQuiz.timeLimitMinutes}-minute server-tracked countdown begins on
+                    click and auto-submits automatically at zero.
                   </li>
                 </>
               ) : (
                 <>
                   <li>
-                    Questions are shown one at a time in sequence. Choose an option and click{' '}
-                    <strong>Check Answer</strong> to see immediate feedback.
+                    Select an option and click <strong>Check Answer</strong> to reveal verified
+                    feedback and an academic explanation immediately.
                   </li>
                   <li>
-                    After checking each answer, the correct option highlights in green along with
-                    an explanation and academic concept context.
+                    Use the top progress strip or arrow keys to revisit earlier questions at your
+                    own pace.
                   </li>
                   <li>
-                    Quiz mode is untimed. When you finish the final question, your full score
-                    summary is recorded automatically.
+                    Quiz mode is untimed. Complete the final question to generate your full topic
+                    mastery report.
                   </li>
                 </>
               )}
               <li>
-                Brainstine guards against accidental page refresh or leaving this screen mid-attempt.
+                Keyboard shortcuts: press <span className="font-mono">A</span>–
+                <span className="font-mono">D</span> (or <span className="font-mono">1</span>–
+                <span className="font-mono">4</span>) to select an option and arrow keys to move
+                between questions.
               </li>
             </ul>
           </div>
@@ -1554,7 +1904,7 @@ export function QuizExamSystem({
             </div>
           </div>
 
-          <div className="mt-4 space-y-1.5 select-none">
+          <div className="mt-4 space-y-2.5 select-none">
             <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
               <span className="font-mono tabular-nums">
                 Question {currentIdx + 1} of {total}
@@ -1568,6 +1918,40 @@ export function QuizExamSystem({
                 className="h-full rounded-full bg-blue-600 transition-all duration-200 dark:bg-cyan-400"
                 style={{ width: `${progressPct}%` }}
               />
+            </div>
+
+            <div className="flex flex-wrap gap-1.5 pt-1">
+              {activeQuiz.questions.map((q, idx) => {
+                const isCur = idx === currentIdx;
+                const qFeedback = practiceFeedbackMap[q.id];
+                const isAns =
+                  answersMap[q.id]?.selectedOptionIndex !== undefined &&
+                  answersMap[q.id]?.selectedOptionIndex !== null;
+                return (
+                  <button
+                    key={q.id}
+                    type="button"
+                    onClick={() => {
+                      setCurrentIdx(idx);
+                      scheduleProgressSync(activeQuiz.sessionId, idx, answersMap, true);
+                    }}
+                    aria-label={`Jump to question ${idx + 1}`}
+                    className={`h-7 min-w-7 rounded-md px-1.5 font-mono text-[11px] font-semibold tabular-nums transition-colors ${
+                      isCur
+                        ? 'bg-[#0F1E3D] text-white ring-2 ring-blue-500 ring-offset-1 dark:bg-blue-600 dark:ring-cyan-400 dark:ring-offset-slate-950'
+                        : qFeedback
+                          ? qFeedback.isCorrect
+                            ? 'border border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300'
+                            : 'border border-red-300 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300'
+                          : isAns
+                            ? 'border border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-cyan-300'
+                            : 'border border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400'
+                    }`}
+                  >
+                    {idx + 1}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </section>
@@ -1605,17 +1989,23 @@ export function QuizExamSystem({
         <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3.5 select-none sm:pb-4 dark:border-slate-800">
             <span className="font-mono text-xs font-semibold text-slate-500 tabular-nums dark:text-slate-400">
-              Question {currentIdx + 1} · Objective ({currentQuestion.maxMarks || 1} mark)
+              Question {currentIdx + 1} · {currentQuestion.maxMarks || 1} mark
+              {currentQuestion.cognitiveBand
+                ? ` · ${COGNITIVE_BAND_LABELS[currentQuestion.cognitiveBand]}`
+                : ''}
             </span>
-            {currentQuestion.topicTag && (
-              <span className="text-xs font-medium text-blue-700 dark:text-cyan-400">
-                Source: {currentQuestion.topicTag}
-              </span>
-            )}
+            {(() => {
+              const visibleTopic = getVisibleQuizTopicTag(currentQuestion.topicTag);
+              return visibleTopic ? (
+                <span className="text-xs font-medium text-blue-700 dark:text-cyan-400">
+                  {visibleTopic}
+                </span>
+              ) : null;
+            })()}
           </div>
 
           <h3 className="mt-4 font-display text-base font-semibold leading-snug text-slate-900 academic-selectable sm:mt-5 sm:text-lg dark:text-white">
-            {currentQuestion.question}
+            <ScientificText text={currentQuestion.question} />
           </h3>
 
           <div
@@ -1680,7 +2070,7 @@ export function QuizExamSystem({
                     {letter}
                   </span>
                   <span className="flex-1 text-sm leading-relaxed academic-selectable select-text">
-                    {optText}
+                    <ScientificText text={optText} />
                   </span>
                   {isCorrectOption && (
                     <CheckCircle2
@@ -1707,32 +2097,42 @@ export function QuizExamSystem({
                   : 'border-amber-200 bg-amber-50/70 dark:border-amber-900/60 dark:bg-amber-950/30'
               }`}
             >
-              <div className="flex items-center gap-2 text-sm font-semibold">
+              <div className="flex items-start gap-2 text-sm font-semibold">
                 {feedback.isCorrect ? (
                   <>
-                    <CheckCircle2 className="h-4 w-4 text-emerald-700 dark:text-emerald-400" aria-hidden="true" />
+                    <CheckCircle2
+                      className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700 dark:text-emerald-400"
+                      aria-hidden="true"
+                    />
                     <span className="text-emerald-800 dark:text-emerald-300">
                       Correct Answer
                     </span>
                   </>
                 ) : (
                   <>
-                    <XCircle className="h-4 w-4 text-red-700 dark:text-red-400" aria-hidden="true" />
+                    <XCircle
+                      className="mt-0.5 h-4 w-4 shrink-0 text-red-700 dark:text-red-400"
+                      aria-hidden="true"
+                    />
                     <span className="text-red-800 dark:text-red-300">
-                      Incorrect — Correct answer: {feedback.expectedAnswerDisplay}
+                      Incorrect — Correct answer:{' '}
+                      <ScientificText text={feedback.expectedAnswerDisplay} />
                     </span>
                   </>
                 )}
               </div>
               <p className="mt-2 text-sm leading-relaxed text-slate-800 select-text dark:text-slate-200">
                 <span className="font-semibold text-slate-900 dark:text-white">Explanation: </span>
-                {feedback.explanation}
+                <ScientificText text={stripSummarySourceAndPageRefs(feedback.explanation)} />
               </p>
-              {feedback.topicTag && !/^(page\s*\d+|p\.\s*\d+|doc)/i.test(feedback.topicTag.trim()) && (
-                <p className="mt-1.5 text-xs font-medium text-blue-700 dark:text-cyan-400">
-                  Topic: {feedback.topicTag}
-                </p>
-              )}
+              {(() => {
+                const visibleTopic = getVisibleQuizTopicTag(feedback.topicTag);
+                return visibleTopic ? (
+                  <p className="mt-1.5 text-xs font-medium text-blue-700 dark:text-cyan-400">
+                    Concept area: {visibleTopic}
+                  </p>
+                ) : null;
+              })()}
             </div>
           )}
 
@@ -1815,11 +2215,19 @@ export function QuizExamSystem({
     const currentAnswer = answersMap[currentQuestion.id];
     const total = activeQuiz.questions.length;
     const progressPct = Math.round((answeredCount / total) * 100);
+    const flaggedCount = activeQuiz.questions.filter((q) => Boolean(flaggedIds[q.id])).length;
+    const isCurrentFlagged = Boolean(flaggedIds[currentQuestion.id]);
     const remainingSeconds = activeQuiz.deadlineAtMs
       ? Math.max(0, Math.ceil((activeQuiz.deadlineAtMs - nowMs) / 1000))
       : activeQuiz.timeLimitMinutes && activeQuiz.timeLimitMinutes > 0
         ? Math.max(0, activeQuiz.timeLimitMinutes * 60 - elapsedSeconds)
         : null;
+    const timerToneClass =
+      remainingSeconds !== null && remainingSeconds <= 60
+        ? 'border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/50 dark:text-red-300'
+        : remainingSeconds !== null && remainingSeconds <= 300
+          ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300'
+          : 'border-slate-200 bg-slate-50 text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200';
 
     return (
       <div className="space-y-6">
@@ -1828,21 +2236,21 @@ export function QuizExamSystem({
           <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center sm:gap-4">
             <div className="min-w-0">
               <p className="text-xs font-semibold tracking-wide text-blue-700 select-none dark:text-cyan-400">
-                Timed Examination Mode · {activeQuiz.format.toUpperCase()} ·{' '}
-                {activeQuiz.difficulty.toUpperCase()}
+                Timed Examination · {activeQuiz.difficulty.toUpperCase()}
+                {flaggedCount > 0 ? ` · ${flaggedCount} Flagged` : ''}
               </p>
               <h2 className="mt-0.5 truncate font-display text-base font-bold text-slate-900 select-none sm:text-lg dark:text-white">
-                {activeQuiz.title}
+                {stripSourceFilenameFromTitle(activeQuiz.title)}
               </h2>
             </div>
 
             <div className="flex flex-wrap items-center gap-2.5 shrink-0 select-none sm:gap-3">
-              <div className="flex min-h-10 items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 font-mono text-xs font-semibold tabular-nums text-slate-800 sm:min-h-0 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
-                <Clock className="h-3.5 w-3.5 text-blue-600 dark:text-cyan-400" aria-hidden="true" />
+              <div
+                className={`flex min-h-10 items-center gap-2 rounded-lg border px-3 py-1.5 font-mono text-xs font-semibold tabular-nums sm:min-h-0 ${timerToneClass}`}
+              >
+                <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 {remainingSeconds !== null ? (
-                  <span className={remainingSeconds <= 60 ? 'text-red-600 dark:text-red-400' : ''}>
-                    Time left: {formatSeconds(remainingSeconds)}
-                  </span>
+                  <span>Time left: {formatSeconds(remainingSeconds)}</span>
                 ) : (
                   <span>Elapsed: {formatSeconds(elapsedSeconds)}</span>
                 )}
@@ -1922,18 +2330,44 @@ export function QuizExamSystem({
           <div className="lg:col-span-8">
             <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3.5 select-none sm:gap-3 sm:pb-4 dark:border-slate-800">
-                <span className="font-mono text-xs font-semibold text-slate-500 tabular-nums dark:text-slate-400">
-                  Question {currentIdx + 1} · Objective ({currentQuestion.maxMarks || 1} mark)
-                </span>
-                {currentQuestion.topicTag && (
-                  <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
-                    {currentQuestion.topicTag}
+                <div className="flex flex-wrap items-center gap-2 font-mono text-xs font-semibold text-slate-500 tabular-nums dark:text-slate-400">
+                  <span>
+                    Question {currentIdx + 1} · {currentQuestion.maxMarks || 1} mark
                   </span>
-                )}
+                  {(() => {
+                    const visibleTopic = getVisibleQuizTopicTag(currentQuestion.topicTag);
+                    return visibleTopic ? (
+                      <span className="font-sans font-medium text-blue-700 dark:text-cyan-400">
+                        · {visibleTopic}
+                      </span>
+                    ) : null;
+                  })()}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextFlags = {
+                      ...flaggedIds,
+                      [currentQuestion.id]: !isCurrentFlagged,
+                    };
+                    setFlaggedIds(nextFlags);
+                    persistLocalSnapshot(activeQuiz, currentIdx, answersMap, nextFlags);
+                  }}
+                  aria-pressed={isCurrentFlagged}
+                  className={`inline-flex min-h-8 items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold transition-colors whitespace-nowrap ${
+                    isCurrentFlagged
+                      ? 'border-amber-400 bg-amber-50 text-amber-800 dark:border-amber-500/70 dark:bg-amber-950/50 dark:text-amber-300'
+                      : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  <Flag className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>{isCurrentFlagged ? 'Flagged' : 'Flag for Review'}</span>
+                </button>
               </div>
 
               <h3 className="mt-4 font-display text-base font-semibold leading-snug text-slate-900 academic-selectable sm:mt-5 sm:text-lg dark:text-white">
-                {currentQuestion.question}
+                <ScientificText text={currentQuestion.question} />
               </h3>
 
               {currentQuestion.visualAid ? (
@@ -1948,6 +2382,7 @@ export function QuizExamSystem({
                     `${activeQuiz.subjectArea} ${currentQuestion.topicTag || ''} ${currentQuestion.question}`,
                     'quiz'
                   );
+                  const visibleTopic = getVisibleQuizTopicTag(currentQuestion.topicTag);
                   return (
                     <figure className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-slate-950 select-none dark:border-slate-800">
                       <div className="relative h-36 w-full sm:h-44">
@@ -1961,9 +2396,9 @@ export function QuizExamSystem({
                         />
                         <div className="absolute inset-0 bg-gradient-to-t from-slate-950/75 via-slate-950/15 to-transparent" />
                         <figcaption className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-2 px-3.5 py-2 text-[11px] font-medium text-slate-100">
-                          <span>Subject Reference · {plate.subjectLabel}</span>
-                          {currentQuestion.topicTag && (
-                            <span className="truncate text-cyan-200">{currentQuestion.topicTag}</span>
+                          <span>Concept Visual · {plate.subjectLabel}</span>
+                          {visibleTopic && (
+                            <span className="truncate text-cyan-200">{visibleTopic}</span>
                           )}
                         </figcaption>
                       </div>
@@ -2013,7 +2448,7 @@ export function QuizExamSystem({
                         {letter}
                       </span>
                       <span className="text-sm leading-relaxed academic-selectable select-text">
-                        {optText}
+                        <ScientificText text={optText} />
                       </span>
                     </button>
                   );
@@ -2070,13 +2505,14 @@ export function QuizExamSystem({
                 Question Navigator
               </h3>
               <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                Answers are saved automatically as you move between questions.
+                Answers autosave continuously as you navigate between items.
               </p>
 
               <div className="mt-4 grid grid-cols-5 gap-2">
                 {activeQuiz.questions.map((q, idx) => {
                   const isCurrent = idx === currentIdx;
                   const answered = isQuestionAnswered(q);
+                  const isFlagged = Boolean(flaggedIds[q.id]);
                   return (
                     <button
                       key={q.id}
@@ -2085,13 +2521,17 @@ export function QuizExamSystem({
                         setCurrentIdx(idx);
                         scheduleProgressSync(activeQuiz.sessionId, idx, answersMap, true);
                       }}
-                      aria-label={`Question ${idx + 1}${answered ? ' (answered)' : ' (unanswered)'}`}
-                      className={`h-10 rounded-lg font-mono text-xs font-semibold tabular-nums transition-colors sm:h-9 ${
+                      aria-label={`Question ${idx + 1}${answered ? ' (answered)' : ' (unanswered)'}${
+                        isFlagged ? ' (flagged)' : ''
+                      }`}
+                      className={`relative h-10 rounded-lg font-mono text-xs font-semibold tabular-nums transition-colors sm:h-9 ${
                         isCurrent
                           ? 'bg-[#0F1E3D] text-white ring-2 ring-blue-500 ring-offset-1 dark:bg-blue-600 dark:ring-cyan-400 dark:ring-offset-slate-950'
-                          : answered
-                            ? 'border border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-cyan-300'
-                            : 'border border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400'
+                          : isFlagged
+                            ? 'border border-amber-400 bg-amber-50 text-amber-800 dark:border-amber-500/70 dark:bg-amber-950/40 dark:text-amber-300'
+                            : answered
+                              ? 'border border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-cyan-300'
+                              : 'border border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400'
                       }`}
                     >
                       {idx + 1}
@@ -2100,10 +2540,14 @@ export function QuizExamSystem({
                 })}
               </div>
 
-              <div className="mt-5 flex items-center gap-4 border-t border-slate-200 pt-4 text-xs text-slate-600 dark:border-slate-800 dark:text-slate-400">
+              <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-slate-200 pt-4 text-xs text-slate-600 dark:border-slate-800 dark:text-slate-400">
                 <span className="inline-flex items-center gap-1.5">
                   <span className="h-2.5 w-2.5 rounded-sm border border-blue-300 bg-blue-100 dark:border-blue-700 dark:bg-blue-950" />
                   Answered ({answeredCount})
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-sm border border-amber-400 bg-amber-100 dark:border-amber-600 dark:bg-amber-950" />
+                  Flagged ({flaggedCount})
                 </span>
                 <span className="inline-flex items-center gap-1.5">
                   <span className="h-2.5 w-2.5 rounded-sm border border-slate-300 bg-slate-100 dark:border-slate-700 dark:bg-slate-900" />
@@ -2129,8 +2573,13 @@ export function QuizExamSystem({
                 You have answered <strong className="font-mono tabular-nums">{answeredCount}</strong> of{' '}
                 <strong className="font-mono tabular-nums">{total}</strong> questions.
                 {total - answeredCount > 0 && (
-                  <span className="block mt-1.5 text-amber-700 dark:text-amber-300">
+                  <span className="mt-1.5 block text-amber-700 dark:text-amber-300">
                     {total - answeredCount} question{total - answeredCount === 1 ? '' : 's'} remain unanswered.
+                  </span>
+                )}
+                {flaggedCount > 0 && (
+                  <span className="mt-1 block text-amber-700 dark:text-amber-300">
+                    {flaggedCount} question{flaggedCount === 1 ? ' is' : 's are'} flagged for review.
                   </span>
                 )}
               </p>
@@ -2179,7 +2628,7 @@ export function QuizExamSystem({
   }
 
   // ============================================================================
-  // STAGE 3: RESULTS AND PERFORMANCE ANALYSIS
+  // STAGE 3: RESULTS, TOPIC MASTERY ANALYTICS & REVIEW
   // ============================================================================
   if (stage === 'results' && gradingResult && resultMeta) {
     const hasAiTheory = gradingResult.gradedResults.some((r) => r.aiEvaluated);
@@ -2191,6 +2640,58 @@ export function QuizExamSystem({
       )
       .slice()
       .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
+    const topicInsights: TopicPerformanceInsight[] = (() => {
+      if (
+        Array.isArray(gradingResult.topicPerformance) &&
+        gradingResult.topicPerformance.length > 0
+      ) {
+        return gradingResult.topicPerformance;
+      }
+      const topicMap = new Map<
+        string,
+        { totalQuestions: number; correctCount: number; earnedMarks: number; maxMarks: number }
+      >();
+      for (const item of gradingResult.gradedResults) {
+        const topic =
+          getVisibleQuizTopicTag(item.topicTag) || resultMeta.subjectArea || 'Core Concepts';
+        const acc = topicMap.get(topic) || {
+          totalQuestions: 0,
+          correctCount: 0,
+          earnedMarks: 0,
+          maxMarks: 0,
+        };
+        acc.totalQuestions += 1;
+        if (item.status === 'correct') acc.correctCount += 1;
+        acc.earnedMarks += item.marksAwarded;
+        acc.maxMarks += item.maxMarks;
+        topicMap.set(topic, acc);
+      }
+      return Array.from(topicMap.entries())
+        .map(([topic, stat]) => {
+          const accuracyPct =
+            stat.maxMarks > 0 ? Math.round((stat.earnedMarks / stat.maxMarks) * 100) : 0;
+          const status: TopicPerformanceInsight['status'] =
+            accuracyPct >= 75 ? 'strong' : accuracyPct >= 50 ? 'developing' : 'needs_review';
+          return {
+            topic,
+            totalQuestions: stat.totalQuestions,
+            correctCount: stat.correctCount,
+            earnedMarks: Math.round(stat.earnedMarks * 10) / 10,
+            maxMarks: stat.maxMarks,
+            accuracyPct,
+            status,
+          };
+        })
+        .sort((a, b) => a.accuracyPct - b.accuracyPct || b.totalQuestions - a.totalQuestions);
+    })();
+
+    const missedCount = gradingResult.gradedResults.filter((r) => r.status !== 'correct').length;
+    const filteredReviewResults = gradingResult.gradedResults.filter((item) => {
+      if (reviewFilter === 'missed') return item.status !== 'correct';
+      if (reviewFilter === 'correct') return item.status === 'correct';
+      return true;
+    });
 
     return (
       <div className="space-y-6">
@@ -2208,14 +2709,13 @@ export function QuizExamSystem({
             <div>
               <p className="text-xs font-semibold tracking-wide text-blue-700 select-none dark:text-cyan-400">
                 {resultMeta.assessmentMode === 'exam' ? 'Exam Mode' : 'Practice Mode'} ·{' '}
-                {resultMeta.subjectArea} · {resultMeta.format.toUpperCase()} ·{' '}
-                {resultMeta.difficulty.toUpperCase()}
+                {resultMeta.subjectArea} · {resultMeta.difficulty.toUpperCase()}
                 {resultMeta.createdAt
                   ? ` · ${new Date(resultMeta.createdAt).toLocaleString()}`
                   : ''}
               </p>
               <h2 className="mt-1 font-display text-xl font-bold text-slate-900 select-text sm:text-2xl dark:text-white">
-                {resultMeta.title}
+                {stripSourceFilenameFromTitle(resultMeta.title)}
               </h2>
             </div>
 
@@ -2326,6 +2826,64 @@ export function QuizExamSystem({
             )}
           </div>
 
+          {topicInsights.length > 0 && (
+            <div className="mt-5 rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-900/40">
+              <h3 className="font-display text-xs font-semibold uppercase tracking-wide text-slate-700 select-none dark:text-slate-300">
+                Topic-Level Mastery Breakdown
+              </h3>
+              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {topicInsights.map((insight) => {
+                  const statusLabel =
+                    insight.status === 'strong'
+                      ? 'Strong'
+                      : insight.status === 'developing'
+                        ? 'Developing'
+                        : 'Needs Review';
+                  const statusTextClass =
+                    insight.status === 'strong'
+                      ? 'text-emerald-700 dark:text-emerald-400'
+                      : insight.status === 'developing'
+                        ? 'text-amber-700 dark:text-amber-400'
+                        : 'text-red-700 dark:text-red-400';
+                  const barFillClass =
+                    insight.status === 'strong'
+                      ? 'bg-emerald-600 dark:bg-emerald-400'
+                      : insight.status === 'developing'
+                        ? 'bg-amber-500 dark:bg-amber-400'
+                        : 'bg-red-600 dark:bg-red-400';
+
+                  return (
+                    <div
+                      key={insight.topic}
+                      className="rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-[#0D162B]"
+                    >
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="truncate font-semibold text-slate-900 dark:text-white">
+                          {insight.topic}
+                        </span>
+                        <span className={`shrink-0 font-semibold ${statusTextClass}`}>
+                          {statusLabel}
+                        </span>
+                      </div>
+                      <div className="mt-1.5 flex items-center justify-between font-mono text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
+                        <span>
+                          {insight.correctCount}/{insight.totalQuestions} correct
+                        </span>
+                        <span>{insight.accuracyPct}%</span>
+                      </div>
+                      <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                        <div
+                          className={`h-full rounded-full ${barFillClass}`}
+                          style={{ width: `${insight.accuracyPct}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {matchingAttempts.length > 1 && (
             <div className="mt-5 rounded-xl border border-blue-200 bg-blue-50/60 p-4 dark:border-blue-900/50 dark:bg-blue-950/20">
               <div className="flex items-center gap-2 text-xs font-semibold text-blue-900 select-none dark:text-cyan-300">
@@ -2382,110 +2940,157 @@ export function QuizExamSystem({
 
         {/* Question-by-Question Review */}
         <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6 dark:border-slate-800 dark:bg-[#0D162B]">
-          <h3 className="font-display text-lg font-bold text-slate-900 select-none dark:text-white">
-            Question-by-Question Review
-          </h3>
+          <div className="flex flex-col justify-between gap-3 border-b border-slate-200 pb-4 sm:flex-row sm:items-center dark:border-slate-800">
+            <h3 className="font-display text-lg font-bold text-slate-900 select-none dark:text-white">
+              Question-by-Question Review
+            </h3>
+
+            <div
+              role="tablist"
+              aria-label="Filter reviewed questions"
+              className="inline-flex items-center rounded-xl border border-slate-200 bg-slate-100 p-1 select-none dark:border-slate-800 dark:bg-slate-900"
+            >
+              {(
+                [
+                  { id: 'all', label: `All (${gradingResult.gradedResults.length})` },
+                  { id: 'missed', label: `Missed (${missedCount})` },
+                  { id: 'correct', label: `Correct (${gradingResult.correctCount})` },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={reviewFilter === tab.id}
+                  onClick={() => setReviewFilter(tab.id)}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap ${
+                    reviewFilter === tab.id
+                      ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
+                      : 'text-slate-600 hover:text-slate-900 dark:text-slate-400'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
 
           <div className="mt-4 divide-y divide-slate-200 dark:divide-slate-800">
-            {gradingResult.gradedResults.map((item) => {
-              const statusLabel =
-                item.status === 'correct'
-                  ? 'Correct'
-                  : item.status === 'partial'
-                    ? 'Partial Credit'
-                    : item.status === 'unanswered'
-                      ? 'Unanswered'
-                      : 'Incorrect';
+            {filteredReviewResults.length === 0 ? (
+              <p className="py-6 text-center text-sm text-slate-500 dark:text-slate-400">
+                No questions match the selected filter.
+              </p>
+            ) : (
+              filteredReviewResults.map((item) => {
+                const statusLabel =
+                  item.status === 'correct'
+                    ? 'Correct'
+                    : item.status === 'partial'
+                      ? 'Partial Credit'
+                      : item.status === 'unanswered'
+                        ? 'Unanswered'
+                        : 'Incorrect';
 
-              const statusColor =
-                item.status === 'correct'
-                  ? 'text-emerald-700 dark:text-emerald-400'
-                  : item.status === 'partial'
-                    ? 'text-amber-700 dark:text-amber-400'
-                    : item.status === 'unanswered'
-                      ? 'text-slate-500 dark:text-slate-400'
-                      : 'text-red-700 dark:text-red-400';
+                const statusColor =
+                  item.status === 'correct'
+                    ? 'text-emerald-700 dark:text-emerald-400'
+                    : item.status === 'partial'
+                      ? 'text-amber-700 dark:text-amber-400'
+                      : item.status === 'unanswered'
+                        ? 'text-slate-500 dark:text-slate-400'
+                        : 'text-red-700 dark:text-red-400';
 
-              return (
-                <div key={item.questionId} className="py-5 first:pt-2 last:pb-0">
-                  <div className="flex flex-wrap items-center justify-between gap-2 select-none">
-                    <div className="flex items-center gap-2 text-xs font-semibold">
-                      <span className="font-mono text-slate-500 tabular-nums dark:text-slate-400">
-                        Q{item.number}
-                      </span>
-                      <span aria-hidden="true">·</span>
-                      <span className={`inline-flex items-center gap-1 ${statusColor}`}>
-                        {item.status === 'correct' ? (
-                          <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-                        ) : item.status === 'incorrect' ? (
-                          <XCircle className="h-3.5 w-3.5" aria-hidden="true" />
-                        ) : null}
-                        {statusLabel}
-                      </span>
-                      {item.aiEvaluated && (
-                        <>
-                          <span aria-hidden="true">·</span>
-                          <span className="text-indigo-700 dark:text-indigo-400">
-                            Automated AI Evaluation
-                          </span>
-                        </>
-                      )}
-                    </div>
-                    <span className="font-mono text-xs font-semibold text-slate-700 tabular-nums dark:text-slate-300">
-                      {item.marksAwarded} / {item.maxMarks} marks
-                    </span>
-                  </div>
+                const visibleTopic = getVisibleQuizTopicTag(item.topicTag);
 
-                  <p className="mt-2 font-display text-base font-semibold text-slate-900 select-text dark:text-white">
-                    {item.question}
-                  </p>
-
-                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
-                      <p className="text-[11px] font-semibold text-slate-500 select-none dark:text-slate-400">
-                        Your Submitted Answer
-                      </p>
-                      <p className="mt-1 text-sm text-slate-800 select-text dark:text-slate-200">
-                        {item.studentAnswerDisplay}
-                      </p>
-                    </div>
-                    <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
-                      <p className="text-[11px] font-semibold text-emerald-700 select-none dark:text-emerald-400">
-                        Correct / Expected Answer
-                      </p>
-                      <p className="mt-1 text-sm text-slate-800 select-text dark:text-slate-200">
-                        {item.expectedAnswerDisplay}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="mt-3 space-y-1.5 text-sm text-slate-700 select-text dark:text-slate-300">
-                    {item.feedback && (
-                      <p>
-                        <span className="font-semibold text-slate-900 select-none dark:text-white">
-                          Feedback:{' '}
+                return (
+                  <div key={item.questionId} className="py-5 first:pt-2 last:pb-0">
+                    <div className="flex flex-wrap items-center justify-between gap-2 select-none">
+                      <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
+                        <span className="font-mono text-slate-500 tabular-nums dark:text-slate-400">
+                          Q{item.number}
                         </span>
-                        {item.feedback}
-                      </p>
-                    )}
-                    {item.missingPoints && item.missingPoints.length > 0 && (
-                      <p>
-                        <span className="font-semibold text-amber-800 select-none dark:text-amber-300">
-                          Missing points:{' '}
+                        <span aria-hidden="true">·</span>
+                        <span className={`inline-flex items-center gap-1 ${statusColor}`}>
+                          {item.status === 'correct' ? (
+                            <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                          ) : item.status === 'incorrect' ? (
+                            <XCircle className="h-3.5 w-3.5" aria-hidden="true" />
+                          ) : null}
+                          {statusLabel}
                         </span>
-                        {item.missingPoints.join('; ')}
-                      </p>
-                    )}
-                    <p>
-                      <span className="font-semibold text-blue-700 select-none dark:text-cyan-400">
-                        Explanation:{' '}
+                        {visibleTopic && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span className="font-medium text-blue-700 dark:text-cyan-400">
+                              {visibleTopic}
+                            </span>
+                          </>
+                        )}
+                        {item.cognitiveBand && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span className="font-normal text-slate-500 dark:text-slate-400">
+                              {COGNITIVE_BAND_LABELS[item.cognitiveBand]}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      <span className="font-mono text-xs font-semibold text-slate-700 tabular-nums dark:text-slate-300">
+                        {item.marksAwarded} / {item.maxMarks} marks
                       </span>
-                      {item.explanation}
+                    </div>
+
+                    <p className="mt-2 font-display text-base font-semibold text-slate-900 select-text dark:text-white">
+                      <ScientificText text={item.question} />
                     </p>
+
+                    <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+                        <p className="text-[11px] font-semibold text-slate-500 select-none dark:text-slate-400">
+                          Your Submitted Answer
+                        </p>
+                        <p className="mt-1 text-sm text-slate-800 select-text dark:text-slate-200">
+                          <ScientificText text={item.studentAnswerDisplay} />
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 dark:border-slate-800 dark:bg-slate-900/50">
+                        <p className="text-[11px] font-semibold text-emerald-700 select-none dark:text-emerald-400">
+                          Correct / Expected Answer
+                        </p>
+                        <p className="mt-1 text-sm text-slate-800 select-text dark:text-slate-200">
+                          <ScientificText text={item.expectedAnswerDisplay} />
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 space-y-1.5 text-sm text-slate-700 select-text dark:text-slate-300">
+                      {item.feedback && (
+                        <p>
+                          <span className="font-semibold text-slate-900 select-none dark:text-white">
+                            Feedback:{' '}
+                          </span>
+                          <ScientificText text={stripSummarySourceAndPageRefs(item.feedback)} />
+                        </p>
+                      )}
+                      {item.missingPoints && item.missingPoints.length > 0 && (
+                        <p>
+                          <span className="font-semibold text-amber-800 select-none dark:text-amber-300">
+                            Missing points:{' '}
+                          </span>
+                          {item.missingPoints.join('; ')}
+                        </p>
+                      )}
+                      <p>
+                        <span className="font-semibold text-blue-700 select-none dark:text-cyan-400">
+                          Explanation:{' '}
+                        </span>
+                        <ScientificText text={stripSummarySourceAndPageRefs(item.explanation)} />
+                      </p>
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })
+            )}
           </div>
         </section>
       </div>
@@ -2563,59 +3168,117 @@ export function QuizExamSystem({
           className="mt-5"
         />
 
-        {activeSessions.length > 0 && (
-          <div className="mt-5 space-y-2.5 rounded-xl border border-blue-200 bg-blue-50/70 p-4 dark:border-blue-900/60 dark:bg-blue-950/30">
-            <div className="flex items-center justify-between gap-2">
-              <p className="font-display text-xs font-bold uppercase tracking-wide text-blue-800 select-none dark:text-cyan-300">
-                Resume In-Progress Assessment ({activeSessions.length})
-              </p>
-            </div>
-            <div className="space-y-2">
-              {activeSessions.map((sess) => {
-                const isResuming = resumingSessionId === sess.sessionId;
-                return (
-                  <div
-                    key={sess.sessionId}
-                    className="flex flex-col justify-between gap-3 rounded-xl border border-blue-200/80 bg-white p-3.5 sm:flex-row sm:items-center dark:border-slate-800 dark:bg-[#0D162B]"
-                  >
-                    <div className="min-w-0">
-                      <p className="truncate font-display text-sm font-semibold text-slate-900 dark:text-white">
-                        {sess.title}
-                      </p>
-                      <p className="mt-0.5 font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
-                        {sess.assessmentMode === 'exam' ? 'Timed Exam' : 'Quiz Mode'} ·{' '}
-                        {sess.answeredCount}/{sess.questionCount} answered ·{' '}
-                        {sess.isExpired
-                          ? 'Deadline expired — click to finalize results'
-                          : sess.remainingSeconds !== null
-                            ? `${formatSeconds(sess.remainingSeconds)} remaining`
-                            : `Question ${sess.currentQuestionIndex + 1} of ${sess.questionCount}`}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      disabled={Boolean(resumingSessionId)}
-                      onClick={() => handleResumeSession(sess.sessionId)}
-                      className="inline-flex min-h-10 shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 sm:min-h-9 dark:bg-blue-600 dark:hover:bg-blue-500"
+        {(() => {
+          const serverIds = new Set(activeSessions.map((s) => s.sessionId));
+          const extraLocal =
+            localRecoveryPointer && !serverIds.has(localRecoveryPointer.sessionId)
+              ? [localRecoveryPointer]
+              : [];
+          const totalRecoverable = activeSessions.length + extraLocal.length;
+          if (totalRecoverable === 0) return null;
+
+          return (
+            <div className="mt-5 space-y-2.5 rounded-xl border border-blue-200 bg-blue-50/70 p-4 dark:border-blue-900/60 dark:bg-blue-950/30">
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-display text-xs font-bold uppercase tracking-wide text-blue-800 select-none dark:text-cyan-300">
+                  Resume In-Progress Assessment ({totalRecoverable})
+                </p>
+              </div>
+              <div className="space-y-2">
+                {activeSessions.map((sess) => {
+                  const isResuming = resumingSessionId === sess.sessionId;
+                  return (
+                    <div
+                      key={sess.sessionId}
+                      className="flex flex-col justify-between gap-3 rounded-xl border border-blue-200/80 bg-white p-3.5 sm:flex-row sm:items-center dark:border-slate-800 dark:bg-[#0D162B]"
                     >
-                      {isResuming ? (
-                        <>
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                          <span>Restoring...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Play className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>{sess.isExpired ? 'Finalize & View Score' : 'Resume Assessment'}</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-                );
-              })}
+                      <div className="min-w-0">
+                        <p className="truncate font-display text-sm font-semibold text-slate-900 dark:text-white">
+                          {stripSourceFilenameFromTitle(sess.title)}
+                        </p>
+                        <p className="mt-0.5 font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
+                          {sess.assessmentMode === 'exam' ? 'Timed Exam' : 'Quiz Mode'} ·{' '}
+                          {sess.answeredCount}/{sess.questionCount} answered ·{' '}
+                          {sess.isExpired
+                            ? 'Deadline expired — click to finalize results'
+                            : sess.remainingSeconds !== null
+                              ? `${formatSeconds(sess.remainingSeconds)} remaining`
+                              : `Question ${sess.currentQuestionIndex + 1} of ${sess.questionCount}`}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={Boolean(resumingSessionId)}
+                        onClick={() => handleResumeSession(sess.sessionId)}
+                        className="inline-flex min-h-10 shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 sm:min-h-9 dark:bg-blue-600 dark:hover:bg-blue-500"
+                      >
+                        {isResuming ? (
+                          <>
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                            <span>Restoring...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Play className="h-3.5 w-3.5" aria-hidden="true" />
+                            <span>
+                              {sess.isExpired ? 'Finalize & View Score' : 'Resume Assessment'}
+                            </span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  );
+                })}
+                {extraLocal.map((ptr) => {
+                  const isResuming = resumingSessionId === ptr.sessionId;
+                  const isExpired =
+                    ptr.assessmentMode === 'exam' &&
+                    ptr.deadlineAtMs !== null &&
+                    Date.now() > ptr.deadlineAtMs;
+                  return (
+                    <div
+                      key={ptr.sessionId}
+                      className="flex flex-col justify-between gap-3 rounded-xl border border-blue-200/80 bg-white p-3.5 sm:flex-row sm:items-center dark:border-slate-800 dark:bg-[#0D162B]"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate font-display text-sm font-semibold text-slate-900 dark:text-white">
+                          {stripSourceFilenameFromTitle(ptr.title)}
+                        </p>
+                        <p className="mt-0.5 font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
+                          {ptr.assessmentMode === 'exam' ? 'Timed Exam' : 'Quiz Mode'} ·{' '}
+                          {ptr.answeredCount}/{ptr.questionCount} answered ·{' '}
+                          {isExpired
+                            ? 'Deadline expired — click to finalize results'
+                            : `Question ${ptr.currentQuestionIndex + 1} of ${ptr.questionCount}`}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={Boolean(resumingSessionId)}
+                        onClick={() => handleResumeSession(ptr.sessionId, ptr.sessionToken)}
+                        className="inline-flex min-h-10 shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[#0F1E3D] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-50 sm:min-h-9 dark:bg-blue-600 dark:hover:bg-blue-500"
+                      >
+                        {isResuming ? (
+                          <>
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                            <span>Restoring...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Play className="h-3.5 w-3.5" aria-hidden="true" />
+                            <span>
+                              {isExpired ? 'Finalize & View Score' : 'Resume Assessment'}
+                            </span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {errorMsg && (
           <div
@@ -3060,10 +3723,10 @@ export function QuizExamSystem({
                   >
                     <div className="min-w-0">
                       <p className="truncate font-display text-sm font-semibold text-slate-900 dark:text-white">
-                        {q.title}
+                        {stripSourceFilenameFromTitle(q.title)}
                       </p>
                       <p className="mt-0.5 font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
-                        {q.subject_area} · {q.question_count} questions · {q.format} · {q.difficulty}
+                        {q.subject_area} · {q.question_count} questions · {q.difficulty}
                       </p>
                     </div>
                     <div className="flex items-center gap-2 shrink-0 select-none">
@@ -3133,7 +3796,7 @@ export function QuizExamSystem({
                     >
                       <div className="min-w-0">
                         <p className="truncate font-display text-sm font-semibold text-slate-900 dark:text-white">
-                          {att.title}
+                          {stripSourceFilenameFromTitle(att.title)}
                         </p>
                         <p className="mt-0.5 font-mono text-xs text-slate-500 tabular-nums dark:text-slate-400">
                           {modeLabel} · {linkedQuiz?.subject_area || 'General Studies'} · Score:{' '}

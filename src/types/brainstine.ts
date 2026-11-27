@@ -9,7 +9,8 @@ export type EducationalDiagramType =
   | 'concept_map'
   | 'comparison_matrix'
   | 'cartesian_plot'
-  | 'scientific_system';
+  | 'scientific_system'
+  | 'candlestick_chart';
 
 export interface DiagramNode {
   id: string;
@@ -53,6 +54,25 @@ export interface ComparisonTable {
   caption?: string;
 }
 
+export interface CandlestickSampleBar {
+  label: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  note?: string;
+}
+
+export interface CandlestickChartSpec {
+  candles: CandlestickSampleBar[];
+  supportLevel?: number;
+  resistanceLevel?: number;
+  supportLabel?: string;
+  resistanceLabel?: string;
+  timeframeLabel?: string;
+  trendNote?: string;
+}
+
 export interface EducationalDiagramSpec {
   id?: string;
   type: EducationalDiagramType;
@@ -67,6 +87,7 @@ export interface EducationalDiagramSpec {
   yAxisLabel?: string;
   series?: PlotSeries[];
   annotations?: { x: number; y: number; text: string }[];
+  candlestickSpec?: CandlestickChartSpec;
 }
 
 export interface UserProfile {
@@ -237,7 +258,22 @@ export interface StructuredSummary {
   generationMode?: 'ai' | 'extractive' | 'document';
 }
 
+export interface ExtractedDocumentSection {
+  id: string;
+  index: number;
+  heading: string;
+  preview: string;
+  wordCount: number;
+  unitCount: number;
+  pageNumbers: number[];
+  text: string;
+}
+
 export interface ExtractionResult {
+  extractionId?: string;
+  contentHash?: string;
+  detectedSubject?: string;
+  sections?: ExtractedDocumentSection[];
   title: string;
   materialType: MaterialSourceType;
   fileName: string | null;
@@ -295,6 +331,39 @@ export type QuizFormat = 'objective' | 'theory' | 'mixed';
 export type QuizDifficulty = 'easy' | 'intermediate' | 'advanced' | 'mixed';
 export type QuizSourceMode = 'material' | 'summary' | 'text' | 'topic' | 'upload';
 export type QuizQuestionCount = 5 | 10 | 15 | 20 | 25 | 30 | 35 | 40 | 45 | 50 | 55 | 60 | 65 | 70;
+export type QuizCognitiveBand = 'knowledge' | 'comprehension' | 'application' | 'analysis';
+export type QuizQuestionCategory =
+  | 'definition'
+  | 'conceptual'
+  | 'application'
+  | 'scenario'
+  | 'analytical'
+  | 'comparison'
+  | 'cause_effect'
+  | 'problem_solving'
+  | 'process'
+  | 'classification';
+
+export interface AssessmentBlueprintTopic {
+  topic: string;
+  count: number;
+}
+
+export interface AssessmentBlueprint {
+  totalQuestions: number;
+  topics: AssessmentBlueprintTopic[];
+  cognitiveMix: Record<QuizCognitiveBand, number>;
+}
+
+export interface TopicPerformanceInsight {
+  topic: string;
+  totalQuestions: number;
+  correctCount: number;
+  earnedMarks: number;
+  maxMarks: number;
+  accuracyPct: number;
+  status: 'strong' | 'developing' | 'needs_review';
+}
 
 export interface QuizQuestion {
   id: string;
@@ -308,6 +377,8 @@ export interface QuizQuestion {
   maxMarks: number;
   explanation?: string;
   topicTag?: string;
+  cognitiveBand?: QuizCognitiveBand;
+  questionCategory?: QuizQuestionCategory;
   visualAid?: EducationalDiagramSpec;
 }
 
@@ -324,6 +395,7 @@ export interface GeneratedQuizPayload {
   requestedQuestionCount?: number;
   questionCount: number;
   insufficientSourceNote?: string | null;
+  blueprint?: AssessmentBlueprint;
   questions: QuizQuestion[];
 }
 
@@ -341,6 +413,7 @@ export interface StartQuizSessionResponse {
   deadlineAtMs: number | null;
   serverNowMs: number;
   remainingSeconds: number | null;
+  blueprint?: AssessmentBlueprint;
   questions: QuizQuestion[];
 }
 
@@ -384,6 +457,7 @@ export type RestoredQuizSessionResponse =
       lockedQuestionIds: string[];
       practiceFeedback: Record<string, QuizAnswerCheckResponse>;
       lastSavedAt: string;
+      blueprint?: AssessmentBlueprint;
       questions: QuizQuestion[];
     }
   | {
@@ -406,6 +480,8 @@ export interface QuizAnswerCheckResponse {
   expectedAnswerDisplay: string;
   explanation: string;
   topicTag?: string;
+  cognitiveBand?: QuizCognitiveBand;
+  questionCategory?: QuizQuestionCategory;
   options: string[];
   sessionToken?: string | null;
 }
@@ -432,6 +508,9 @@ export interface GradedQuestionResult {
   feedback: string;
   missingPoints?: string[];
   explanation: string;
+  topicTag?: string;
+  cognitiveBand?: QuizCognitiveBand;
+  questionCategory?: QuizQuestionCategory;
   aiEvaluated: boolean;
 }
 
@@ -446,6 +525,7 @@ export interface QuizGradingResponse {
   percentage: number;
   timeTakenSeconds: number;
   performanceAssessment: string;
+  topicPerformance?: TopicPerformanceInsight[];
   gradedResults: GradedQuestionResult[];
 }
 

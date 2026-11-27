@@ -10,8 +10,18 @@ import {
   tokenSimilarity,
   type DocumentIntelligenceProfile,
 } from './documentEngine.ts';
+import {
+  stripSourceFilenameFromTitle,
+  stripSummarySourceAndPageRefs,
+} from '../src/lib/summarySanitizer.ts';
 import { CURATED_EDUCATIONAL_VISUALS } from '../src/lib/visualLearningEngine.ts';
-import type { QuizDifficulty, QuizQuestion } from '../src/types/brainstine.ts';
+import type {
+  AssessmentBlueprint,
+  QuizCognitiveBand,
+  QuizDifficulty,
+  QuizQuestion,
+  QuizQuestionCategory,
+} from '../src/types/brainstine.ts';
 
 export interface QuizGenerationOptions {
   assessmentMode?: 'practice' | 'exam';
@@ -19,37 +29,33 @@ export interface QuizGenerationOptions {
   subjectArea?: string;
 }
 
-type CognitiveLevel = 'recall' | 'conceptual' | 'application';
-
-type TemplateType =
-  | 'definition_to_term'
-  | 'term_to_definition'
-  | 'structure_to_function'
-  | 'function_to_structure'
-  | 'classification'
-  | 'classification_exception'
-  | 'cause_effect'
-  | 'effect_to_cause'
-  | 'process_sequence'
-  | 'distinction'
-  | 'formula_expression'
-  | 'formula_variable'
-  | 'quantitative_fact'
-  | 'targeted_cloze';
+type OptionSemanticKind =
+  | 'entity_term'
+  | 'definition_clause'
+  | 'function_clause'
+  | 'step_clause'
+  | 'causal_clause'
+  | 'comparison_clause'
+  | 'formula_expr'
+  | 'quantity_value'
+  | 'proportionality_phrase'
+  | 'example_clause';
 
 interface QuizCandidate {
   idKey: string;
-  templateType: TemplateType;
-  cognitiveLevel: CognitiveLevel;
-  sectionKey: string;
-  sectionHeading: string | null;
+  questionCategory: QuizQuestionCategory;
+  cognitiveBand: QuizCognitiveBand;
+  optionKind: OptionSemanticKind;
+  topicTag: string;
   pageNumber: number | null;
   question: string;
   correctAnswer: string;
   distractors: string[];
   evidenceText: string;
+  whyExplanation: string;
   factTokens: Set<string>;
   salience: number;
+  stemLeakGuard?: string;
 }
 
 function deterministicHashInt(input: string): number {
@@ -57,29 +63,42 @@ function deterministicHashInt(input: string): number {
   return parseInt(hex, 16);
 }
 
-function cleanSnippet(text: string, maxLen = 175): string {
-  const cleaned = text
+function cleanAcademicProse(text: string, maxLen = 185): string {
+  const sanitized = stripSummarySourceAndPageRefs(text || '')
+    .replace(/(?:[-=]{2,})\s*(?:Pages?|Slide)\s+\d+\s*(?:[-=]{2,})/gi, ' ')
+    .replace(/\[Page\s+\d+\]/gi, ' ')
     .replace(/\(Pages?\s+\d+(?:\s*[-–]\s*\d+)?\)/gi, '')
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/[.]+$/, '');
-  if (cleaned.length <= maxLen) return cleaned;
-  const sliced = cleaned.slice(0, maxLen);
+  if (sanitized.length <= maxLen) return sanitized;
+  const sliced = sanitized.slice(0, maxLen);
   const lastBoundary = Math.max(
     sliced.lastIndexOf(';'),
     sliced.lastIndexOf(','),
     sliced.lastIndexOf(' ')
   );
-  if (lastBoundary >= Math.floor(maxLen * 0.58)) {
-    return sliced.slice(0, lastBoundary).trim().replace(/[,;:]$/, '');
+  if (lastBoundary >= Math.floor(maxLen * 0.56)) {
+    return sliced.slice(0, lastBoundary).trim().replace(/[,;:]+$/, '');
   }
   return sliced.trim();
+}
+
+function cleanTopicLabel(rawTopic: string | null | undefined, fallbackSubject: string): string {
+  const base = stripSummarySourceAndPageRefs(rawTopic || '').trim();
+  if (!base || /^(?:page\s*\d+|p\.\s*\d+|study material|core content|document summary)$/i.test(base)) {
+    return fallbackSubject || 'Core Concepts';
+  }
+  return stripSourceFilenameFromTitle(base) || fallbackSubject || 'Core Concepts';
 }
 
 function lcFirstPreserveAcronyms(text: string): string {
   const trimmed = text.trim();
   if (!trimmed) return trimmed;
-  if (/^[A-Z]{2,}/.test(trimmed) || /^(?:pH|pKa|mRNA|tRNA|rRNA|cDNA|ATP|ADP|DNA|RNA|NADH|NADPH)/.test(trimmed)) {
+  if (
+    /^[A-Z]{2,}/.test(trimmed) ||
+    /^(?:pH|pKa|mRNA|tRNA|rRNA|cDNA|ATP|ADP|DNA|RNA|NADH|NADPH|RuBisCO|CO₂|H₂O)/.test(trimmed)
+  ) {
     return trimmed;
   }
   return trimmed.charAt(0).toLowerCase() + trimmed.slice(1);
@@ -89,6 +108,13 @@ function ucFirst(text: string): string {
   const trimmed = text.trim();
   if (!trimmed) return trimmed;
   return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+}
+
+function normalizeOptionSurface(opt: string): string {
+  return cleanAcademicProse(opt, 165)
+    .replace(/^[-*•]\s+/, '')
+    .replace(/[,;:\s]+$/, '')
+    .trim();
 }
 
 function singularizeVerbPhrase(role: string): string {
@@ -132,32 +158,50 @@ function isOptionCompatible(
   candidateOption: string,
   correctAnswer: string,
   existingOptions: string[],
-  forbiddenContextText = ''
+  forbiddenEntity = '',
+  docEvidenceLower = ''
 ): boolean {
-  const cleanOpt = candidateOption.trim();
-  if (cleanOpt.length < 2 || cleanOpt.length > 180) return false;
+  const cleanOpt = normalizeOptionSurface(candidateOption);
+  if (cleanOpt.length < 2 || cleanOpt.length > 175) return false;
 
   const optLower = cleanOpt.toLowerCase();
-  const ansLower = correctAnswer.trim().toLowerCase();
-  if (optLower === ansLower) return false;
+  const ansLower = normalizeOptionSurface(correctAnswer).toLowerCase();
+  if (!ansLower || optLower === ansLower) return false;
   if (optLower.includes(ansLower) || ansLower.includes(optLower)) return false;
 
-  // Maintain reasonable length/form parity so short single terms aren't paired with long clauses
+  // Enforce strict word-count & grammatical parity so answers aren't given away by length
   const ansWords = ansLower.split(/\s+/).filter(Boolean).length;
   const optWords = optLower.split(/\s+/).filter(Boolean).length;
-  if (ansWords <= 3 && optWords > 9) return false;
-  if (ansWords >= 7 && optWords <= 1) return false;
+  if (ansWords <= 3 && optWords > 8) return false;
+  if (ansWords >= 7 && optWords <= 2) return false;
+  if (Math.max(ansWords, optWords) > Math.max(5, Math.min(ansWords, optWords) * 3.2)) {
+    return false;
+  }
+
+  // Grammatical parity: don't mix full verb-starting clauses with bare noun-article definitions
+  const ansStartsWithVerb = /^(?:synthesizes|produces|catalyzes|converts|breaks|pumps|regulates|transports|absorbs|causes|leads|increases|decreases)\b/i.test(
+    ansLower
+  );
+  const optStartsWithNounDef = /^(?:the|a|an)\s+[a-z]+\s+(?:that|which|of)\b/i.test(optLower);
+  if (ansWords >= 6 && ansStartsWithVerb && optStartsWithNounDef) return false;
 
   for (const prev of existingOptions) {
-    const prevLower = prev.toLowerCase();
+    const prevLower = normalizeOptionSurface(prev).toLowerCase();
     if (prevLower === optLower) return false;
     if (prevLower.includes(optLower) || optLower.includes(prevLower)) return false;
   }
 
-  // Ensure distractor does not directly name the correct entity when testing descriptions
-  if (forbiddenContextText) {
-    const forbLower = forbiddenContextText.toLowerCase();
+  if (forbiddenEntity) {
+    const forbLower = forbiddenEntity.toLowerCase().trim();
     if (forbLower.length >= 4 && optLower.includes(forbLower)) {
+      return false;
+    }
+  }
+
+  // Reject distractors that actually appear verbatim inside the question's supporting evidence
+  if (docEvidenceLower && cleanOpt.length >= 5) {
+    const escaped = cleanOpt.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`\\b${escaped}\\b`, 'i').test(docEvidenceLower)) {
       return false;
     }
   }
@@ -166,7 +210,7 @@ function isOptionCompatible(
   const ansTokens = contentTokens(correctAnswer);
   if (optTokens.size > 0 && ansTokens.size > 0) {
     const { jaccard, containment } = tokenSimilarity(optTokens, ansTokens);
-    if (jaccard >= 0.62 || containment >= 0.82) return false;
+    if (jaccard >= 0.56 || containment >= 0.78) return false;
   }
 
   return true;
@@ -177,16 +221,18 @@ function pickDistractorsFromPools(
   pools: string[][],
   count = 3,
   forbiddenEntity = '',
-  excludedTokens?: Set<string>
+  excludedEvidenceText = ''
 ): string[] {
   const chosen: string[] = [];
+  const docEvidenceLower = excludedEvidenceText.toLowerCase();
 
   for (const pool of pools) {
     for (const raw of pool) {
       if (chosen.length >= count) break;
-      const cleaned = cleanSnippet(raw, 155);
-      if (excludedTokens && excludedTokens.has(cleaned.toLowerCase())) continue;
-      if (isOptionCompatible(cleaned, correctAnswer, chosen, forbiddenEntity)) {
+      const cleaned = ucFirst(normalizeOptionSurface(raw));
+      if (
+        isOptionCompatible(cleaned, correctAnswer, chosen, forbiddenEntity, docEvidenceLower)
+      ) {
         chosen.push(cleaned);
       }
     }
@@ -203,18 +249,15 @@ function generateEquationDistractors(expr: string, allFormulas: string[]): strin
     if (other !== expr) candidates.push(other);
   }
 
-  if (expr.includes(' + ')) {
-    candidates.push(expr.replace(' + ', ' - '));
-  }
-  if (expr.includes(' - ')) {
-    candidates.push(expr.replace(' - ', ' + '));
-  }
+  if (expr.includes(' + ')) candidates.push(expr.replace(' + ', ' - '));
+  if (expr.includes(' - ')) candidates.push(expr.replace(' - ', ' + '));
   if (/²/.test(expr)) {
     candidates.push(expr.replace(/²/g, ''));
     candidates.push(expr.replace(/²/g, '³'));
   }
   if (/0\.5/.test(expr)) {
     candidates.push(expr.replace(/0\.5/g, '2'));
+    candidates.push(expr.replace(/0\.5/g, '1.5'));
   }
   if (/\bma\b/.test(expr)) {
     candidates.push(expr.replace(/\bma\b/, 'm / a'));
@@ -227,11 +270,10 @@ function generateEquationDistractors(expr: string, allFormulas: string[]): strin
     const parts = expr.split('→').map((p) => p.trim());
     if (parts.length === 2) {
       candidates.push(`${parts[1]} → ${parts[0]}`);
+      candidates.push(`${parts[0]} → 2 ${parts[1]}`);
     }
   }
-  if (/\b2([A-Z])/.test(expr)) {
-    candidates.push(expr.replace(/\b2([A-Z])/, '3$1'));
-  }
+  if (/\b2([A-Z])/.test(expr)) candidates.push(expr.replace(/\b2([A-Z])/, '3$1'));
   if (/= -log/.test(expr)) {
     candidates.push(expr.replace('= -log', '= log'));
     candidates.push(expr.replace('= -log', '= 1 / log'));
@@ -277,23 +319,202 @@ function generateQuantityDistractors(qty: string, otherQuantities: string[]): st
     const num = parseFloat(sameUnitMatch[1]);
     const suffix = sameUnitMatch[2] ? ` ${sameUnitMatch[2].trim()}` : '';
     const hasDecimal = sameUnitMatch[1].includes('.');
-    const fmt = (n: number) => (hasDecimal ? n.toFixed(2).replace(/\.00$/, '') : String(Math.round(n)));
+    const isPercent = suffix.trim() === '%';
+    const fmt = (n: number) =>
+      hasDecimal ? n.toFixed(2).replace(/\.00$/, '') : String(Math.round(n));
 
     if (!Number.isNaN(num) && num > 0) {
-      const variants = [
-        `${fmt(num * 2)}${suffix}`,
-        `${fmt(Math.max(1, num / 2))}${suffix}`,
-        `${fmt(num + (num >= 10 ? 5 : 1.5))}${suffix}`,
-      ];
-      for (const v of variants) {
-        if (v !== qty && !results.includes(v)) {
-          results.push(v);
+      const rawVariants = [num * 2, Math.max(1, num / 2), num + (num >= 10 ? 5 : 2)];
+      for (const rv of rawVariants) {
+        if (isPercent && rv > 100) continue;
+        const label = `${fmt(rv)}${suffix}`;
+        if (label !== qty && !results.includes(label)) {
+          results.push(label);
+        }
+      }
+      if (isPercent && results.length < 3) {
+        for (const fallbackPct of [Math.max(1, num - 15), Math.min(99, num + 15), Math.max(1, num - 25)]) {
+          const label = `${fmt(fallbackPct)}${suffix}`;
+          if (label !== qty && !results.includes(label)) results.push(label);
         }
       }
     }
   }
 
   return results.slice(0, 3);
+}
+
+/**
+ * Validates that every generated MCQ reads naturally like a university exam question,
+ * has zero raw PDF artifacts/page tags, balanced A–D options, and an accurate explanation.
+ */
+function validateAndRefineCandidate(cand: QuizCandidate): QuizCandidate | null {
+  const cleanQ = cleanAcademicProse(cand.question, 270);
+  if (cleanQ.length < 22 || !/[?]$/.test(cleanQ)) return null;
+
+  // Reject dangling fragments or broken punctuation inside stem
+  if (/(?:\.\.\.|…|__|\[Page|Page \d+|\.(?:pdf|docx?|txt)\b)/i.test(cleanQ)) {
+    return null;
+  }
+
+  const normalizedCorrect = ucFirst(normalizeOptionSurface(cand.correctAnswer));
+  if (normalizedCorrect.length < 2 || normalizedCorrect.length > 175) return null;
+
+  // Stem leak guard: prevent verbatim giving away the exact answer inside question stem
+  if (cand.stemLeakGuard && cand.stemLeakGuard.length >= 5) {
+    const escaped = cand.stemLeakGuard.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`\\b${escaped}\\b`, 'i').test(cleanQ)) {
+      return null;
+    }
+  }
+
+  const cleanDistractors: string[] = [];
+  for (const d of cand.distractors) {
+    const normD = ucFirst(normalizeOptionSurface(d));
+    if (!normD) continue;
+    if (normD.toLowerCase() === normalizedCorrect.toLowerCase()) continue;
+    if (cleanDistractors.some((x) => x.toLowerCase() === normD.toLowerCase())) continue;
+    cleanDistractors.push(normD);
+  }
+  if (cleanDistractors.length < 3) return null;
+
+  const allFour = [normalizedCorrect, ...cleanDistractors.slice(0, 3)];
+  // Verify pairwise dissimilarity across all 4 options
+  for (let i = 0; i < allFour.length; i++) {
+    for (let j = i + 1; j < allFour.length; j++) {
+      const a = allFour[i].toLowerCase();
+      const b = allFour[j].toLowerCase();
+      if (a === b || a.includes(b) || b.includes(a)) return null;
+      const sim = tokenSimilarity(contentTokens(a), contentTokens(b));
+      if (sim.jaccard >= 0.6 || sim.containment >= 0.82) return null;
+    }
+  }
+
+  const cleanEvidence = cleanAcademicProse(cand.evidenceText, 220);
+  if (cleanEvidence.length < 18) return null;
+
+  const cleanWhy = cleanAcademicProse(cand.whyExplanation, 230) || cleanEvidence;
+
+  return {
+    ...cand,
+    question: cleanQ,
+    correctAnswer: normalizedCorrect,
+    distractors: cleanDistractors.slice(0, 3),
+    evidenceText: cleanEvidence,
+    whyExplanation: cleanWhy,
+  };
+}
+
+function synthesizePrincipleQuestionFromUnit(
+  unitText: string,
+  subjectArea: string,
+  allDescriptions: string[],
+  allEntityNames: string[],
+  subjectPeers: string[],
+  topicTag: string,
+  pageNumber: number | null,
+  salience: number,
+  fingerprint: string,
+  tokens: Set<string>
+): QuizCandidate | null {
+  const clean = cleanAcademicProse(stripBoilerplatePrefix(unitText), 175);
+  if (clean.length < 34 || /[=→⇌]/.test(clean)) return null;
+
+  // Match clear Subject + Academic Verb + Object structure -> form conceptual/function MCQ without raw cloze blanks
+  const subjVerbMatch = clean.match(
+    /^([A-Z][A-Za-z0-9₀-₉()'/-]*(?:\s+[A-Za-z0-9₀-₉()'/-]+){0,3})\s+(enables|requires|maintains|depends on|regulates|controls|governs|determines|produces|facilitates|prevents|reduces|increases|converts|transfers|stores)\s+(.{16,135})$/i
+  );
+  if (subjVerbMatch) {
+    const subj = subjVerbMatch[1].trim();
+    const verb = subjVerbMatch[2].trim().toLowerCase();
+    const predicate = cleanAcademicProse(subjVerbMatch[3], 130);
+    if (
+      subj.length >= 3 &&
+      predicate.length >= 16 &&
+      !/^(?:it|this|that|they|these|those|which|there)$/i.test(subj)
+    ) {
+      const answer = ucFirst(`${verb} ${lcFirstPreserveAcronyms(predicate)}`);
+      const distractors = pickDistractorsFromPools(
+        answer,
+        [allDescriptions],
+        3,
+        subj,
+        clean
+      );
+      if (distractors.length === 3) {
+        return {
+          idKey: `synth-sv:${fingerprint.slice(0, 32)}`,
+          questionCategory: 'conceptual',
+          cognitiveBand: 'comprehension',
+          optionKind: 'function_clause',
+          topicTag,
+          pageNumber,
+          question: `Within ${subjectArea}, which statement accurately describes what ${subj} accomplishes?`,
+          correctAnswer: answer,
+          distractors,
+          evidenceText: clean,
+          whyExplanation: `${subj} ${verb} ${lcFirstPreserveAcronyms(predicate)}.`,
+          factTokens: tokens,
+          salience: salience * 0.96,
+          stemLeakGuard: predicate.length >= 12 ? predicate.slice(0, 18) : undefined,
+        };
+      }
+    }
+  }
+
+  // Fallback term-concept match -> targeted identification without clumsy literal quotes when possible
+  const nouns = clean.match(/\b[A-Za-z][a-zA-Z-]{5,28}\b/g) || [];
+  let candidateTerm: string | null = null;
+  for (const ent of allEntityNames) {
+    if (ent.length < 4 || ent.length > 34) continue;
+    const esc = ent.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = clean.match(new RegExp(`\\b(${esc})\\b`, 'i'));
+    if (m) {
+      const blankCheck = clean.replace(m[1], '_____');
+      if (!new RegExp(`\\b${esc}\\b`, 'i').test(blankCheck)) {
+        candidateTerm = m[1];
+        break;
+      }
+    }
+  }
+  if (!candidateTerm && nouns.length > 0) {
+    const pick = nouns.find((n) => tokens.has(n.toLowerCase()));
+    if (pick) candidateTerm = pick;
+  }
+
+  if (candidateTerm) {
+    const esc = candidateTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const masked = clean.replace(new RegExp(`\\b${esc}\\b`, 'i'), '_______');
+    const answerTerm =
+      candidateTerm === candidateTerm.toLowerCase() ? ucFirst(candidateTerm) : candidateTerm;
+    const distractors = pickDistractorsFromPools(
+      answerTerm,
+      [allEntityNames, subjectPeers],
+      3,
+      answerTerm,
+      clean
+    );
+    if (distractors.length === 3) {
+      return {
+        idKey: `synth-concept:${fingerprint.slice(0, 32)}:${answerTerm.toLowerCase()}`,
+        questionCategory: 'conceptual',
+        cognitiveBand: 'comprehension',
+        optionKind: 'entity_term',
+        topicTag,
+        pageNumber,
+        question: `Which academic term accurately completes the principle: "${masked}"?`,
+        correctAnswer: answerTerm,
+        distractors,
+        evidenceText: clean,
+        whyExplanation: `"${answerTerm}" completes this concept accurately: ${clean}.`,
+        factTokens: tokens,
+        salience: salience * 0.85,
+        stemLeakGuard: answerTerm,
+      };
+    }
+  }
+
+  return null;
 }
 
 function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizCandidate[] {
@@ -303,7 +524,7 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
   const frequentDocNouns = Array.from(profile.globalTermFreq.entries())
     .filter(([w]) => w.length >= 5 && /^[a-z][a-z-]+$/.test(w))
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 40)
+    .slice(0, 45)
     .map(([w]) => ucFirst(w));
 
   const allEntityNames = Array.from(
@@ -319,27 +540,30 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
 
   const allDescriptions = Array.from(
     new Set([
-      ...profile.definitions.map((d) => ucFirst(cleanSnippet(d.rawDefinition, 145))),
-      ...profile.structureFunctions.map((sf) => ucFirst(cleanSnippet(sf.roleOrFunction, 145))),
-      ...profile.causeEffects.map((ce) => ucFirst(cleanSnippet(ce.effect, 145))),
+      ...profile.definitions.map((d) => ucFirst(cleanAcademicProse(d.rawDefinition, 145))),
+      ...profile.structureFunctions.map((sf) =>
+        ucFirst(cleanAcademicProse(sf.roleOrFunction, 145))
+      ),
+      ...profile.causeEffects.map((ce) => ucFirst(cleanAcademicProse(ce.effect, 145))),
+      ...profile.characteristics.map((ch) => ucFirst(cleanAcademicProse(ch.statement, 145))),
     ])
   ).filter((d) => d.length >= 16);
 
   const allCauses = Array.from(
-    new Set(profile.causeEffects.map((ce) => ucFirst(cleanSnippet(ce.cause, 145))))
+    new Set(profile.causeEffects.map((ce) => ucFirst(cleanAcademicProse(ce.cause, 145))))
   ).filter((c) => c.length >= 10);
 
   const allStepActions = profile.processes.flatMap((p) =>
-    p.steps.map((s) => ucFirst(cleanSnippet(s.rawText, 145)))
+    p.steps.map((s) => ucFirst(cleanAcademicProse(s.rawText, 145)))
   );
 
-  // 1. Definition -> Term & Term -> Definition
-  for (const def of profile.definitions) {
-    const cleanDef = cleanSnippet(def.rawDefinition, 165);
-    if (cleanDef.length < 18) continue;
-
-    const sectionKey =
-      def.sectionHeading || (def.pageNumber !== null ? `Page ${def.pageNumber}` : 'Core Concepts');
+  // =========================================================================
+  // 1. DEFINITION & CONCEPT IDENTIFICATION (Knowledge & Comprehension)
+  // =========================================================================
+  profile.definitions.forEach((def, idx) => {
+    const cleanDef = cleanAcademicProse(def.rawDefinition, 155);
+    if (cleanDef.length < 18) return;
+    const topicTag = cleanTopicLabel(def.sectionHeading, profile.subjectArea);
 
     const termDistractors = pickDistractorsFromPools(
       def.term,
@@ -347,32 +571,39 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
         profile.definitions.map((d) => d.term),
         profile.structureFunctions.map((sf) => sf.entity),
         profile.keyTerminology,
-        profile.keyPhrases,
         subjectPeers,
         frequentDocNouns,
       ],
       3,
-      def.term
+      def.term,
+      def.sourceText
     );
 
     if (termDistractors.length === 3) {
+      const defStems = [
+        `In ${topicTag}, which concept is defined as ${lcFirstPreserveAcronyms(cleanDef)}?`,
+        `Which term accurately refers to ${lcFirstPreserveAcronyms(cleanDef)}?`,
+        `An academic source describes "${lcFirstPreserveAcronyms(cleanDef)}." Which term does this define?`,
+      ];
       candidates.push({
         idKey: `def-term:${def.term.toLowerCase()}`,
-        templateType: 'definition_to_term',
-        cognitiveLevel: 'recall',
-        sectionKey,
-        sectionHeading: def.sectionHeading,
+        questionCategory: 'definition',
+        cognitiveBand: 'knowledge',
+        optionKind: 'entity_term',
+        topicTag,
         pageNumber: def.pageNumber,
-        question: `According to the study material, which term is defined as ${lcFirstPreserveAcronyms(cleanDef)}?`,
+        question: defStems[idx % defStems.length],
         correctAnswer: def.term,
         distractors: termDistractors,
         evidenceText: def.sourceText,
+        whyExplanation: `${def.term} is defined as ${lcFirstPreserveAcronyms(cleanDef)}.`,
         factTokens: contentTokens(def.sourceText),
         salience: def.salience * 1.25,
+        stemLeakGuard: def.term,
       });
     }
 
-    const defOption = ucFirst(cleanSnippet(def.rawDefinition, 145));
+    const defOption = ucFirst(cleanAcademicProse(def.rawDefinition, 145));
     if (defOption.length >= 18) {
       const descDistractors = pickDistractorsFromPools(
         defOption,
@@ -381,35 +612,43 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
         def.term
       );
       if (descDistractors.length === 3) {
+        const conceptStems = [
+          `Which statement best explains the underlying concept of ${def.term}?`,
+          `What best characterizes ${def.term} within ${topicTag}?`,
+        ];
         candidates.push({
           idKey: `term-def:${def.term.toLowerCase()}`,
-          templateType: 'term_to_definition',
-          cognitiveLevel: 'conceptual',
-          sectionKey,
-          sectionHeading: def.sectionHeading,
+          questionCategory: 'conceptual',
+          cognitiveBand: 'comprehension',
+          optionKind: 'definition_clause',
+          topicTag,
           pageNumber: def.pageNumber,
-          question: `How does the study material define or describe ${def.term}?`,
+          question: conceptStems[idx % conceptStems.length],
           correctAnswer: defOption,
           distractors: descDistractors,
           evidenceText: def.sourceText,
+          whyExplanation: `By definition, ${def.term} refers to ${lcFirstPreserveAcronyms(defOption)}.`,
           factTokens: contentTokens(def.sourceText),
-          salience: def.salience * 1.15,
+          salience: def.salience * 1.18,
         });
       }
     }
-  }
+  });
 
-  // 2. Structure/Entity <-> Function/Role
-  for (const sf of profile.structureFunctions) {
-    const cleanRole = ucFirst(cleanSnippet(sf.roleOrFunction, 145));
-    if (cleanRole.length < 16) continue;
-    const sectionKey =
-      sf.sectionHeading || (sf.pageNumber !== null ? `Page ${sf.pageNumber}` : 'Core Mechanisms');
+  // =========================================================================
+  // 2. STRUCTURE-FUNCTION & COUNTERFACTUAL DISRUPTION SCENARIOS
+  // =========================================================================
+  profile.structureFunctions.forEach((sf, idx) => {
+    const cleanRole = ucFirst(cleanAcademicProse(sf.roleOrFunction, 145));
+    if (cleanRole.length < 16) return;
+    const topicTag = cleanTopicLabel(sf.sectionHeading, profile.subjectArea);
 
     const roleDistractors = pickDistractorsFromPools(
       cleanRole,
       [
-        profile.structureFunctions.map((other) => ucFirst(cleanSnippet(other.roleOrFunction, 145))),
+        profile.structureFunctions.map((other) =>
+          ucFirst(cleanAcademicProse(other.roleOrFunction, 145))
+        ),
         allDescriptions,
         allStepActions,
       ],
@@ -420,18 +659,57 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
     if (roleDistractors.length === 3) {
       candidates.push({
         idKey: `sf-role:${sf.entity.toLowerCase()}`,
-        templateType: 'structure_to_function',
-        cognitiveLevel: 'conceptual',
-        sectionKey,
-        sectionHeading: sf.sectionHeading,
+        questionCategory: 'conceptual',
+        cognitiveBand: 'comprehension',
+        optionKind: 'function_clause',
+        topicTag,
         pageNumber: sf.pageNumber,
-        question: `In the study material, what primary function or action is performed by ${sf.entity}?`,
+        question:
+          idx % 2 === 0
+            ? `What is the primary functional role of ${sf.entity} within ${topicTag}?`
+            : `Which statement accurately describes the action performed by ${sf.entity}?`,
         correctAnswer: cleanRole,
         distractors: roleDistractors,
         evidenceText: sf.statement,
+        whyExplanation: `${sf.entity} ${lcFirstPreserveAcronyms(cleanRole)}.`,
         factTokens: contentTokens(sf.statement),
-        salience: sf.salience * 1.22,
+        salience: sf.salience * 1.24,
       });
+
+      // Advanced Scenario / Disruption Question (Counterfactual Reasoning)
+      const impairedTarget = cleanAcademicProse(
+        cleanRole.replace(
+          /^(?:produces?|synthesizes?|catalyzes?|converts?|breaks?\s+down|regulates?|transports?|pumps?|generates?|captures?|absorbs?|phosphorylates?|oxidizes?|reduces?)\s+/i,
+          ''
+        ),
+        120
+      );
+      if (impairedTarget.length >= 10) {
+        const scenarioAnswer = `Impaired ability to ${lcFirstPreserveAcronyms(cleanRole)}`;
+        const scenarioDistractors = roleDistractors.map(
+          (r) => `Impaired ability to ${lcFirstPreserveAcronyms(r)}`
+        );
+        if (
+          scenarioDistractors.length === 3 &&
+          scenarioDistractors.every((d) => d.length <= 165)
+        ) {
+          candidates.push({
+            idKey: `sf-disrupt:${sf.entity.toLowerCase()}`,
+            questionCategory: 'scenario',
+            cognitiveBand: 'analysis',
+            optionKind: 'function_clause',
+            topicTag,
+            pageNumber: sf.pageNumber,
+            question: `Suppose ${sf.entity} becomes non-functional or inhibited in ${topicTag}. Which consequence would most directly follow?`,
+            correctAnswer: scenarioAnswer,
+            distractors: scenarioDistractors,
+            evidenceText: sf.statement,
+            whyExplanation: `Because ${sf.entity} normally ${lcFirstPreserveAcronyms(cleanRole)}, inhibiting it directly disrupts this process.`,
+            factTokens: contentTokens(`${sf.entity} disruption ${sf.statement}`),
+            salience: sf.salience * 1.28,
+          });
+        }
+      }
     }
 
     const entityDistractors = pickDistractorsFromPools(
@@ -443,37 +721,40 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
         frequentDocNouns,
       ],
       3,
-      sf.entity
+      sf.entity,
+      sf.statement
     );
 
     if (entityDistractors.length === 3) {
       candidates.push({
         idKey: `sf-entity:${sf.entity.toLowerCase()}:${sf.verb.toLowerCase()}`,
-        templateType: 'function_to_structure',
-        cognitiveLevel: 'recall',
-        sectionKey,
-        sectionHeading: sf.sectionHeading,
+        questionCategory: 'definition',
+        cognitiveBand: 'knowledge',
+        optionKind: 'entity_term',
+        topicTag,
         pageNumber: sf.pageNumber,
-        question: `Which component or concept ${singularizeVerbPhrase(cleanSnippet(sf.roleOrFunction, 150))}?`,
+        question: `Which component or mechanism ${singularizeVerbPhrase(cleanAcademicProse(sf.roleOrFunction, 145))}?`,
         correctAnswer: sf.entity,
         distractors: entityDistractors,
         evidenceText: sf.statement,
+        whyExplanation: `${sf.entity} is responsible for this action: ${cleanAcademicProse(sf.statement, 165)}.`,
         factTokens: contentTokens(sf.statement),
         salience: sf.salience * 1.18,
+        stemLeakGuard: sf.entity,
       });
     }
-  }
+  });
 
-  // 3. Formulas, Chemical Reactions & Variable Meanings
+  // =========================================================================
+  // 3. FORMULAS, EQUATIONS, VARIABLE INTERPRETATION & PROPORTIONALITY ANALYSIS
+  // =========================================================================
   const allFormulaStrings = profile.formulas.map((f) => f.expressionOrStructure);
   const allVariableMeanings = profile.formulas.flatMap((f) =>
-    f.variables.map((v) => ucFirst(cleanSnippet(v.meaning, 120)))
+    f.variables.map((v) => ucFirst(cleanAcademicProse(v.meaning, 120)))
   );
 
   for (const formula of profile.formulas) {
-    const sectionKey =
-      formula.sectionHeading ||
-      (formula.pageNumber !== null ? `Page ${formula.pageNumber}` : 'Formulas & Equations');
+    const topicTag = cleanTopicLabel(formula.sectionHeading, profile.subjectArea);
 
     const formulaDistractors = generateEquationDistractors(
       formula.expressionOrStructure,
@@ -483,24 +764,25 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
     if (formulaDistractors.length === 3) {
       candidates.push({
         idKey: `formula-expr:${formula.expressionOrStructure.toLowerCase()}`,
-        templateType: 'formula_expression',
-        cognitiveLevel: 'application',
-        sectionKey,
-        sectionHeading: formula.sectionHeading,
+        questionCategory: 'problem_solving',
+        cognitiveBand: 'application',
+        optionKind: 'formula_expr',
+        topicTag,
         pageNumber: formula.pageNumber,
         question: formula.isChemicalReaction
-          ? `Which reaction equation corresponds to ${formula.name} in the study material?`
-          : `Which mathematical equation represents ${formula.name} in the study material?`,
+          ? `Which balanced reaction equation accurately represents ${formula.name}?`
+          : `Which formal expression mathematically models ${formula.name}?`,
         correctAnswer: formula.expressionOrStructure,
         distractors: formulaDistractors,
         evidenceText: formula.sourceText,
+        whyExplanation: `${formula.name} is formally expressed as ${formula.expressionOrStructure}.`,
         factTokens: contentTokens(formula.sourceText),
         salience: formula.salience * 1.3,
       });
     }
 
     for (const v of formula.variables) {
-      const cleanMeaning = ucFirst(cleanSnippet(v.meaning, 130));
+      const cleanMeaning = ucFirst(cleanAcademicProse(v.meaning, 130));
       const varDistractors = pickDistractorsFromPools(
         cleanMeaning,
         [allVariableMeanings, allEntityNames, subjectPeers],
@@ -510,34 +792,92 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
       if (varDistractors.length === 3) {
         candidates.push({
           idKey: `formula-var:${formula.name}:${v.symbol}`,
-          templateType: 'formula_variable',
-          cognitiveLevel: 'conceptual',
-          sectionKey,
-          sectionHeading: formula.sectionHeading,
+          questionCategory: 'conceptual',
+          cognitiveBand: 'comprehension',
+          optionKind: 'entity_term',
+          topicTag,
           pageNumber: formula.pageNumber,
-          question: `In ${formula.name} (${formula.expressionOrStructure}), what does the symbol "${v.symbol}" represent?`,
+          question: `In ${formula.name} (${formula.expressionOrStructure}), what physical or analytical quantity does "${v.symbol}" denote?`,
           correctAnswer: cleanMeaning,
           distractors: varDistractors,
           evidenceText: formula.sourceText,
+          whyExplanation: `In ${formula.expressionOrStructure}, the variable "${v.symbol}" represents ${lcFirstPreserveAcronyms(cleanMeaning)}.`,
           factTokens: contentTokens(`${formula.name} ${v.symbol} ${v.meaning}`),
           salience: formula.salience * 1.24,
         });
       }
     }
+
+    // Analytical Proportionality / Sensitivity Question for algebraic product formulas
+    if (!formula.isChemicalReaction) {
+      const sqMatch = formula.expressionOrStructure.match(
+        /^([A-Za-zΔ_]+)\s*=\s*(?:0\.5\s*)?([A-Za-z])([A-Za-z])²$/
+      );
+      const linMatch = formula.expressionOrStructure.match(
+        /^([A-Za-zΔ_]+)\s*=\s*([A-Za-z])([A-Za-z])$/
+      );
+      if (sqMatch) {
+        const [, lhs, linVar, sqVar] = sqMatch;
+        const sqVarInfo = formula.variables.find((v) => v.symbol === sqVar);
+        const sqLabel = sqVarInfo ? `${sqVarInfo.meaning} (${sqVar})` : sqVar;
+        candidates.push({
+          idKey: `formula-prop-sq:${formula.name}:${sqVar}`,
+          questionCategory: 'problem_solving',
+          cognitiveBand: 'analysis',
+          optionKind: 'proportionality_phrase',
+          topicTag,
+          pageNumber: formula.pageNumber,
+          question: `According to ${formula.name} (${formula.expressionOrStructure}), if ${sqLabel} doubles while ${linVar} remains constant, how does ${lhs} change?`,
+          correctAnswer: 'Increases by a factor of four (quadruples)',
+          distractors: [
+            'Increases proportionally by a factor of two (doubles)',
+            'Decreases by half',
+            'Remains unchanged',
+          ],
+          evidenceText: formula.sourceText,
+          whyExplanation: `Because ${lhs} depends on ${sqVar}², doubling ${sqVar} scales ${lhs} by 2² = 4.`,
+          factTokens: contentTokens(`${formula.name} proportionality squared ${sqVar}`),
+          salience: formula.salience * 1.32,
+        });
+      } else if (linMatch) {
+        const [, lhs, varA, varB] = linMatch;
+        const varAInfo = formula.variables.find((v) => v.symbol === varA);
+        const labelA = varAInfo ? `${varAInfo.meaning} (${varA})` : varA;
+        candidates.push({
+          idKey: `formula-prop-lin:${formula.name}:${varA}`,
+          questionCategory: 'problem_solving',
+          cognitiveBand: 'analysis',
+          optionKind: 'proportionality_phrase',
+          topicTag,
+          pageNumber: formula.pageNumber,
+          question: `In ${formula.name} (${formula.expressionOrStructure}), if ${labelA} doubles while ${varB} stays constant, what happens to ${lhs}?`,
+          correctAnswer: 'Doubles proportionally',
+          distractors: [
+            'Quadruples exponentially',
+            'Decreases by half',
+            'Remains constant',
+          ],
+          evidenceText: formula.sourceText,
+          whyExplanation: `Since ${lhs} is directly proportional to ${varA} in ${formula.expressionOrStructure}, doubling ${varA} doubles ${lhs}.`,
+          factTokens: contentTokens(`${formula.name} proportionality linear ${varA}`),
+          salience: formula.salience * 1.3,
+        });
+      }
+    }
   }
 
-  // 4. Ordered Process / Mechanism Sequence
+  // =========================================================================
+  // 4. ORDERED PROCESSES, PREREQUISITES & UPSTREAM BLOCKADE ANALYSIS
+  // =========================================================================
   for (const proc of profile.processes) {
     if (proc.steps.length < 2) continue;
-    const sectionKey =
-      proc.sectionHeading ||
-      (proc.steps[0]?.pageNumber !== null ? `Page ${proc.steps[0]?.pageNumber}` : proc.heading);
+    const topicTag = cleanTopicLabel(proc.sectionHeading || proc.heading, profile.subjectArea);
 
-    const firstStep = ucFirst(cleanSnippet(proc.steps[0].rawText, 145));
+    const firstStep = ucFirst(cleanAcademicProse(proc.steps[0].rawText, 145));
     const stepDistractors = pickDistractorsFromPools(
       firstStep,
       [
-        proc.steps.slice(1).map((s) => ucFirst(cleanSnippet(s.rawText, 145))),
+        proc.steps.slice(1).map((s) => ucFirst(cleanAcademicProse(s.rawText, 145))),
         allStepActions,
         allDescriptions,
       ],
@@ -546,29 +886,30 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
     if (stepDistractors.length === 3) {
       candidates.push({
         idKey: `proc-start:${proc.heading.toLowerCase()}`,
-        templateType: 'process_sequence',
-        cognitiveLevel: 'conceptual',
-        sectionKey,
-        sectionHeading: proc.sectionHeading,
+        questionCategory: 'process',
+        cognitiveBand: 'comprehension',
+        optionKind: 'step_clause',
+        topicTag,
         pageNumber: proc.steps[0].pageNumber,
-        question: `In ${proc.heading}, which event occurs first according to the study material?`,
+        question: `Which event initiates the sequence of ${proc.heading}?`,
         correctAnswer: firstStep,
         distractors: stepDistractors,
         evidenceText: proc.steps[0].rawText,
+        whyExplanation: `${proc.heading} begins when ${lcFirstPreserveAcronyms(firstStep)}.`,
         factTokens: contentTokens(proc.steps[0].rawText),
         salience: 1.25,
       });
     }
 
     for (let i = 0; i < proc.steps.length - 1; i++) {
-      const prevStep = cleanSnippet(proc.steps[i].rawText, 120);
-      const nextStep = ucFirst(cleanSnippet(proc.steps[i + 1].rawText, 145));
+      const prevStep = cleanAcademicProse(proc.steps[i].rawText, 115);
+      const nextStep = ucFirst(cleanAcademicProse(proc.steps[i + 1].rawText, 145));
       const nextDistractors = pickDistractorsFromPools(
         nextStep,
         [
           proc.steps
             .filter((_, idx) => idx !== i + 1)
-            .map((s) => ucFirst(cleanSnippet(s.rawText, 145))),
+            .map((s) => ucFirst(cleanAcademicProse(s.rawText, 145))),
           allStepActions,
           allDescriptions,
         ],
@@ -577,27 +918,60 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
       if (nextDistractors.length === 3) {
         candidates.push({
           idKey: `proc-next:${proc.heading.toLowerCase()}:${i}`,
-          templateType: 'process_sequence',
-          cognitiveLevel: 'application',
-          sectionKey,
-          sectionHeading: proc.sectionHeading,
+          questionCategory: 'process',
+          cognitiveBand: 'application',
+          optionKind: 'step_clause',
+          topicTag,
           pageNumber: proc.steps[i + 1].pageNumber,
-          question: `During ${proc.heading}, what happens immediately after: "${prevStep}"?`,
+          question: `In ${proc.heading}, which stage proceeds immediately after ${lcFirstPreserveAcronyms(prevStep)}?`,
           correctAnswer: nextStep,
           distractors: nextDistractors,
-          evidenceText: `${proc.steps[i].rawText} -> ${proc.steps[i + 1].rawText}`,
+          evidenceText: `${proc.steps[i].rawText} Followed directly by: ${proc.steps[i + 1].rawText}`,
+          whyExplanation: `In the ordered pathway of ${proc.heading}, ${lcFirstPreserveAcronyms(nextStep)} follows immediately afterward.`,
           factTokens: contentTokens(proc.steps[i + 1].rawText),
-          salience: 1.2,
+          salience: 1.22,
         });
+
+        // Analytical pathway blockade / dependency question for later stages
+        if (i + 1 >= 1) {
+          const blockDistractors = pickDistractorsFromPools(
+            nextStep,
+            [
+              proc.steps
+                .slice(0, i + 1)
+                .map((s) => ucFirst(cleanAcademicProse(s.rawText, 145))),
+              allStepActions,
+              allDescriptions,
+            ],
+            3
+          );
+          if (blockDistractors.length === 3) {
+            candidates.push({
+              idKey: `proc-block:${proc.heading.toLowerCase()}:${i}`,
+              questionCategory: 'analytical',
+              cognitiveBand: 'analysis',
+              optionKind: 'step_clause',
+              topicTag,
+              pageNumber: proc.steps[i + 1].pageNumber,
+              question: `Suppose the step where ${lcFirstPreserveAcronyms(prevStep)} is blocked during ${proc.heading}. Which downstream event would be directly prevented from occurring next?`,
+              correctAnswer: nextStep,
+              distractors: blockDistractors,
+              evidenceText: `${proc.steps[i].rawText} -> ${proc.steps[i + 1].rawText}`,
+              whyExplanation: `Because step ${i + 2} (${lcFirstPreserveAcronyms(nextStep)}) depends directly on completion of the preceding step, blocking it halts this stage next.`,
+              factTokens: contentTokens(`blockade ${proc.heading} ${proc.steps[i].rawText} ${proc.steps[i + 1].rawText}`),
+              salience: 1.26,
+            });
+          }
+        }
       }
     }
   }
 
-  // 5. Comparisons & Distinctions
+  // =========================================================================
+  // 5. COMPARISONS & CONTRASTING DISTINCTIONS
+  // =========================================================================
   for (const dist of profile.distinctions) {
-    const sectionKey =
-      dist.sectionHeading ||
-      (dist.pageNumber !== null ? `Page ${dist.pageNumber}` : 'Comparisons');
+    const topicTag = cleanTopicLabel(dist.sectionHeading, profile.subjectArea);
 
     const unlikeMatch = dist.rawComparison.match(
       /^Unlike\s+([^,]{3,42}),\s+(?:the\s+)?([A-Za-z0-9\s'-]{2,40}?)\s+((?:is|are|has|have|uses|occurs|produces|transfers|takes|requires|does)\s+[^.]{10,130})/i
@@ -605,67 +979,73 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
     if (unlikeMatch) {
       const subB = unlikeMatch[1].trim();
       const subA = unlikeMatch[2].trim();
-      const trait = cleanSnippet(unlikeMatch[3], 130);
+      const trait = cleanAcademicProse(unlikeMatch[3], 130);
       const distDistractors = pickDistractorsFromPools(
         subA,
         [[subB], allEntityNames, subjectPeers],
         3,
-        subA
+        subA,
+        dist.sourceText
       );
       if (distDistractors.length === 3) {
         candidates.push({
           idKey: `dist-unlike:${subA.toLowerCase()}`,
-          templateType: 'distinction',
-          cognitiveLevel: 'application',
-          sectionKey,
-          sectionHeading: dist.sectionHeading,
+          questionCategory: 'comparison',
+          cognitiveBand: 'application',
+          optionKind: 'entity_term',
+          topicTag,
           pageNumber: dist.pageNumber,
-          question: `According to the comparison in the material, which of the following ${trait}?`,
+          question: `Which of the following accurately fits the comparative condition: "${trait}"?`,
           correctAnswer: subA,
           distractors: distDistractors,
           evidenceText: dist.sourceText,
+          whyExplanation: `Unlike ${subB}, ${subA} ${trait}.`,
           factTokens: contentTokens(dist.sourceText),
           salience: dist.salience * 1.25,
+          stemLeakGuard: subA,
         });
       }
     } else if (dist.subjectA && dist.subjectB) {
-      const cleanComp = ucFirst(cleanSnippet(dist.rawComparison, 145));
+      const cleanComp = ucFirst(cleanAcademicProse(dist.rawComparison, 145));
+      const reversedFalseOption = `${dist.subjectB} exhibits every defining property of ${dist.subjectA} under identical conditions`;
       const compDistractors = pickDistractorsFromPools(
         cleanComp,
-        [allDescriptions, allStepActions],
+        [[reversedFalseOption], allDescriptions, allStepActions],
         3
       );
       if (compDistractors.length === 3) {
         candidates.push({
           idKey: `dist-pair:${dist.pairTitle.toLowerCase()}`,
-          templateType: 'distinction',
-          cognitiveLevel: 'application',
-          sectionKey,
-          sectionHeading: dist.sectionHeading,
+          questionCategory: 'comparison',
+          cognitiveBand: 'comprehension',
+          optionKind: 'comparison_clause',
+          topicTag,
           pageNumber: dist.pageNumber,
-          question: `What key distinction does the study material make between ${dist.subjectA} and ${dist.subjectB}?`,
+          question: `Which statement accurately distinguishes ${dist.subjectA} from ${dist.subjectB}?`,
           correctAnswer: cleanComp,
           distractors: compDistractors,
           evidenceText: dist.sourceText,
+          whyExplanation: `Key distinction: ${cleanComp}.`,
           factTokens: contentTokens(dist.sourceText),
-          salience: dist.salience * 1.2,
+          salience: dist.salience * 1.24,
         });
       }
     }
   }
 
-  // 6. Cause <-> Effect Relationships (Bidirectional: Cause->Effect and Effect->Cause)
+  // =========================================================================
+  // 6. CAUSE <-> EFFECT & DIAGNOSTIC REASONING
+  // =========================================================================
   for (const ce of profile.causeEffects) {
-    const cleanCause = cleanSnippet(ce.cause, 120);
-    const cleanEffect = ucFirst(cleanSnippet(ce.effect, 145));
+    const cleanCause = cleanAcademicProse(ce.cause, 120);
+    const cleanEffect = ucFirst(cleanAcademicProse(ce.effect, 145));
     if (cleanCause.length < 10 || cleanEffect.length < 12) continue;
-    const sectionKey =
-      ce.sectionHeading || (ce.pageNumber !== null ? `Page ${ce.pageNumber}` : 'Cause & Effect');
+    const topicTag = cleanTopicLabel(ce.sectionHeading, profile.subjectArea);
 
     const ceDistractors = pickDistractorsFromPools(
       cleanEffect,
       [
-        profile.causeEffects.map((other) => ucFirst(cleanSnippet(other.effect, 145))),
+        profile.causeEffects.map((other) => ucFirst(cleanAcademicProse(other.effect, 145))),
         allDescriptions,
         allStepActions,
       ],
@@ -675,21 +1055,22 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
     if (ceDistractors.length === 3) {
       candidates.push({
         idKey: `ce:${normalizedFingerprint(cleanCause).slice(0, 40)}`,
-        templateType: 'cause_effect',
-        cognitiveLevel: 'application',
-        sectionKey,
-        sectionHeading: ce.sectionHeading,
+        questionCategory: 'cause_effect',
+        cognitiveBand: 'application',
+        optionKind: 'causal_clause',
+        topicTag,
         pageNumber: ce.pageNumber,
-        question: `What direct effect results from ${lcFirstPreserveAcronyms(cleanCause)} according to the material?`,
+        question: `What is the most direct consequence when ${lcFirstPreserveAcronyms(cleanCause)}?`,
         correctAnswer: cleanEffect,
         distractors: ceDistractors,
         evidenceText: ce.relationshipText,
+        whyExplanation: `${ucFirst(cleanCause)} ${lcFirstPreserveAcronyms(cleanEffect)}.`,
         factTokens: contentTokens(ce.relationshipText),
-        salience: ce.salience * 1.18,
+        salience: ce.salience * 1.22,
       });
     }
 
-    // Reverse: Effect -> Cause
+    // Reverse diagnostic reasoning: observed effect -> underlying cause
     const ucCause = ucFirst(cleanCause);
     const ecDistractors = pickDistractorsFromPools(
       ucCause,
@@ -700,26 +1081,28 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
     if (ecDistractors.length === 3) {
       candidates.push({
         idKey: `ec:${normalizedFingerprint(cleanEffect).slice(0, 40)}`,
-        templateType: 'effect_to_cause',
-        cognitiveLevel: 'application',
-        sectionKey,
-        sectionHeading: ce.sectionHeading,
+        questionCategory: 'analytical',
+        cognitiveBand: 'analysis',
+        optionKind: 'causal_clause',
+        topicTag,
         pageNumber: ce.pageNumber,
-        question: `According to the study material, which factor or condition ${lcFirstPreserveAcronyms(cleanEffect)}?`,
+        question: `If an evaluation observes that a system ${lcFirstPreserveAcronyms(cleanEffect)}, which underlying factor is most directly responsible?`,
         correctAnswer: ucCause,
         distractors: ecDistractors,
         evidenceText: ce.relationshipText,
+        whyExplanation: `${ucCause} is the driving cause that ${lcFirstPreserveAcronyms(cleanEffect)}.`,
         factTokens: contentTokens(ce.relationshipText),
-        salience: ce.salience * 1.14,
+        salience: ce.salience * 1.2,
       });
     }
   }
 
-  // 7. Classifications & Groupings (+ Exception questions when >= 3 members)
+  // =========================================================================
+  // 7. CLASSIFICATIONS, SCENARIO ATTRIBUTE MATCHING & EXCEPTION ANALYSIS
+  // =========================================================================
   for (const cls of profile.classifications) {
     if (cls.members.length < 2) continue;
-    const sectionKey =
-      cls.sectionHeading || (cls.pageNumber !== null ? `Page ${cls.pageNumber}` : 'Classifications');
+    const topicTag = cleanTopicLabel(cls.sectionHeading, profile.subjectArea);
     const correctMember = cls.members[0];
     const memberSet = new Set(cls.members.map((m) => m.toLowerCase()));
     const nonMembers = allEntityNames.filter((e) => !memberSet.has(e.toLowerCase()));
@@ -727,64 +1110,202 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
     const clsDistractors = pickDistractorsFromPools(
       correctMember,
       [nonMembers, subjectPeers],
-      3
+      3,
+      cls.category,
+      cls.statement
     );
     if (clsDistractors.length === 3) {
       candidates.push({
         idKey: `cls:${cls.category.toLowerCase()}:${correctMember.toLowerCase()}`,
-        templateType: 'classification',
-        cognitiveLevel: 'recall',
-        sectionKey,
-        sectionHeading: cls.sectionHeading,
+        questionCategory: 'classification',
+        cognitiveBand: 'knowledge',
+        optionKind: 'entity_term',
+        topicTag,
         pageNumber: cls.pageNumber,
-        question: `Which of the following is classified under ${cls.category} in the study material?`,
+        question: `Which of the following is classified under ${cls.category}?`,
         correctAnswer: correctMember,
         distractors: clsDistractors,
         evidenceText: cls.statement,
+        whyExplanation: `${cls.category} includes ${cls.members.join(', ')}.`,
         factTokens: contentTokens(cls.statement),
-        salience: cls.salience * 1.15,
+        salience: cls.salience * 1.18,
       });
     }
 
-    // Exception MCQ: 3 true members + 1 verified non-member from the document/peers
+    // Applied feature-matching scenario within a classification's detailed types
+    for (const typeEntry of cls.types || []) {
+      const featureText = cleanAcademicProse(
+        typeEntry.characteristics?.[0] || typeEntry.explanation,
+        145
+      );
+      if (
+        featureText.length >= 20 &&
+        !/without a separate detailed explanation/i.test(featureText) &&
+        !featureText.toLowerCase().includes(typeEntry.name.toLowerCase())
+      ) {
+        const siblingPool = cls.members.filter(
+          (m) => m.toLowerCase() !== typeEntry.name.toLowerCase()
+        );
+        const typeDistractors = pickDistractorsFromPools(
+          typeEntry.name,
+          [siblingPool, nonMembers, subjectPeers],
+          3,
+          typeEntry.name
+        );
+        if (typeDistractors.length === 3) {
+          candidates.push({
+            idKey: `cls-match:${cls.category.toLowerCase()}:${typeEntry.name.toLowerCase()}`,
+            questionCategory: 'scenario',
+            cognitiveBand: 'application',
+            optionKind: 'entity_term',
+            topicTag,
+            pageNumber: typeEntry.pageNumber ?? cls.pageNumber,
+            question: `A case within ${cls.category} demonstrates this feature: "${lcFirstPreserveAcronyms(featureText)}." Which category does it match?`,
+            correctAnswer: typeEntry.name,
+            distractors: typeDistractors,
+            evidenceText: `${typeEntry.name}: ${featureText}`,
+            whyExplanation: `${typeEntry.name} is specifically characterized by ${lcFirstPreserveAcronyms(featureText)}.`,
+            factTokens: contentTokens(`${typeEntry.name} ${featureText}`),
+            salience: cls.salience * 1.24,
+            stemLeakGuard: typeEntry.name,
+          });
+        }
+      }
+    }
+
+    // Critical Exclusion / Exception MCQ ("EXCEPT")
     if (cls.members.length >= 3 && nonMembers.length > 0) {
-      const exceptionAnswer = nonMembers.find(
-        (cand) =>
-          isOptionCompatible(cand, cls.members[0], cls.members.slice(0, 3), cls.category)
+      const exceptionAnswer = nonMembers.find((cand) =>
+        isOptionCompatible(cand, cls.members[0], cls.members.slice(0, 3), cls.category, cls.statement.toLowerCase())
       );
       if (exceptionAnswer) {
         candidates.push({
           idKey: `cls-exc:${cls.category.toLowerCase()}:${exceptionAnswer.toLowerCase()}`,
-          templateType: 'classification_exception',
-          cognitiveLevel: 'conceptual',
-          sectionKey,
-          sectionHeading: cls.sectionHeading,
+          questionCategory: 'analytical',
+          cognitiveBand: 'analysis',
+          optionKind: 'entity_term',
+          topicTag,
           pageNumber: cls.pageNumber,
-          question: `Which of the following is NOT listed as a type or example of ${cls.category} in the material?`,
+          question: `Each of the following is a recognized member or type of ${cls.category} EXCEPT:`,
           correctAnswer: exceptionAnswer,
           distractors: cls.members.slice(0, 3),
           evidenceText: cls.statement,
+          whyExplanation: `${cls.members.slice(0, 3).join(', ')} belong to ${cls.category}, whereas ${exceptionAnswer} does not belong to this group.`,
           factTokens: contentTokens(cls.statement),
-          salience: cls.salience * 1.16,
+          salience: cls.salience * 1.22,
         });
       }
     }
   }
 
-  // 8. Quantitative & Targeted Concept Cloze (ranked by TextRank salience)
+  // =========================================================================
+  // 8. CHARACTERISTICS & APPLIED EXAMPLES
+  // =========================================================================
+  for (const ch of profile.characteristics) {
+    const cleanStmt = ucFirst(cleanAcademicProse(ch.statement, 145));
+    if (cleanStmt.length < 22) continue;
+    const topicTag = cleanTopicLabel(ch.sectionHeading || ch.topic, profile.subjectArea);
+    const charDistractors = pickDistractorsFromPools(
+      cleanStmt,
+      [allDescriptions, allStepActions],
+      3,
+      ch.topic
+    );
+    if (charDistractors.length === 3) {
+      candidates.push({
+        idKey: `char:${normalizedFingerprint(cleanStmt).slice(0, 36)}`,
+        questionCategory: 'conceptual',
+        cognitiveBand: 'comprehension',
+        optionKind: 'definition_clause',
+        topicTag,
+        pageNumber: ch.pageNumber,
+        question: `Which statement accurately characterizes a defining property of ${ch.topic}?`,
+        correctAnswer: cleanStmt,
+        distractors: charDistractors,
+        evidenceText: ch.sourceText,
+        whyExplanation: `${ch.topic} is characterized by the fact that ${lcFirstPreserveAcronyms(cleanStmt)}.`,
+        factTokens: contentTokens(ch.sourceText),
+        salience: ch.salience * 1.1,
+      });
+    }
+  }
+
+  for (const ex of profile.examples) {
+    const cleanEx = ucFirst(cleanAcademicProse(ex.example, 145));
+    if (cleanEx.length < 22) continue;
+    const topicTag = cleanTopicLabel(ex.sectionHeading || ex.title, profile.subjectArea);
+    const exDistractors = pickDistractorsFromPools(
+      cleanEx,
+      [allDescriptions, allStepActions],
+      3,
+      ex.title
+    );
+    if (exDistractors.length === 3) {
+      candidates.push({
+        idKey: `example:${normalizedFingerprint(cleanEx).slice(0, 36)}`,
+        questionCategory: 'application',
+        cognitiveBand: 'application',
+        optionKind: 'example_clause',
+        topicTag,
+        pageNumber: ex.pageNumber,
+        question: `Which scenario or instance best exemplifies the application of ${ex.title}?`,
+        correctAnswer: cleanEx,
+        distractors: exDistractors,
+        evidenceText: cleanEx,
+        whyExplanation: `${cleanEx} directly illustrates ${ex.title}.`,
+        factTokens: contentTokens(`${ex.title} ${cleanEx}`),
+        salience: ex.salience * 1.12,
+      });
+    }
+  }
+
+  // =========================================================================
+  // 9. CROSS-SECTION CONCEPT SYNTHESIS RELATIONSHIPS
+  // =========================================================================
+  for (const rel of profile.sectionRelationships) {
+    if (rel.sharedConcepts.length === 0) continue;
+    const sharedConcept = ucFirst(rel.sharedConcepts[0]);
+    const topicTag = cleanTopicLabel(rel.fromSection, profile.subjectArea);
+    const distractorConcepts = pickDistractorsFromPools(
+      sharedConcept,
+      [allEntityNames, subjectPeers, frequentDocNouns],
+      3,
+      sharedConcept,
+      `${rel.fromSection} ${rel.toSection}`
+    );
+    if (distractorConcepts.length === 3) {
+      candidates.push({
+        idKey: `rel:${normalizedFingerprint(rel.fromSection).slice(0, 20)}:${normalizedFingerprint(rel.toSection).slice(0, 20)}`,
+        questionCategory: 'analytical',
+        cognitiveBand: 'analysis',
+        optionKind: 'entity_term',
+        topicTag,
+        pageNumber: null,
+        question: `Which overarching concept serves as a shared analytical bridge between "${rel.fromSection}" and "${rel.toSection}"?`,
+        correctAnswer: sharedConcept,
+        distractors: distractorConcepts,
+        evidenceText: rel.connectionNote,
+        whyExplanation: `Both ${rel.fromSection} and ${rel.toSection} rely on ${rel.sharedConcepts.slice(0, 3).join(', ')}.`,
+        factTokens: contentTokens(`${rel.fromSection} ${rel.toSection} ${rel.sharedConcepts.join(' ')}`),
+        salience: 1.15,
+      });
+    }
+  }
+
+  // =========================================================================
+  // 10. QUANTITATIVE & CONCEPT SYNTHESIS FALLBACKS (RANKED BY TEXTRANK SALIENCE)
+  // =========================================================================
   const allDocQuantities = Array.from(
     new Set(profile.units.flatMap((u) => u.quantitiesUnits))
   );
 
   const rankedUnits = [...profile.units].sort((a, b) => b.score - a.score);
   for (const unit of rankedUnits) {
-    const cleanSent = cleanSnippet(stripBoilerplatePrefix(unit.formattedText), 185);
-    if (cleanSent.length < 32) continue;
-    const sectionKey =
-      unit.sectionHeading ||
-      (unit.pageNumber !== null ? `Page ${unit.pageNumber}` : 'Key Concepts');
+    const cleanSent = cleanAcademicProse(stripBoilerplatePrefix(unit.formattedText), 175);
+    if (cleanSent.length < 28) continue;
+    const topicTag = cleanTopicLabel(unit.sectionHeading, profile.subjectArea);
 
-    // 8A: Quantitative fact
+    // 10A: Quantitative fact
     if (unit.quantitiesUnits.length > 0 && !/[=→⇌]/.test(cleanSent)) {
       const targetQty = unit.quantitiesUnits[0];
       if (cleanSent.includes(targetQty)) {
@@ -793,15 +1314,16 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
         if (qtyDistractors.length === 3) {
           candidates.push({
             idKey: `quant:${unit.fingerprint.slice(0, 36)}:${targetQty}`,
-            templateType: 'quantitative_fact',
-            cognitiveLevel: 'application',
-            sectionKey,
-            sectionHeading: unit.sectionHeading,
+            questionCategory: 'problem_solving',
+            cognitiveBand: 'application',
+            optionKind: 'quantity_value',
+            topicTag,
             pageNumber: unit.pageNumber,
-            question: `Which value completes this statement from the study material: "${blanked}"?`,
+            question: `What quantitative value accurately completes this scientific relationship: "${blanked}"?`,
             correctAnswer: targetQty,
             distractors: qtyDistractors,
-            evidenceText: unit.formattedText,
+            evidenceText: cleanSent,
+            whyExplanation: `The verified value is ${targetQty}: ${cleanSent}.`,
             factTokens: unit.tokens,
             salience: unit.score * 1.15,
           });
@@ -809,95 +1331,49 @@ function buildCandidatesFromProfile(profile: DocumentIntelligenceProfile): QuizC
       }
     }
 
-    // 8B: Targeted concept cloze
-    if (/[=→⇌]/.test(cleanSent)) continue;
-    const termPool = [...profile.keyPhrases, ...profile.keyTerminology];
-    let targetTerm: string | null = null;
-    for (const candidateTerm of termPool) {
-      if (candidateTerm.length < 4 || candidateTerm.length > 36) continue;
-      const escaped = candidateTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const match = cleanSent.match(new RegExp(`\\b(${escaped})\\b`, 'i'));
-      if (match) {
-        const exactInSentence = match[1];
-        const replaced = cleanSent.replace(exactInSentence, '_______');
-        if (!new RegExp(`\\b${escaped}\\b`, 'i').test(replaced)) {
-          targetTerm = exactInSentence;
-          break;
-        }
-      }
-    }
-
-    if (!targetTerm) {
-      const sentenceWords = cleanSent.match(/\b[A-Za-z][a-zA-Z-]{5,28}\b/g) || [];
-      let bestWord: string | null = null;
-      let bestTf = -1;
-      for (const w of sentenceWords) {
-        const lowerW = w.toLowerCase();
-        if (!unit.tokens.has(lowerW)) continue;
-        const tf = profile.globalTermFreq.get(lowerW) || 1;
-        if (tf > bestTf) {
-          bestTf = tf;
-          bestWord = w;
-        }
-      }
-      if (bestWord) {
-        const escaped = bestWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const replaced = cleanSent.replace(new RegExp(`\\b${escaped}\\b`), '_______');
-        if (!new RegExp(`\\b${escaped}\\b`, 'i').test(replaced)) {
-          targetTerm = bestWord;
-        }
-      }
-    }
-
-    if (targetTerm) {
-      const escaped = targetTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const clozeStem = cleanSent.replace(new RegExp(`\\b${escaped}\\b`), '_______');
-      const formattedTarget =
-        targetTerm === targetTerm.toLowerCase() ? ucFirst(targetTerm) : targetTerm;
-      const clozeDistractors = pickDistractorsFromPools(
-        formattedTarget,
-        [allEntityNames, subjectPeers, frequentDocNouns],
-        3,
-        formattedTarget,
-        unit.tokens
-      );
-
-      if (clozeDistractors.length === 3) {
-        candidates.push({
-          idKey: `cloze:${unit.fingerprint.slice(0, 36)}:${targetTerm.toLowerCase()}`,
-          templateType: 'targeted_cloze',
-          cognitiveLevel: 'conceptual',
-          sectionKey,
-          sectionHeading: unit.sectionHeading,
-          pageNumber: unit.pageNumber,
-          question: `Which term correctly completes the statement from the study material: "${clozeStem}"?`,
-          correctAnswer: formattedTarget,
-          distractors: clozeDistractors,
-          evidenceText: unit.formattedText,
-          factTokens: unit.tokens,
-          salience: unit.score * 0.92,
-        });
-      }
+    // 10B: Structured principle synthesis (only emitted cleanly when valid)
+    const synth = synthesizePrincipleQuestionFromUnit(
+      unit.formattedText,
+      profile.subjectArea,
+      allDescriptions,
+      allEntityNames,
+      subjectPeers,
+      topicTag,
+      unit.pageNumber,
+      unit.score,
+      unit.fingerprint,
+      unit.tokens
+    );
+    if (synth) {
+      candidates.push(synth);
     }
   }
 
-  return candidates;
+  // Final Validation Gate: filter out any weak/ambiguous/leaked/malformed candidate before blueprint selection
+  const validated: QuizCandidate[] = [];
+  for (const cand of candidates) {
+    const refined = validateAndRefineCandidate(cand);
+    if (refined) validated.push(refined);
+  }
+  return validated;
 }
 
-function getCognitivePriorityRank(level: CognitiveLevel, difficulty: QuizDifficulty): number {
+function getCognitiveBandWeights(
+  difficulty: QuizDifficulty
+): Record<QuizCognitiveBand, number> {
   if (difficulty === 'easy') {
-    return level === 'recall' ? 3 : level === 'conceptual' ? 2 : 1;
-  }
-  if (difficulty === 'advanced') {
-    return level === 'application' ? 3 : level === 'conceptual' ? 2 : 1;
+    return { knowledge: 4, comprehension: 2.6, application: 1, analysis: 0.4 };
   }
   if (difficulty === 'intermediate') {
-    return level === 'conceptual' ? 3 : level === 'application' ? 2 : 1;
+    return { knowledge: 1.4, comprehension: 3.4, application: 3.6, analysis: 1.8 };
   }
-  return 2; // 'mixed'
+  if (difficulty === 'advanced') {
+    return { knowledge: 0.5, comprehension: 1.5, application: 3.0, analysis: 4.5 };
+  }
+  return { knowledge: 2.2, comprehension: 2.5, application: 2.5, analysis: 2.3 };
 }
 
-function selectCandidatesBalanced(
+function selectCandidatesBlueprint(
   allCandidates: QuizCandidate[],
   questionCount: number,
   difficulty: QuizDifficulty,
@@ -911,31 +1387,35 @@ function selectCandidatesBalanced(
     dedupedById.push(c);
   }
 
+  const bandWeights = getCognitiveBandWeights(difficulty);
   const scoreCandidate = (c: QuizCandidate) =>
-    getCognitivePriorityRank(c.cognitiveLevel, difficulty) * 100 + c.salience * 10;
+    (bandWeights[c.cognitiveBand] || 2) * 100 + c.salience * 12;
 
   let ordered: QuizCandidate[];
 
   if (difficulty === 'mixed') {
-    // Interleave recall / conceptual / application round-robin
-    const buckets: Record<CognitiveLevel, QuizCandidate[]> = {
-      recall: dedupedById
-        .filter((c) => c.cognitiveLevel === 'recall')
+    const bands: QuizCognitiveBand[] = ['knowledge', 'comprehension', 'application', 'analysis'];
+    const buckets: Record<QuizCognitiveBand, QuizCandidate[]> = {
+      knowledge: dedupedById
+        .filter((c) => c.cognitiveBand === 'knowledge')
         .sort((a, b) => b.salience - a.salience),
-      conceptual: dedupedById
-        .filter((c) => c.cognitiveLevel === 'conceptual')
+      comprehension: dedupedById
+        .filter((c) => c.cognitiveBand === 'comprehension')
         .sort((a, b) => b.salience - a.salience),
       application: dedupedById
-        .filter((c) => c.cognitiveLevel === 'application')
+        .filter((c) => c.cognitiveBand === 'application')
+        .sort((a, b) => b.salience - a.salience),
+      analysis: dedupedById
+        .filter((c) => c.cognitiveBand === 'analysis')
         .sort((a, b) => b.salience - a.salience),
     };
     ordered = [];
     let idx = 0;
     while (ordered.length < dedupedById.length) {
       let pushed = false;
-      for (const lvl of ['recall', 'conceptual', 'application'] as CognitiveLevel[]) {
-        if (idx < buckets[lvl].length) {
-          ordered.push(buckets[lvl][idx]);
+      for (const b of bands) {
+        if (idx < buckets[b].length) {
+          ordered.push(buckets[b][idx]);
           pushed = true;
         }
       }
@@ -946,63 +1426,90 @@ function selectCandidatesBalanced(
     ordered = [...dedupedById].sort((a, b) => scoreCandidate(b) - scoreCandidate(a));
   }
 
-  // Exam Mode: enforce broad coverage across all document sections/pages via round-robin
-  if (assessmentMode === 'exam') {
-    const bySection = new Map<string, QuizCandidate[]>();
-    for (const cand of ordered) {
-      const list = bySection.get(cand.sectionKey) || [];
-      list.push(cand);
-      bySection.set(cand.sectionKey, list);
-    }
+  // Round-robin distribute across topics (stronger enforcement in Exam Mode, also applied in Practice to avoid topic clustering)
+  const bucketKeyFor = (c: QuizCandidate) =>
+    assessmentMode === 'exam' && c.pageNumber !== null
+      ? `${c.topicTag}::${c.pageNumber}`
+      : c.topicTag;
 
-    const sectionQueues = Array.from(bySection.values());
-    const interleaved: QuizCandidate[] = [];
-    let depth = 0;
-    while (interleaved.length < ordered.length) {
-      let addedAny = false;
-      for (const queue of sectionQueues) {
-        if (depth < queue.length) {
-          interleaved.push(queue[depth]);
-          addedAny = true;
-        }
-      }
-      if (!addedAny) break;
-      depth++;
-    }
-    ordered = interleaved;
+  const byTopic = new Map<string, QuizCandidate[]>();
+  for (const cand of ordered) {
+    const k = bucketKeyFor(cand);
+    const list = byTopic.get(k) || [];
+    list.push(cand);
+    byTopic.set(k, list);
   }
 
-  // Two-pass selection: Pass 1 avoids testing the exact same source fact twice; Pass 2 fills remaining quota only via distinct structured template types (never redundant cloze on an already-tested fact)
+  const topicQueues = Array.from(byTopic.values());
+  const interleaved: QuizCandidate[] = [];
+  let depth = 0;
+  while (interleaved.length < ordered.length) {
+    let addedAny = false;
+    for (const queue of topicQueues) {
+      if (depth < queue.length) {
+        interleaved.push(queue[depth]);
+        addedAny = true;
+      }
+    }
+    if (!addedAny) break;
+    depth++;
+  }
+  ordered = interleaved;
+
+  // Duplicate-fact & duplicate-stem gate (rejects redundant tests of identical concept)
   const selected: QuizCandidate[] = [];
-  const usedFactEntries: Array<{ tokens: Set<string>; templates: Set<string> }> = [];
+  const usedFactEntries: Array<{
+    tokens: Set<string>;
+    stemTokens: Set<string>;
+    categories: Set<QuizQuestionCategory>;
+  }> = [];
 
   for (const cand of ordered) {
     if (selected.length >= questionCount) break;
-    const matchIdx = usedFactEntries.findIndex((prev) => {
-      const { jaccard, containment } = tokenSimilarity(cand.factTokens, prev.tokens);
-      return jaccard >= 0.72 || containment >= 0.88;
+    const stemToks = contentTokens(cand.question);
+    const duplicateFact = usedFactEntries.some((prev) => {
+      const factSim = tokenSimilarity(cand.factTokens, prev.tokens);
+      const stemSim = tokenSimilarity(stemToks, prev.stemTokens);
+      return (
+        factSim.jaccard >= 0.72 ||
+        factSim.containment >= 0.88 ||
+        stemSim.jaccard >= 0.72
+      );
     });
-    if (matchIdx === -1) {
+    if (!duplicateFact) {
       selected.push(cand);
       usedFactEntries.push({
         tokens: cand.factTokens,
-        templates: new Set([cand.templateType]),
+        stemTokens: stemToks,
+        categories: new Set([cand.questionCategory]),
       });
     }
   }
 
+  // Second pass only allows non-identical question categories on distinct cognitive dimensions if still short
   if (selected.length < questionCount) {
     const selectedSet = new Set(selected);
     for (const cand of ordered) {
       if (selected.length >= questionCount) break;
-      if (selectedSet.has(cand) || cand.templateType === 'targeted_cloze') continue;
-      const sameFactCoveredBySameTemplate = usedFactEntries.some((prev) => {
-        const { jaccard, containment } = tokenSimilarity(cand.factTokens, prev.tokens);
-        return (jaccard >= 0.72 || containment >= 0.88) && prev.templates.has(cand.templateType);
+      if (selectedSet.has(cand)) continue;
+      const stemToks = contentTokens(cand.question);
+      const alreadySameAngle = usedFactEntries.some((prev) => {
+        const factSim = tokenSimilarity(cand.factTokens, prev.tokens);
+        const stemSim = tokenSimilarity(stemToks, prev.stemTokens);
+        return (
+          stemSim.jaccard >= 0.65 ||
+          ((factSim.jaccard >= 0.72 || factSim.containment >= 0.88) &&
+            prev.categories.has(cand.questionCategory))
+        );
       });
-      if (!sameFactCoveredBySameTemplate) {
+      if (!alreadySameAngle) {
         selected.push(cand);
         selectedSet.add(cand);
+        usedFactEntries.push({
+          tokens: cand.factTokens,
+          stemTokens: stemToks,
+          categories: new Set([cand.questionCategory]),
+        });
       }
     }
   }
@@ -1011,8 +1518,38 @@ function selectCandidatesBalanced(
 }
 
 /**
- * Generates grounded, multi-dimensional objective (multiple-choice) questions directly
- * from extracted document text using the shared Document Intelligence Engine (zero AI API calls).
+ * Summarizes an examination/quiz blueprint across topics and cognitive bands.
+ */
+export function buildAssessmentBlueprint(questions: QuizQuestion[]): AssessmentBlueprint {
+  const topicCounts = new Map<string, number>();
+  const cognitiveMix: Record<QuizCognitiveBand, number> = {
+    knowledge: 0,
+    comprehension: 0,
+    application: 0,
+    analysis: 0,
+  };
+
+  for (const q of questions) {
+    const cleanTopic = cleanTopicLabel(q.topicTag, 'Core Concepts');
+    topicCounts.set(cleanTopic, (topicCounts.get(cleanTopic) || 0) + 1);
+    const band: QuizCognitiveBand = q.cognitiveBand || 'comprehension';
+    if (band in cognitiveMix) {
+      cognitiveMix[band] += 1;
+    }
+  }
+
+  return {
+    totalQuestions: questions.length,
+    topics: Array.from(topicCounts.entries())
+      .map(([topic, count]) => ({ topic, count }))
+      .sort((a, b) => b.count - a.count),
+    cognitiveMix,
+  };
+}
+
+/**
+ * Generates grounded, peer-reviewed academic multiple-choice questions directly
+ * from extracted document intelligence (deterministic, zero external AI dependencies).
  */
 export function generateGroundedQuizQuestions(
   extractedText: string,
@@ -1028,14 +1565,18 @@ export function generateGroundedQuizQuestions(
     subjectArea: options?.subjectArea,
   });
 
-  // Require real readable academic content; never fabricate questions from thin/unreadable inputs
   if (profile.quality.alphaWordCount < 8 || profile.units.length === 0) {
     return [];
   }
 
   const assessmentMode = options?.assessmentMode === 'exam' ? 'exam' : 'practice';
   const candidates = buildCandidatesFromProfile(profile);
-  const chosen = selectCandidatesBalanced(candidates, questionCount, difficulty, assessmentMode);
+  const chosen = selectCandidatesBlueprint(
+    candidates,
+    questionCount,
+    difficulty,
+    assessmentMode
+  );
 
   return chosen.map((cand, index) => {
     const qNum = index + 1;
@@ -1047,14 +1588,9 @@ export function generateGroundedQuizQuestions(
       opts[targetIdx] = tmp;
     }
 
-    const topicTag =
-      cand.pageNumber !== null
-        ? `Page ${cand.pageNumber}`
-        : cand.sectionHeading || profile.subjectArea || 'Study Material';
-
-    const explanation = cand.sectionHeading
-      ? `Section: ${cand.sectionHeading}. Explanation: ${cleanSnippet(cand.evidenceText, 180)}`
-      : `Explanation: ${cleanSnippet(cand.evidenceText, 180)}`;
+    const explanation = cand.whyExplanation
+      ? `${cand.whyExplanation} (${cand.topicTag})`
+      : cleanAcademicProse(cand.evidenceText, 190);
 
     return {
       id: `q-${qNum}`,
@@ -1065,9 +1601,10 @@ export function generateGroundedQuizQuestions(
       correctOptionIndex: targetIdx,
       expectedAnswer: opts[targetIdx],
       maxMarks: 1,
-      explanation,
-      topicTag,
-      ...(cand.pageNumber !== null ? { pageNumber: cand.pageNumber } : {}),
+      explanation: stripSummarySourceAndPageRefs(explanation),
+      topicTag: cand.topicTag,
+      cognitiveBand: cand.cognitiveBand,
+      questionCategory: cand.questionCategory,
     };
   });
 }
@@ -1077,20 +1614,21 @@ export function generateGroundedQuizQuestions(
  * without uploading a dedicated PDF or notes.
  */
 export function getAcademicTopicPrimer(topicTitle: string): string {
-  const clean = (topicTitle || 'Academic Studies').trim();
+  const clean = stripSourceFilenameFromTitle(topicTitle || 'Academic Studies');
   const lower = clean.toLowerCase();
 
-  // 1. Check curated educational visual database
   for (const item of CURATED_EDUCATIONAL_VISUALS) {
     if (item.matchPatterns.some((p) => p.test(clean) || p.test(lower))) {
       const labelSentences = (item.verifiedLabels || [])
-        .map((l) => `${l.label} functions to ${l.detail || 'perform essential structural and operational roles'}.`)
+        .map(
+          (l) =>
+            `${l.label} functions to ${l.detail || 'perform essential structural and operational roles'}.`
+        )
         .join(' ');
-      return `## ${item.conceptTitle}\n${clean} represents an essential domain within ${item.discipline}.\n${item.caption}\n${labelSentences}\nThis system exemplifies structured operational mechanisms, distinct functional tiers, and biological or physical regulation.`;
+      return `## ${item.conceptTitle}\n${clean} represents an essential domain within ${item.discipline}.\n${item.caption}\n${labelSentences}\nThis system exemplifies structured operational mechanisms, distinct functional tiers, and regulated physiological or physical control.`;
     }
   }
 
-  // 2. Academic subject match from SUBJECT_LEXICONS
   let matchedSubject = 'General Studies';
   let peerTerms: string[] = [];
   for (const lex of SUBJECT_LEXICONS) {
@@ -1106,6 +1644,5 @@ export function getAcademicTopicPrimer(topicTitle: string): string {
     return `## ${clean} (${matchedSubject})\n${clean} is a foundational principle of scholarly investigation in ${matchedSubject}.\nIt links systematically with concepts such as ${peerTerms.join(', ')}.\nKey processes in ${clean} operate through verified mechanisms, empirical relationships, and specialized functional roles.\nMastery of ${clean} involves distinguishing governing laws from practical applications and evaluating quantitative or conceptual evidence.`;
   }
 
-  // 3. Robust academic baseline for arbitrary scholarly topic
   return `## ${clean}\n${clean} is an established subject of academic study and curriculum inquiry.\nPrimary principles of ${clean} establish its foundational definitions, structural components, and practical applications.\nAnalysis of ${clean} examines cause-and-effect relationships, sequential mechanisms, and comparative criteria.\nScholarly evaluation of ${clean} requires distinguishing core operational features from secondary attributes across multiple perspectives.`;
 }

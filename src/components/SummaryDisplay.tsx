@@ -18,7 +18,10 @@ import { DocumentFlashcardsModal } from './DocumentFlashcardsModal';
 import { EducationalDiagramRenderer } from './EducationalDiagramRenderer';
 import { ScientificText } from './ScientificText';
 import { SummaryVisualBlock } from './SummaryVisualBlock';
-import { evaluateVisualLearningNeeds } from '../lib/visualLearningEngine';
+import {
+  evaluateVisualLearningNeeds,
+  isVisualAidRelevantToSummary,
+} from '../lib/visualLearningEngine';
 
 interface SummaryDisplayProps {
   summary: StructuredSummary;
@@ -29,9 +32,9 @@ interface SummaryDisplayProps {
 }
 
 const LEVEL_LABELS: Record<SummaryLevel, string> = {
-  short: 'Short Summary',
+  short: 'Simple Summary',
   detailed: 'Detailed Summary',
-  comprehensive: 'Comprehensive Study Notes',
+  comprehensive: 'Comprehensive Summary',
 };
 
 type SectionKey =
@@ -164,9 +167,15 @@ export function SummaryDisplay({
   const distinctions = summary.importantDistinctions ?? [];
   const finalRecap = summary.finalRecap ?? [];
   const comparisons = summary.comparisonTables ?? [];
+  const validatedPersistedVisuals = useMemo(
+    () =>
+      (summary.visualAids ?? []).filter((v) => isVisualAidRelevantToSummary(v, summary)),
+    [summary]
+  );
+
   const { fallbackVisuals, fallbackDiagrams } = useMemo(() => {
     if (
-      (summary.visualAids && summary.visualAids.length > 0) ||
+      validatedPersistedVisuals.length > 0 ||
       (summary.visualDiagrams && summary.visualDiagrams.length > 0)
     ) {
       return { fallbackVisuals: [], fallbackDiagrams: [] };
@@ -176,7 +185,7 @@ export function SummaryDisplay({
       fallbackVisuals: evaluated.visualAids,
       fallbackDiagrams: evaluated.visualDiagrams,
     };
-  }, [summary]);
+  }, [summary, validatedPersistedVisuals.length]);
 
   const diagrams =
     summary.visualDiagrams && summary.visualDiagrams.length > 0
@@ -184,8 +193,8 @@ export function SummaryDisplay({
       : fallbackDiagrams;
 
   const visualAids =
-    summary.visualAids && summary.visualAids.length > 0
-      ? summary.visualAids
+    validatedPersistedVisuals.length > 0
+      ? validatedPersistedVisuals
       : fallbackVisuals;
 
   const getVisualsForSection = (section: SummaryVisualTargetSection, index?: number) =>
@@ -194,6 +203,17 @@ export function SummaryDisplay({
         v.targetSection === section &&
         (index === undefined || (v.targetIndex === undefined ? index === 0 : v.targetIndex === index))
     );
+
+  // Ensure any visual targeting an omitted section still renders beside Overview or Main Concepts
+  const orphanedVisuals = visualAids.filter((v) => {
+    if (v.targetSection === 'overview' && !summary.topicOverview) return true;
+    if (v.targetSection === 'concepts' && summary.mainConcepts.length === 0) return true;
+    if (v.targetSection === 'classifications' && classifications.length === 0) return true;
+    if (v.targetSection === 'processes' && processes.length === 0) return true;
+    if (v.targetSection === 'formulas' && summary.formulasOrFrameworks.length === 0) return true;
+    if (v.targetSection === 'distinctions' && distinctions.length === 0) return true;
+    return false;
+  });
 
   return (
     <article className="rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0D162B]">
@@ -300,107 +320,145 @@ export function SummaryDisplay({
       {/* Clean Structured Academic Study Reader (Sections A–H) */}
       <div className="divide-y divide-slate-200/90 px-5 sm:px-7 dark:divide-slate-800/90">
         {/* A. Topic Overview */}
-        {summary.topicOverview && (
-          <section>
-            {renderSectionHeader('overview', 'Topic Overview')}
-            {expandedSections.overview && (
-              <div className="pb-6 max-w-[74ch]">
-                <p className="text-[15px] leading-[1.7] text-slate-800 academic-selectable dark:text-slate-200">
-                  <ScientificText text={summary.topicOverview} />
-                </p>
-                {getVisualsForSection('overview').map((vis) => (
-                  <SummaryVisualBlock key={vis.id} visual={vis} />
-                ))}
-              </div>
-            )}
-          </section>
-        )}
+        {summary.topicOverview && (() => {
+          const overviewVisuals = [
+            ...getVisualsForSection('overview'),
+            ...(summary.mainConcepts.length === 0 ? orphanedVisuals : []),
+          ];
+          return (
+            <section>
+              {renderSectionHeader('overview', 'Topic Overview')}
+              {expandedSections.overview && (
+                <div
+                  className={`pb-6 ${
+                    overviewVisuals.length > 0
+                      ? 'grid grid-cols-1 gap-6 lg:grid-cols-12 lg:items-start'
+                      : 'max-w-[74ch]'
+                  }`}
+                >
+                  <div className={overviewVisuals.length > 0 ? 'lg:col-span-7 max-w-[68ch]' : ''}>
+                    <p className="text-[15px] leading-[1.7] text-slate-800 academic-selectable dark:text-slate-200">
+                      <ScientificText text={summary.topicOverview} />
+                    </p>
+                  </div>
+                  {overviewVisuals.length > 0 && (
+                    <aside className="space-y-4 lg:col-span-5">
+                      {overviewVisuals.map((vis) => (
+                        <SummaryVisualBlock key={vis.id} visual={vis} className="!my-0" compact />
+                      ))}
+                    </aside>
+                  )}
+                </div>
+              )}
+            </section>
+          );
+        })()}
 
         {/* B. Main Concepts */}
         {summary.mainConcepts.length > 0 && (
           <section>
             {renderSectionHeader('concepts', 'Main Concepts', summary.mainConcepts.length)}
             {expandedSections.concepts && (
-              <div className="space-y-6 pb-6 max-w-[74ch]">
-                {summary.mainConcepts.map((concept, idx) => (
-                  <div key={idx} className="space-y-2.5">
-                    <h4 className="font-display text-[15px] font-semibold text-slate-900 select-text dark:text-white">
-                      <span className="mr-2 font-mono text-xs text-blue-700 select-none tabular-nums dark:text-cyan-400">
-                        {String(idx + 1).padStart(2, '0')}.
-                      </span>
-                      <ScientificText text={concept.heading} />
-                    </h4>
+              <div className="space-y-7 pb-6">
+                {summary.mainConcepts.map((concept, idx) => {
+                  const sectionVisuals = [
+                    ...getVisualsForSection('concepts', idx),
+                    ...(idx === 0 ? orphanedVisuals : []),
+                  ];
+                  const hasVisuals = sectionVisuals.length > 0;
+                  return (
+                    <div
+                      key={idx}
+                      className={
+                        hasVisuals
+                          ? 'grid grid-cols-1 gap-6 lg:grid-cols-12 lg:items-start'
+                          : 'max-w-[74ch]'
+                      }
+                    >
+                      <div className={`space-y-2.5 ${hasVisuals ? 'lg:col-span-7 max-w-[68ch]' : ''}`}>
+                        <h4 className="font-display text-[15px] font-semibold text-slate-900 select-text dark:text-white">
+                          <span className="mr-2 font-mono text-xs text-blue-700 select-none tabular-nums dark:text-cyan-400">
+                            {String(idx + 1).padStart(2, '0')}.
+                          </span>
+                          <ScientificText text={concept.heading} />
+                        </h4>
 
-                    {concept.sourcePoints.length > 0 && (
-                      <ul className="space-y-2 pl-6">
-                        {concept.sourcePoints.map((pt, pIdx) => (
-                          <li
-                            key={pIdx}
-                            className="relative text-sm leading-[1.7] text-slate-700 academic-selectable dark:text-slate-300"
-                          >
-                            <span
-                              className="absolute -left-4 top-0 text-slate-400 select-none dark:text-slate-500"
-                              aria-hidden="true"
-                            >
-                              –
-                            </span>
-                            <ScientificText text={pt} />
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-
-                    {concept.subsections && concept.subsections.length > 0 && (
-                      <div className="mt-2.5 space-y-3 pl-6">
-                        {concept.subsections.map((sub, sIdx) => (
-                          <div key={sIdx}>
-                            <h5 className="font-display text-xs font-semibold tracking-wide text-slate-800 dark:text-slate-200">
-                              <ScientificText text={sub.heading} />
-                            </h5>
-                            <ul className="mt-1 space-y-1.5 pl-4">
-                              {sub.points.map((subPt, spIdx) => (
-                                <li
-                                  key={spIdx}
-                                  className="relative text-sm leading-[1.68] text-slate-700 academic-selectable dark:text-slate-300"
+                        {concept.sourcePoints.length > 0 && (
+                          <ul className="space-y-2 pl-6">
+                            {concept.sourcePoints.map((pt, pIdx) => (
+                              <li
+                                key={pIdx}
+                                className="relative text-sm leading-[1.7] text-slate-700 academic-selectable dark:text-slate-300"
+                              >
+                                <span
+                                  className="absolute -left-4 top-0 text-slate-400 select-none dark:text-slate-500"
+                                  aria-hidden="true"
                                 >
-                                  <span
-                                    className="absolute -left-3.5 top-0 text-slate-400 select-none dark:text-slate-500"
-                                    aria-hidden="true"
-                                  >
-                                    –
-                                  </span>
-                                  <ScientificText text={subPt} />
+                                  –
+                                </span>
+                                <ScientificText text={pt} />
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+
+                        {concept.subsections && concept.subsections.length > 0 && (
+                          <div className="mt-2.5 space-y-3 pl-6">
+                            {concept.subsections.map((sub, sIdx) => (
+                              <div key={sIdx}>
+                                <h5 className="font-display text-xs font-semibold tracking-wide text-slate-800 dark:text-slate-200">
+                                  <ScientificText text={sub.heading} />
+                                </h5>
+                                <ul className="mt-1 space-y-1.5 pl-4">
+                                  {sub.points.map((subPt, spIdx) => (
+                                    <li
+                                      key={spIdx}
+                                      className="relative text-sm leading-[1.68] text-slate-700 academic-selectable dark:text-slate-300"
+                                    >
+                                      <span
+                                        className="absolute -left-3.5 top-0 text-slate-400 select-none dark:text-slate-500"
+                                        aria-hidden="true"
+                                      >
+                                        –
+                                      </span>
+                                      <ScientificText text={subPt} />
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {concept.examples && concept.examples.length > 0 && (
+                          <div className="ml-6 rounded-xl border border-slate-200/80 bg-slate-50/70 px-4 py-3 dark:border-slate-800 dark:bg-slate-900/40">
+                            <p className="font-display text-xs font-semibold text-slate-700 dark:text-slate-300">
+                              {concept.examples.length > 1 ? 'Examples' : 'Example'}
+                            </p>
+                            <ul className="mt-1 space-y-1.5">
+                              {concept.examples.map((ex, eIdx) => (
+                                <li
+                                  key={eIdx}
+                                  className="text-sm leading-relaxed text-slate-700 academic-selectable dark:text-slate-300"
+                                >
+                                  <ScientificText text={ex} />
                                 </li>
                               ))}
                             </ul>
                           </div>
-                        ))}
+                        )}
                       </div>
-                    )}
 
-                    {concept.examples && concept.examples.length > 0 && (
-                      <div className="ml-6 rounded-xl border border-slate-200/80 bg-slate-50/70 px-4 py-3 dark:border-slate-800 dark:bg-slate-900/40">
-                        <p className="font-display text-xs font-semibold text-slate-700 dark:text-slate-300">
-                          {concept.examples.length > 1 ? 'Examples' : 'Example'}
-                        </p>
-                        <ul className="mt-1 space-y-1.5">
-                          {concept.examples.map((ex, eIdx) => (
-                            <li
-                              key={eIdx}
-                              className="text-sm leading-relaxed text-slate-700 academic-selectable dark:text-slate-300"
-                            >
-                              <ScientificText text={ex} />
-                            </li>
+                      {hasVisuals && (
+                        <aside className="space-y-4 lg:col-span-5">
+                          {sectionVisuals.map((vis) => (
+                            <SummaryVisualBlock key={vis.id} visual={vis} className="!my-0" compact />
                           ))}
-                        </ul>
-                      </div>
-                    )}
-
-                    {getVisualsForSection('concepts', idx).map((vis) => (
-                      <SummaryVisualBlock key={vis.id} visual={vis} />
-                    ))}
-                  </div>
-                ))}
+                        </aside>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </section>
@@ -446,100 +504,117 @@ export function SummaryDisplay({
               classifications.length
             )}
             {expandedSections.classifications && (
-              <div className="space-y-6 pb-6 max-w-[74ch]">
-                {classifications.map((cls, cIdx) => (
-                  <div key={cIdx} className="space-y-3">
-                    <div>
-                      <h4 className="font-display text-[15px] font-semibold text-slate-900 dark:text-white">
-                        <ScientificText text={cls.topic} />
-                      </h4>
-                      <p className="mt-1 text-sm leading-[1.68] text-slate-700 academic-selectable dark:text-slate-300">
-                        <ScientificText text={cls.overviewStatement} />
-                      </p>
-                    </div>
-
-                    <div className="space-y-3 pl-2 sm:pl-4">
-                      {cls.types.map((typeItem, tIdx) => (
-                        <div
-                          key={tIdx}
-                          className="rounded-xl border border-slate-200/80 bg-slate-50/50 px-4 py-3.5 dark:border-slate-800 dark:bg-slate-900/35"
-                        >
-                          <h5 className="font-display text-sm font-semibold text-slate-900 dark:text-white">
-                            <span className="mr-2 font-mono text-xs text-blue-700 select-none tabular-nums dark:text-cyan-400">
-                              {tIdx + 1}.
-                            </span>
-                            <ScientificText text={typeItem.name} />
-                          </h5>
-
-                          <p className="mt-1.5 text-sm leading-[1.68] text-slate-700 academic-selectable dark:text-slate-300">
-                            <ScientificText text={typeItem.explanation} />
+              <div className="space-y-6 pb-6">
+                {classifications.map((cls, cIdx) => {
+                  const clsVisuals = getVisualsForSection('classifications', cIdx);
+                  const hasVisuals = clsVisuals.length > 0;
+                  return (
+                    <div
+                      key={cIdx}
+                      className={
+                        hasVisuals
+                          ? 'grid grid-cols-1 gap-6 lg:grid-cols-12 lg:items-start'
+                          : 'max-w-[74ch]'
+                      }
+                    >
+                      <div className={`space-y-3 ${hasVisuals ? 'lg:col-span-7 max-w-[68ch]' : ''}`}>
+                        <div>
+                          <h4 className="font-display text-[15px] font-semibold text-slate-900 dark:text-white">
+                            <ScientificText text={cls.topic} />
+                          </h4>
+                          <p className="mt-1 text-sm leading-[1.68] text-slate-700 academic-selectable dark:text-slate-300">
+                            <ScientificText text={cls.overviewStatement} />
                           </p>
-
-                          {typeItem.characteristics && typeItem.characteristics.length > 0 && (
-                            <div className="mt-2.5">
-                              <span className="font-display text-xs font-semibold text-slate-700 dark:text-slate-300">
-                                Characteristics:
-                              </span>
-                              <ul className="mt-1 space-y-1 pl-4">
-                                {typeItem.characteristics.map((ch, chIdx) => (
-                                  <li
-                                    key={chIdx}
-                                    className="relative text-sm leading-relaxed text-slate-700 academic-selectable dark:text-slate-300"
-                                  >
-                                    <span
-                                      className="absolute -left-3.5 top-0 text-slate-400 select-none dark:text-slate-500"
-                                      aria-hidden="true"
-                                    >
-                                      –
-                                    </span>
-                                    <ScientificText text={ch} />
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-
-                          {typeItem.examples && typeItem.examples.length > 0 && (
-                            <div className="mt-2.5">
-                              <span className="font-display text-xs font-semibold text-slate-700 dark:text-slate-300">
-                                {typeItem.examples.length > 1 ? 'Examples:' : 'Example:'}
-                              </span>
-                              <ul className="mt-1 space-y-1 pl-4">
-                                {typeItem.examples.map((ex, exIdx) => (
-                                  <li
-                                    key={exIdx}
-                                    className="relative text-sm leading-relaxed text-slate-700 academic-selectable dark:text-slate-300"
-                                  >
-                                    <span
-                                      className="absolute -left-3.5 top-0 text-slate-400 select-none dark:text-slate-500"
-                                      aria-hidden="true"
-                                    >
-                                      –
-                                    </span>
-                                    <ScientificText text={ex} />
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
                         </div>
-                      ))}
+
+                        <div className="space-y-3 pl-2 sm:pl-4">
+                          {cls.types.map((typeItem, tIdx) => (
+                            <div
+                              key={tIdx}
+                              className="rounded-xl border border-slate-200/80 bg-slate-50/50 px-4 py-3.5 dark:border-slate-800 dark:bg-slate-900/35"
+                            >
+                              <h5 className="font-display text-sm font-semibold text-slate-900 dark:text-white">
+                                <span className="mr-2 font-mono text-xs text-blue-700 select-none tabular-nums dark:text-cyan-400">
+                                  {tIdx + 1}.
+                                </span>
+                                <ScientificText text={typeItem.name} />
+                              </h5>
+
+                              <p className="mt-1.5 text-sm leading-[1.68] text-slate-700 academic-selectable dark:text-slate-300">
+                                <ScientificText text={typeItem.explanation} />
+                              </p>
+
+                              {typeItem.characteristics && typeItem.characteristics.length > 0 && (
+                                <div className="mt-2.5">
+                                  <span className="font-display text-xs font-semibold text-slate-700 dark:text-slate-300">
+                                    Characteristics:
+                                  </span>
+                                  <ul className="mt-1 space-y-1 pl-4">
+                                    {typeItem.characteristics.map((ch, chIdx) => (
+                                      <li
+                                        key={chIdx}
+                                        className="relative text-sm leading-relaxed text-slate-700 academic-selectable dark:text-slate-300"
+                                      >
+                                        <span
+                                          className="absolute -left-3.5 top-0 text-slate-400 select-none dark:text-slate-500"
+                                          aria-hidden="true"
+                                        >
+                                          –
+                                        </span>
+                                        <ScientificText text={ch} />
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+
+                              {typeItem.examples && typeItem.examples.length > 0 && (
+                                <div className="mt-2.5">
+                                  <span className="font-display text-xs font-semibold text-slate-700 dark:text-slate-300">
+                                    {typeItem.examples.length > 1 ? 'Examples:' : 'Example:'}
+                                  </span>
+                                  <ul className="mt-1 space-y-1 pl-4">
+                                    {typeItem.examples.map((ex, exIdx) => (
+                                      <li
+                                        key={exIdx}
+                                        className="relative text-sm leading-relaxed text-slate-700 academic-selectable dark:text-slate-300"
+                                      >
+                                        <span
+                                          className="absolute -left-3.5 top-0 text-slate-400 select-none dark:text-slate-500"
+                                          aria-hidden="true"
+                                        >
+                                          –
+                                        </span>
+                                        <ScientificText text={ex} />
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+
+                        {cls.comparisonNote && (
+                          <p className="pl-2 sm:pl-4 text-sm leading-[1.68] text-slate-700 academic-selectable dark:text-slate-300">
+                            <strong className="font-display font-semibold text-slate-900 dark:text-white">
+                              Comparison:{' '}
+                            </strong>
+                            <ScientificText text={cls.comparisonNote} />
+                          </p>
+                        )}
+                      </div>
+
+                      {hasVisuals && (
+                        <aside className="space-y-4 lg:col-span-5">
+                          {clsVisuals.map((vis) => (
+                            <SummaryVisualBlock key={vis.id} visual={vis} className="!my-0" compact />
+                          ))}
+                        </aside>
+                      )}
                     </div>
-
-                    {cls.comparisonNote && (
-                      <p className="pl-2 sm:pl-4 text-sm leading-[1.68] text-slate-700 academic-selectable dark:text-slate-300">
-                        <strong className="font-display font-semibold text-slate-900 dark:text-white">
-                          Comparison:{' '}
-                        </strong>
-                        <ScientificText text={cls.comparisonNote} />
-                      </p>
-                    )}
-
-                    {getVisualsForSection('classifications', cIdx).map((vis) => (
-                      <SummaryVisualBlock key={vis.id} visual={vis} />
-                    ))}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </section>
@@ -590,35 +665,52 @@ export function SummaryDisplay({
           <section>
             {renderSectionHeader('processes', 'Processes & Mechanisms', processes.length)}
             {expandedSections.processes && (
-              <div className="space-y-4 pb-6 max-w-[74ch]">
-                {processes.map((proc, idx) => (
-                  <div key={idx}>
-                    {processes.length > 1 && (
-                      <h4 className="mb-2 font-display text-sm font-semibold text-slate-900 dark:text-white">
-                        <ScientificText text={proc.heading} />
-                      </h4>
-                    )}
-                    <ol className="space-y-2">
-                      {proc.steps.map((step, sIdx) => (
-                        <li
-                          key={sIdx}
-                          className="flex items-start gap-2.5 text-sm leading-[1.7] text-slate-700 academic-selectable dark:text-slate-300"
-                        >
-                          <span className="mt-0.5 font-mono text-xs font-semibold text-blue-700 select-none tabular-nums dark:text-cyan-400">
-                            {sIdx + 1}.
-                          </span>
-                          <span>
-                            <ScientificText text={step} />
-                          </span>
-                        </li>
-                      ))}
-                    </ol>
+              <div className="space-y-5 pb-6">
+                {processes.map((proc, idx) => {
+                  const procVisuals = getVisualsForSection('processes', idx);
+                  const hasVisuals = procVisuals.length > 0;
+                  return (
+                    <div
+                      key={idx}
+                      className={
+                        hasVisuals
+                          ? 'grid grid-cols-1 gap-6 lg:grid-cols-12 lg:items-start'
+                          : 'max-w-[74ch]'
+                      }
+                    >
+                      <div className={hasVisuals ? 'lg:col-span-7 max-w-[68ch]' : ''}>
+                        {processes.length > 1 && (
+                          <h4 className="mb-2 font-display text-sm font-semibold text-slate-900 dark:text-white">
+                            <ScientificText text={proc.heading} />
+                          </h4>
+                        )}
+                        <ol className="space-y-2">
+                          {proc.steps.map((step, sIdx) => (
+                            <li
+                              key={sIdx}
+                              className="flex items-start gap-2.5 text-sm leading-[1.7] text-slate-700 academic-selectable dark:text-slate-300"
+                            >
+                              <span className="mt-0.5 font-mono text-xs font-semibold text-blue-700 select-none tabular-nums dark:text-cyan-400">
+                                {sIdx + 1}.
+                              </span>
+                              <span>
+                                <ScientificText text={step} />
+                              </span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
 
-                    {getVisualsForSection('processes', idx).map((vis) => (
-                      <SummaryVisualBlock key={vis.id} visual={vis} />
-                    ))}
-                  </div>
-                ))}
+                      {hasVisuals && (
+                        <aside className="space-y-4 lg:col-span-5">
+                          {procVisuals.map((vis) => (
+                            <SummaryVisualBlock key={vis.id} visual={vis} className="!my-0" compact />
+                          ))}
+                        </aside>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </section>

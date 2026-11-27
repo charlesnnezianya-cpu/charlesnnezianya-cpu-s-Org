@@ -13,6 +13,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import type { AuthModalMode } from '../AuthModal';
+import type { DashboardSection } from '../../types/brainstine';
 
 interface RevealBlockProps {
   children: React.ReactNode;
@@ -70,7 +71,7 @@ type TutorDepth = 'Beginner' | 'Standard' | 'Advanced';
 type AssessmentMode = 'practice' | 'exam';
 
 interface FeatureShowcasesProps {
-  onOpenAuth: (mode: AuthModalMode) => void;
+  onOpenAuth: (mode: AuthModalMode, targetSection?: DashboardSection) => void;
 }
 
 export function FeatureShowcases({ onOpenAuth }: FeatureShowcasesProps) {
@@ -164,23 +165,22 @@ export function FeatureShowcases({ onOpenAuth }: FeatureShowcasesProps) {
           <div className="lg:col-span-5">
             <div className="inline-flex items-center gap-2 text-xs font-semibold tracking-wider text-sky-400 uppercase">
               <Sparkles className="h-4 w-4" aria-hidden="true" />
-              <span>Document Intelligence Engine</span>
+              <span>Document Summarizer</span>
             </div>
             <h2
               id="summarizer-heading"
               className="mt-3 font-display text-2xl font-bold tracking-tight text-white text-balance sm:text-4xl"
             >
-              Dense PDFs distilled into structured, page-cited knowledge.
+              Dense PDFs distilled into structured, easy-to-study notes.
             </h2>
             <p className="mt-4 text-sm leading-relaxed text-slate-300 sm:text-base academic-selectable">
-              Our deterministic Document Intelligence Engine extracts section hierarchies, removes
-              repetition, and organizes high-density Topic Overviews, Definitions, Formulas,
-              and Mechanisms—with exact page citations preserved throughout.
+              Select the exact sections you want to study, remove repetition, and organize key
+              concepts, definitions, formulas, and visual diagrams directly from your material.
             </p>
             <ul className="mt-6 space-y-2.5 text-sm text-slate-300">
               <li className="flex items-start gap-2.5">
                 <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-sky-400" aria-hidden="true" />
-                <span>Three study depths: Short, Detailed, and Comprehensive Study Notes.</span>
+                <span>Three study styles: Simple, Detailed, and Comprehensive.</span>
               </li>
               <li className="flex items-start gap-2.5">
                 <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-sky-400" aria-hidden="true" />
@@ -194,7 +194,7 @@ export function FeatureShowcases({ onOpenAuth }: FeatureShowcasesProps) {
             <div className="mt-7">
               <button
                 type="button"
-                onClick={() => onOpenAuth('signup')}
+                onClick={() => onOpenAuth('signup', 'summarizer')}
                 className="inline-flex min-h-10 items-center gap-2 text-sm font-semibold text-sky-400 transition-colors hover:text-sky-300"
               >
                 <span>Try Document Summarizer</span>
@@ -561,7 +561,7 @@ export function FeatureShowcases({ onOpenAuth }: FeatureShowcasesProps) {
             <div className="mt-7">
               <button
                 type="button"
-                onClick={() => onOpenAuth('signup')}
+                onClick={() => onOpenAuth('signup', 'quizzes')}
                 className="inline-flex min-h-10 items-center gap-2 text-sm font-semibold text-violet-300 transition-colors hover:text-violet-200"
               >
                 <span>Build a Practice Quiz</span>
@@ -598,7 +598,10 @@ export function FeatureShowcases({ onOpenAuth }: FeatureShowcasesProps) {
         <div className="mt-10 grid grid-cols-1 gap-8 lg:grid-cols-2">
           {/* AI Chatbot Interactive Preview */}
           <RevealBlock delayMs={80}>
-            <div className="flex h-full flex-col overflow-hidden rounded-2xl border border-slate-800/90 bg-[#0B1428] shadow-xl">
+            <div
+              id="chatbot-showcase"
+              className="flex h-full scroll-mt-24 flex-col overflow-hidden rounded-2xl border border-slate-800/90 bg-[#0B1428] shadow-xl"
+            >
               <div className="flex items-center justify-between border-b border-slate-800 bg-[#081022] px-5 py-3.5">
                 <div className="flex items-center gap-2.5">
                   <MessageSquareText className="h-4 w-4 text-sky-400" aria-hidden="true" />
@@ -670,7 +673,10 @@ export function FeatureShowcases({ onOpenAuth }: FeatureShowcasesProps) {
 
           {/* Personal AI Tutor Interactive Preview */}
           <RevealBlock delayMs={160}>
-            <div className="flex h-full flex-col overflow-hidden rounded-2xl border border-slate-800/90 bg-[#0B1428] shadow-xl">
+            <div
+              id="tutor-showcase"
+              className="flex h-full scroll-mt-24 flex-col overflow-hidden rounded-2xl border border-slate-800/90 bg-[#0B1428] shadow-xl"
+            >
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 bg-[#081022] px-5 py-3.5">
                 <div className="flex items-center gap-2.5">
                   <GraduationCap className="h-4 w-4 text-violet-400" aria-hidden="true" />

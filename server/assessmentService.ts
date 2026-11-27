@@ -1,19 +1,24 @@
 import crypto from 'crypto';
 import zlib from 'zlib';
 import { logServerError } from './errorHandler.ts';
+import { buildAssessmentBlueprint } from './quizEngine.ts';
+import { stripSummarySourceAndPageRefs } from '../src/lib/summarySanitizer.ts';
 import type {
   ActiveAssessmentSummary,
   GradedQuestionResult,
   QuizAnswerCheckResponse,
   QuizAssessmentMode,
+  QuizCognitiveBand,
   QuizDifficulty,
   QuizFormat,
   QuizGradingResponse,
   QuizQuestion,
+  QuizQuestionCategory,
   QuizSourceMode,
   RestoredQuizSessionResponse,
   StartQuizSessionResponse,
   StudentAnswer,
+  TopicPerformanceInsight,
 } from '../src/types/brainstine.ts';
 
 export interface ServerQuestionAnswerKey {
@@ -26,6 +31,8 @@ export interface ServerQuestionAnswerKey {
   expectedAnswer: string;
   explanation: string;
   topicTag?: string;
+  cognitiveBand?: QuizCognitiveBand;
+  questionCategory?: QuizQuestionCategory;
   maxMarks: number;
 }
 
@@ -105,19 +112,33 @@ export function getSupabaseAssessmentConfig(): { url: string; anonKey: string } 
   return { url, anonKey };
 }
 
+function sanitizeStudentTopicTag(raw?: string): string | undefined {
+  if (!raw || typeof raw !== 'string') return undefined;
+  const cleaned = stripSummarySourceAndPageRefs(raw).trim();
+  if (!cleaned || /^(?:page\s*\d+|p\.\s*\d+)$/i.test(cleaned)) {
+    return undefined;
+  }
+  return cleaned;
+}
+
 export function stripAnswerKeysFromQuestions(
   questions: Array<QuizQuestion | ServerQuestionAnswerKey>
 ): QuizQuestion[] {
-  return questions.map((q, idx) => ({
-    id: q.id,
-    number: q.number || idx + 1,
-    type: q.type,
-    question: q.question,
-    options: Array.isArray(q.options) ? [...q.options] : undefined,
-    maxMarks: q.maxMarks || 1,
-    ...(q.topicTag ? { topicTag: q.topicTag } : {}),
-    ...('visualAid' in q && q.visualAid ? { visualAid: q.visualAid } : {}),
-  }));
+  return questions.map((q, idx) => {
+    const cleanTopic = sanitizeStudentTopicTag(q.topicTag);
+    return {
+      id: q.id,
+      number: q.number || idx + 1,
+      type: q.type,
+      question: q.question,
+      options: Array.isArray(q.options) ? [...q.options] : undefined,
+      maxMarks: q.maxMarks || 1,
+      ...(cleanTopic ? { topicTag: cleanTopic } : {}),
+      ...(q.cognitiveBand ? { cognitiveBand: q.cognitiveBand } : {}),
+      ...(q.questionCategory ? { questionCategory: q.questionCategory } : {}),
+      ...('visualAid' in q && q.visualAid ? { visualAid: q.visualAid } : {}),
+    };
+  });
 }
 
 export function normalizeServerQuestionKeys(rawQuestions: QuizQuestion[]): ServerQuestionAnswerKey[] {
@@ -130,7 +151,10 @@ export function normalizeServerQuestionKeys(rawQuestions: QuizQuestion[]): Serve
     const correctOptionIndex =
       Number.isInteger(rawCorrect) && rawCorrect >= 0 && rawCorrect < options.length ? rawCorrect : 0;
     const expectedAnswer = String(q.expectedAnswer || options[correctOptionIndex] || '');
-    const explanation = String(q.explanation || 'Grounded in the provided study material.');
+    const explanation = stripSummarySourceAndPageRefs(
+      String(q.explanation || 'Grounded in the provided study material.')
+    );
+    const cleanTopic = sanitizeStudentTopicTag(q.topicTag);
     return {
       id: String(q.id || `q-${idx + 1}`),
       number: Number(q.number) || idx + 1,
@@ -140,7 +164,9 @@ export function normalizeServerQuestionKeys(rawQuestions: QuizQuestion[]): Serve
       correctOptionIndex,
       expectedAnswer,
       explanation,
-      topicTag: q.topicTag,
+      topicTag: cleanTopic,
+      cognitiveBand: q.cognitiveBand,
+      questionCategory: q.questionCategory,
       maxMarks: Math.min(
         20,
         Math.max(1, Number.isFinite(Number(q.maxMarks)) ? Math.round(Number(q.maxMarks)) : 1)
@@ -163,6 +189,8 @@ export function sealAnswerKeyPayload(
       explanation: q.explanation,
       maxMarks: q.maxMarks,
       topicTag: q.topicTag,
+      cognitiveBand: q.cognitiveBand,
+      questionCategory: q.questionCategory,
     })),
   });
 
@@ -180,6 +208,8 @@ interface UnsealedKeyEntry {
   explanation: string;
   maxMarks: number;
   topicTag?: string;
+  cognitiveBand?: QuizCognitiveBand;
+  questionCategory?: QuizQuestionCategory;
 }
 
 export function unsealAnswerKeyPayload(
@@ -220,6 +250,8 @@ type CompactQuestionTuple = [
   string, // explanation
   string | undefined, // topicTag
   number, // maxMarks
+  QuizCognitiveBand?, // optional cognitiveBand
+  QuizQuestionCategory?, // optional questionCategory
 ];
 
 interface SealedSessionPayloadV1 {
@@ -271,6 +303,8 @@ export function sealAssessmentSessionToken(session: ServerAssessmentSession): st
       q.explanation,
       q.topicTag,
       q.maxMarks,
+      q.cognitiveBand,
+      q.questionCategory,
     ]),
   };
 
@@ -312,6 +346,7 @@ export function unsealAssessmentSessionToken(
     const questions: ServerQuestionAnswerKey[] = parsed.qs.map((tuple, i) => {
       const options = Array.isArray(tuple[3]) ? tuple[3] : ['Option A', 'Option B', 'Option C', 'Option D'];
       const correctIdx = Number.isInteger(tuple[4]) && tuple[4] >= 0 && tuple[4] < options.length ? tuple[4] : 0;
+      const cleanTopic = sanitizeStudentTopicTag(tuple[6] ? String(tuple[6]) : undefined);
       return {
         id: String(tuple[0] || `q-${i + 1}`),
         number: Number(tuple[1]) || i + 1,
@@ -320,9 +355,13 @@ export function unsealAssessmentSessionToken(
         options,
         correctOptionIndex: correctIdx,
         expectedAnswer: String(options[correctIdx] || ''),
-        explanation: String(tuple[5] || 'Grounded in the provided study material.'),
-        ...(tuple[6] ? { topicTag: String(tuple[6]) } : {}),
+        explanation: stripSummarySourceAndPageRefs(
+          String(tuple[5] || 'Grounded in the provided study material.')
+        ),
+        ...(cleanTopic ? { topicTag: cleanTopic } : {}),
         maxMarks: Number(tuple[7]) || 1,
+        ...(tuple[8] ? { cognitiveBand: tuple[8] } : {}),
+        ...(tuple[9] ? { questionCategory: tuple[9] } : {}),
       };
     });
 
@@ -442,6 +481,8 @@ function buildPracticeCheckResult(
     }`,
     explanation: question.explanation,
     topicTag: question.topicTag,
+    cognitiveBand: question.cognitiveBand,
+    questionCategory: question.questionCategory,
     options: [...question.options],
   };
 }
@@ -550,6 +591,8 @@ function hydrateSessionFromRow(
         explanation: k.explanation,
         maxMarks: k.maxMarks,
         topicTag: k.topicTag ?? q.topicTag,
+        cognitiveBand: k.cognitiveBand ?? q.cognitiveBand,
+        questionCategory: k.questionCategory ?? q.questionCategory,
       };
     })
   );
@@ -1138,6 +1181,8 @@ export async function startServerAssessmentSession(params: {
                 explanation: k?.explanation ?? q.explanation,
                 maxMarks: k?.maxMarks ?? q.maxMarks,
                 topicTag: k?.topicTag ?? q.topicTag,
+                cognitiveBand: k?.cognitiveBand ?? q.cognitiveBand,
+                questionCategory: k?.questionCategory ?? q.questionCategory,
               };
             })
           );
@@ -1229,6 +1274,7 @@ export async function startServerAssessmentSession(params: {
         };
         storeBoundedSession(freshSession);
 
+        const freshStripped = stripAnswerKeysFromQuestions(freshSession.questions);
         return {
           sessionId: freshSession.sessionId,
           sessionToken: sealAssessmentSessionToken(freshSession),
@@ -1244,7 +1290,8 @@ export async function startServerAssessmentSession(params: {
           serverNowMs: now,
           remainingSeconds:
             deadlineAtMs !== null ? Math.max(0, Math.ceil((deadlineAtMs - now) / 1000)) : null,
-          questions: stripAnswerKeysFromQuestions(freshSession.questions),
+          blueprint: buildAssessmentBlueprint(freshStripped),
+          questions: freshStripped,
         };
       }
     }
@@ -1265,6 +1312,7 @@ export async function startServerAssessmentSession(params: {
     // Never restart an already-active session's timer when resuming the same sessionId
     if (baseSession.status === 'active' && !params.retake) {
       const now = Date.now();
+      const baseStripped = stripAnswerKeysFromQuestions(baseSession.questions);
       return {
         sessionId: baseSession.sessionId,
         sessionToken: sealAssessmentSessionToken(baseSession),
@@ -1282,7 +1330,8 @@ export async function startServerAssessmentSession(params: {
           baseSession.deadlineAtMs !== null
             ? Math.max(0, Math.ceil((baseSession.deadlineAtMs - now) / 1000))
             : null,
-        questions: stripAnswerKeysFromQuestions(baseSession.questions),
+        blueprint: buildAssessmentBlueprint(baseStripped),
+        questions: baseStripped,
       };
     }
 
@@ -1338,6 +1387,7 @@ export async function startServerAssessmentSession(params: {
         persistedInSupabase: clonedPersisted,
       };
       storeBoundedSession(cloned);
+      const clonedStripped = stripAnswerKeysFromQuestions(cloned.questions);
       return {
         sessionId: cloned.sessionId,
         sessionToken: sealAssessmentSessionToken(cloned),
@@ -1353,7 +1403,8 @@ export async function startServerAssessmentSession(params: {
         serverNowMs: now,
         remainingSeconds:
           deadlineAtMs !== null ? Math.max(0, Math.ceil((deadlineAtMs - now) / 1000)) : null,
-        questions: stripAnswerKeysFromQuestions(cloned.questions),
+        blueprint: buildAssessmentBlueprint(clonedStripped),
+        questions: clonedStripped,
       };
     }
 
@@ -1387,6 +1438,7 @@ export async function startServerAssessmentSession(params: {
           if (refreshed && refreshed.status === 'active') {
             const hydrated = hydrateSessionFromRow(refreshed, params.userId);
             storeBoundedSession(hydrated);
+            const hydratedStripped = stripAnswerKeysFromQuestions(hydrated.questions);
             return {
               sessionId: hydrated.sessionId,
               sessionToken: sealAssessmentSessionToken(hydrated),
@@ -1404,7 +1456,8 @@ export async function startServerAssessmentSession(params: {
                 hydrated.deadlineAtMs !== null
                   ? Math.max(0, Math.ceil((hydrated.deadlineAtMs - now) / 1000))
                   : null,
-              questions: stripAnswerKeysFromQuestions(hydrated.questions),
+              blueprint: buildAssessmentBlueprint(hydratedStripped),
+              questions: hydratedStripped,
             };
           }
           throw new AssessmentHttpError(409, 'This assessment session could not be started.');
@@ -1423,6 +1476,7 @@ export async function startServerAssessmentSession(params: {
     baseSession.lastSavedAtMs = now;
     storeBoundedSession(baseSession);
 
+    const activeStripped = stripAnswerKeysFromQuestions(baseSession.questions);
     return {
       sessionId: baseSession.sessionId,
       sessionToken: sealAssessmentSessionToken(baseSession),
@@ -1438,7 +1492,8 @@ export async function startServerAssessmentSession(params: {
       serverNowMs: now,
       remainingSeconds:
         deadlineAtMs !== null ? Math.max(0, Math.ceil((deadlineAtMs - now) / 1000)) : null,
-      questions: stripAnswerKeysFromQuestions(baseSession.questions),
+      blueprint: buildAssessmentBlueprint(activeStripped),
+      questions: activeStripped,
     };
   });
 }
@@ -1802,6 +1857,7 @@ export async function restoreServerAssessmentSession(params: {
         ? Math.max(0, Math.ceil((session.deadlineAtMs - now) / 1000))
         : null;
 
+    const restoredStripped = stripAnswerKeysFromQuestions(session.questions);
     return {
       status: 'active',
       sessionId: session.sessionId,
@@ -1823,7 +1879,8 @@ export async function restoreServerAssessmentSession(params: {
       lockedQuestionIds,
       practiceFeedback,
       lastSavedAt: new Date(session.lastSavedAtMs).toISOString(),
-      questions: stripAnswerKeysFromQuestions(session.questions),
+      blueprint: buildAssessmentBlueprint(restoredStripped),
+      questions: restoredStripped,
     };
   });
 }
@@ -2059,6 +2116,7 @@ async function executeServerAssessmentGrading(params: {
       finalAnswersRecord[q.id] = normalizedEntry;
 
       const correctIdx = q.correctOptionIndex;
+      const cleanTopic = sanitizeStudentTopicTag(q.topicTag) || session.subjectArea || 'Core Concepts';
       if (selected === null) {
         gradedResults.push({
           questionId: q.id,
@@ -2075,6 +2133,9 @@ async function executeServerAssessmentGrading(params: {
           maxMarks: q.maxMarks,
           feedback: 'This question was left unanswered.',
           explanation: q.explanation,
+          topicTag: cleanTopic,
+          ...(q.cognitiveBand ? { cognitiveBand: q.cognitiveBand } : {}),
+          ...(q.questionCategory ? { questionCategory: q.questionCategory } : {}),
           aiEvaluated: false,
         });
       } else if (selected === correctIdx) {
@@ -2093,6 +2154,9 @@ async function executeServerAssessmentGrading(params: {
           maxMarks: q.maxMarks,
           feedback: 'Correct selection.',
           explanation: q.explanation,
+          topicTag: cleanTopic,
+          ...(q.cognitiveBand ? { cognitiveBand: q.cognitiveBand } : {}),
+          ...(q.questionCategory ? { questionCategory: q.questionCategory } : {}),
           aiEvaluated: false,
         });
       } else {
@@ -2113,6 +2177,9 @@ async function executeServerAssessmentGrading(params: {
             correctIdx
           )} is correct.`,
           explanation: q.explanation,
+          topicTag: cleanTopic,
+          ...(q.cognitiveBand ? { cognitiveBand: q.cognitiveBand } : {}),
+          ...(q.questionCategory ? { questionCategory: q.questionCategory } : {}),
           aiEvaluated: false,
         });
       }
@@ -2125,13 +2192,50 @@ async function executeServerAssessmentGrading(params: {
     const maxMarks = gradedResults.reduce((acc, r) => acc + r.maxMarks, 0);
     const percentage = maxMarks > 0 ? Math.round((earnedMarks / maxMarks) * 1000) / 10 : 0;
 
+    const topicAccumulator = new Map<
+      string,
+      { totalQuestions: number; correctCount: number; earnedMarks: number; maxMarks: number }
+    >();
+    for (const r of gradedResults) {
+      const topic = r.topicTag || session.subjectArea || 'Core Concepts';
+      const entry = topicAccumulator.get(topic) || {
+        totalQuestions: 0,
+        correctCount: 0,
+        earnedMarks: 0,
+        maxMarks: 0,
+      };
+      entry.totalQuestions += 1;
+      if (r.status === 'correct') entry.correctCount += 1;
+      entry.earnedMarks += r.marksAwarded;
+      entry.maxMarks += r.maxMarks;
+      topicAccumulator.set(topic, entry);
+    }
+
+    const topicPerformance: TopicPerformanceInsight[] = Array.from(topicAccumulator.entries())
+      .map(([topic, stat]) => {
+        const accuracyPct =
+          stat.maxMarks > 0 ? Math.round((stat.earnedMarks / stat.maxMarks) * 100) : 0;
+        const status: TopicPerformanceInsight['status'] =
+          accuracyPct >= 75 ? 'strong' : accuracyPct >= 50 ? 'developing' : 'needs_review';
+        return {
+          topic,
+          totalQuestions: stat.totalQuestions,
+          correctCount: stat.correctCount,
+          earnedMarks: Math.round(stat.earnedMarks * 10) / 10,
+          maxMarks: stat.maxMarks,
+          accuracyPct,
+          status,
+        };
+      })
+      .sort((a, b) => a.accuracyPct - b.accuracyPct || b.totalQuestions - a.totalQuestions);
+
     let performanceAssessment = '';
     if (percentage >= 85) {
       performanceAssessment =
         'Strong mastery demonstrated across the tested concepts. Review any minor missed nuances below to maintain retention.';
     } else if (percentage >= 70) {
       performanceAssessment =
-        'Solid foundational grasp with a few conceptual gaps. Revisit the highlighted explanations and source references below.';
+        'Solid foundational grasp with a few conceptual gaps. Revisit the highlighted academic explanations below.';
     } else if (percentage >= 50) {
       performanceAssessment =
         'Developing understanding. Focus your next revision session on the topics missed below before attempting another assessment.';
@@ -2165,6 +2269,7 @@ async function executeServerAssessmentGrading(params: {
       percentage,
       timeTakenSeconds,
       performanceAssessment,
+      topicPerformance,
       gradedResults,
     };
 

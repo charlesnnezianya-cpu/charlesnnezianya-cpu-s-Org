@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { generateExtractiveSummary } from './summaryEngine.ts';
+import { buildExtractedDocumentSections } from './documentEngine.ts';
 import { formatScientificText } from '../src/lib/scientificFormatter.ts';
+import { isVisualAidRelevantToSummary } from '../src/lib/visualLearningEngine.ts';
 
 function runSummaryEngineTests() {
   console.log('[SummaryEngine Test Suite] Starting comprehensive document-only tests...');
@@ -188,6 +190,93 @@ References: https://storage.example.supabase.co/storage/v1/object/sign/study-mat
     'Should generate educational diagram spec for process steps'
   );
   console.log('Test 7 [Visual Learning Engine 4K Photography & Vector Diagrams]: PASS');
+
+  // 8. Forex Trading & Candlestick Charts Anti-Contamination Regression Test
+  // (Must classify as Financial Markets & Forex Trading, NEVER attach heart/cardiac/chemistry visuals,
+  //  even when ambiguous terms like "heart", "circulation", "resistance", "momentum", "wave", "base" appear)
+  const forexChartsText = `[Page 1]
+## Candlestick Anatomy and Market Structure
+At the heart of Forex technical analysis, a candlestick summarizes four prices within a timeframe: open, high, low, and close (OHLC). A bullish candlestick closes above the opening exchange rate, whereas a bearish candlestick closes below it, with upper and lower shadows (wicks) showing rejected price extremes.
+For example, a Doji candlestick forms when open and close prices are nearly equal, signaling market indecision before a breakout.
+
+[Page 2]
+## Support, Resistance, and Currency Pairs
+Capital circulation across the EUR/USD currency pair flows between demand floors and supply ceilings. Support and resistance mark horizontal price zones where buying demand halts a downtrend or selling pressure caps an uptrend.
+In Forex trading, the base currency is the first currency quoted in a pair while the quote currency determines its exchange rate value, measured in pips. Stop loss and take profit orders help traders limit downside risk while riding price momentum or an Elliott wave swing.`;
+
+  const forexSimple = generateExtractiveSummary(
+    'Forex_Charts_Price_Action_Guide.pdf',
+    'General Studies',
+    forexChartsText,
+    'short'
+  );
+  assert.equal(
+    forexSimple.subjectArea,
+    'Financial Markets & Forex Trading',
+    'Forex document must be classified accurately as Financial Markets & Forex Trading (not Physics/Medicine)'
+  );
+  const forexVisualUrls = (forexSimple.visualAids || []).map((v) => v.imageDataUrl).join(' ');
+  assert.ok(
+    !forexVisualUrls.includes('med-cardiac-heart') &&
+      !forexVisualUrls.includes('chem-molecular-orbitals') &&
+      !forexVisualUrls.includes('phys-optics-waves'),
+    'Forex summary must NEVER attach cardiac/chemistry/prism photo plates'
+  );
+  assert.ok(
+    forexSimple.visualAids?.some((v) => v.diagramSpec?.type === 'candlestick_chart'),
+    'Forex chart document should generate a genuine programmatic OHLC candlestick schematic'
+  );
+  assert.equal(
+    isVisualAidRelevantToSummary(
+      {
+        id: 'visual-med-heart-circulation-overview-0',
+        targetSection: 'overview',
+        conceptTitle: 'Four-Chambered Heart',
+        subjectDiscipline: 'Cardiovascular Physiology',
+        visualType: 'illustration',
+        necessityReason: 'stale persisted plate',
+        visualScore: 90,
+        caption: 'Heart chambers',
+        generationPrompt: 'heart',
+        verifiedLabels: [],
+        aspectRatio: '16:9',
+        imageDataUrl: '/edu-visuals/med-cardiac-heart.jpg',
+        resolution: '4K',
+        modelUsed: 'test',
+        generatedAt: new Date().toISOString(),
+        modality: 'photography',
+      },
+      forexSimple
+    ),
+    false,
+    'SummaryDisplay guard must reject legacy persisted cardiac heart visual on a Forex summary'
+  );
+  console.log('Test 8 [Forex Charts Subject Accuracy & Zero Cardiac Contamination]: PASS');
+
+  // 9. Selectable Document Sections Extraction Test
+  const sectionExtraction = buildExtractedDocumentSections(forexChartsText, {
+    title: 'Forex Price Action',
+  });
+  assert.equal(sectionExtraction.detectedSubject, 'Financial Markets & Forex Trading');
+  assert.equal(sectionExtraction.sections.length, 2, 'Should extract both Forex sections cleanly');
+  assert.equal(sectionExtraction.sections[0].heading, 'Candlestick Anatomy and Market Structure');
+  assert.equal(sectionExtraction.sections[1].heading, 'Support, Resistance, and Currency Pairs');
+  console.log('Test 9 [Selectable Document Sections Builder]: PASS');
+
+  // 10. Simple vs Detailed vs Comprehensive Style Differentiation
+  const forexComprehensive = generateExtractiveSummary(
+    'Forex Price Action Guide',
+    'General Studies',
+    forexChartsText,
+    'comprehensive'
+  );
+  assert.ok(
+    forexComprehensive.wordCount >= forexSimple.wordCount ||
+      forexComprehensive.mainConcepts.flatMap((c) => c.sourcePoints).length >=
+        forexSimple.mainConcepts.flatMap((c) => c.sourcePoints).length,
+    'Comprehensive summary should retain full depth relative to Simple style'
+  );
+  console.log('Test 10 [Simple vs Comprehensive Depth Differentiation]: PASS');
 
   console.log('[SummaryEngine Test Suite] Overall Status: ALL TESTS PASSED SUCCESSFULLY');
 }

@@ -95,7 +95,7 @@ export const EducationalDiagramRenderer = React.memo(function EducationalDiagram
   );
 
   const TypeIcon =
-    spec.type === 'cartesian_plot'
+    spec.type === 'cartesian_plot' || spec.type === 'candlestick_chart'
       ? LineChart
       : spec.type === 'comparison_matrix'
         ? Table2
@@ -112,7 +112,9 @@ export const EducationalDiagramRenderer = React.memo(function EducationalDiagram
           ? 'Comparison Visual'
           : spec.type === 'cartesian_plot'
             ? 'Quantitative Plot'
-            : 'Labeled System Diagram';
+            : spec.type === 'candlestick_chart'
+              ? 'Price Action & OHLC Chart'
+              : 'Labeled System Diagram';
 
   const renderProcessOrConceptSvg = () => {
     if (nodes.length === 0) return null;
@@ -715,6 +717,229 @@ export const EducationalDiagramRenderer = React.memo(function EducationalDiagram
     );
   };
 
+  const renderCandlestickChartSvg = () => {
+    const cs = spec.candlestickSpec;
+    if (!cs || !cs.candles || cs.candles.length === 0) return null;
+
+    const svgW = 680;
+    const svgH = 290;
+    const padL = 62;
+    const padR = 28;
+    const padT = 26;
+    const padB = 46;
+    const plotW = svgW - padL - padR;
+    const plotH = svgH - padT - padB;
+
+    const lows = cs.candles.map((c) => c.low);
+    const highs = cs.candles.map((c) => c.high);
+    if (typeof cs.supportLevel === 'number') lows.push(cs.supportLevel);
+    if (typeof cs.resistanceLevel === 'number') highs.push(cs.resistanceLevel);
+
+    const rawMin = Math.min(...lows);
+    const rawMax = Math.max(...highs);
+    const span = Math.max(0.0005, rawMax - rawMin);
+    const minP = rawMin - span * 0.14;
+    const maxP = rawMax + span * 0.14;
+
+    const mapY = (price: number) =>
+      padT + ((maxP - price) / Math.max(0.0001, maxP - minP)) * plotH;
+
+    const count = cs.candles.length;
+    const slotW = plotW / count;
+    const bodyW = Math.min(34, Math.max(18, slotW * 0.38));
+
+    return (
+      <div className="space-y-3">
+        <svg
+          viewBox={`0 0 ${svgW} ${svgH}`}
+          className="h-auto w-full select-none"
+          role="img"
+          aria-label={spec.title}
+        >
+          {/* Horizontal price gridlines */}
+          {[0, 0.25, 0.5, 0.75, 1].map((t, idx) => {
+            const y = padT + plotH * (1 - t);
+            const price = minP + (maxP - minP) * t;
+            return (
+              <g key={`cgrid-${idx}`}>
+                <line
+                  x1={padL}
+                  y1={y}
+                  x2={padL + plotW}
+                  y2={y}
+                  className="stroke-slate-200 dark:stroke-slate-800"
+                  strokeWidth="1"
+                />
+                <text
+                  x={padL - 8}
+                  y={y + 3}
+                  textAnchor="end"
+                  className="fill-slate-500 font-mono text-[9.5px] dark:fill-slate-400"
+                >
+                  {price.toFixed(4)}
+                </text>
+              </g>
+            );
+          })}
+
+          {/* Resistance level */}
+          {typeof cs.resistanceLevel === 'number' && (
+            <g>
+              <line
+                x1={padL}
+                y1={mapY(cs.resistanceLevel)}
+                x2={padL + plotW}
+                y2={mapY(cs.resistanceLevel)}
+                stroke="#D97706"
+                strokeWidth="1.6"
+                strokeDasharray="6 4"
+              />
+              <text
+                x={padL + plotW - 4}
+                y={mapY(cs.resistanceLevel) - 6}
+                textAnchor="end"
+                className="fill-amber-700 text-[10px] font-semibold dark:fill-amber-300"
+              >
+                {cs.resistanceLabel || 'Resistance Level'}
+              </text>
+            </g>
+          )}
+
+          {/* Support level */}
+          {typeof cs.supportLevel === 'number' && (
+            <g>
+              <line
+                x1={padL}
+                y1={mapY(cs.supportLevel)}
+                x2={padL + plotW}
+                y2={mapY(cs.supportLevel)}
+                stroke="#0284C7"
+                strokeWidth="1.6"
+                strokeDasharray="6 4"
+              />
+              <text
+                x={padL + plotW - 4}
+                y={mapY(cs.supportLevel) + 14}
+                textAnchor="end"
+                className="fill-sky-700 text-[10px] font-semibold dark:fill-sky-300"
+              >
+                {cs.supportLabel || 'Support Level'}
+              </text>
+            </g>
+          )}
+
+          {/* Axes */}
+          <line
+            x1={padL}
+            y1={padT}
+            x2={padL}
+            y2={padT + plotH}
+            className="stroke-slate-400 dark:stroke-slate-500"
+            strokeWidth="1.5"
+          />
+          <line
+            x1={padL}
+            y1={padT + plotH}
+            x2={padL + plotW}
+            y2={padT + plotH}
+            className="stroke-slate-400 dark:stroke-slate-500"
+            strokeWidth="1.5"
+          />
+
+          {/* Candlesticks */}
+          {cs.candles.map((c, idx) => {
+            const cx = padL + slotW * (idx + 0.5);
+            const yHigh = mapY(c.high);
+            const yLow = mapY(c.low);
+            const yOpen = mapY(c.open);
+            const yClose = mapY(c.close);
+            const isDoji = Math.abs(c.close - c.open) < span * 0.04;
+            const isBullish = c.close >= c.open;
+            const topBody = Math.min(yOpen, yClose);
+            const rawBodyH = Math.abs(yClose - yOpen);
+            const bodyH = isDoji ? 3 : Math.max(6, rawBodyH);
+
+            const wickColor = isDoji ? '#0284C7' : isBullish ? '#059669' : '#DC2626';
+            const bodyFill = isDoji ? '#0284C7' : isBullish ? '#10B981' : '#EF4444';
+
+            return (
+              <g key={`candle-${idx}`}>
+                {/* Upper & lower shadow (wick) */}
+                <line
+                  x1={cx}
+                  y1={yHigh}
+                  x2={cx}
+                  y2={yLow}
+                  stroke={wickColor}
+                  strokeWidth="2.2"
+                  strokeLinecap="round"
+                />
+                {/* Real body */}
+                <rect
+                  x={cx - bodyW / 2}
+                  y={isDoji ? yOpen - 1.5 : topBody}
+                  width={bodyW}
+                  height={bodyH}
+                  rx={3}
+                  fill={bodyFill}
+                  stroke={wickColor}
+                  strokeWidth="1.4"
+                />
+                {/* X-axis bar label */}
+                <text
+                  x={cx}
+                  y={padT + plotH + 17}
+                  textAnchor="middle"
+                  className="fill-slate-700 font-mono text-[10.5px] font-semibold dark:fill-slate-200"
+                >
+                  {c.label}
+                </text>
+              </g>
+            );
+          })}
+
+          {cs.timeframeLabel && (
+            <text
+              x={padL + plotW / 2}
+              y={svgH - 7}
+              textAnchor="middle"
+              className="fill-slate-500 text-[10px] font-medium dark:fill-slate-400"
+            >
+              {cs.timeframeLabel}
+            </text>
+          )}
+        </svg>
+
+        {nodes.length > 0 && (
+          <div className="flex flex-wrap gap-2 px-1 pb-1">
+            {nodes.map((node) => {
+              const isSelected = selectedNodeId === node.id;
+              return (
+                <button
+                  key={node.id}
+                  type="button"
+                  onClick={() => setSelectedNodeId(isSelected ? null : node.id)}
+                  className={`rounded-lg border px-2.5 py-1.5 text-left text-xs transition-colors ${
+                    isSelected
+                      ? 'border-blue-600 bg-blue-50 text-blue-900 dark:border-sky-400 dark:bg-sky-950/60 dark:text-sky-100'
+                      : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-200 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  <span className="font-semibold">{node.label}</span>
+                  {node.sublabel && (
+                    <span className="ml-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                      · {node.sublabel}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <figure
       className={`my-3 overflow-hidden rounded-xl border border-slate-200 bg-slate-50/80 dark:border-slate-700/80 dark:bg-slate-900/60 ${
@@ -749,9 +974,11 @@ export const EducationalDiagramRenderer = React.memo(function EducationalDiagram
           ? renderComparisonMatrix()
           : spec.type === 'cartesian_plot'
             ? renderCartesianPlotSvg()
-            : spec.type === 'scientific_system'
-              ? renderScientificSystemSvg()
-              : renderProcessOrConceptSvg()}
+            : spec.type === 'candlestick_chart'
+              ? renderCandlestickChartSvg()
+              : spec.type === 'scientific_system'
+                ? renderScientificSystemSvg()
+                : renderProcessOrConceptSvg()}
       </div>
 
       {spec.type === 'cartesian_plot' && (spec.series?.length ?? 0) > 1 && (

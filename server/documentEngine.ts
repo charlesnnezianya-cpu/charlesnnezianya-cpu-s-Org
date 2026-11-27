@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { formatScientificText } from '../src/lib/scientificFormatter.ts';
-import type { FormulaVariableNote } from '../src/types/brainstine.ts';
+import type { ExtractedDocumentSection, FormulaVariableNote } from '../src/types/brainstine.ts';
 
 export interface DocumentChunk {
   documentId: string;
@@ -315,6 +315,97 @@ export const SUBJECT_LEXICONS: Array<{ subject: string; terms: string[]; peerTer
       'Marginal utility', 'Market equilibrium', 'Fiscal multiplier',
     ],
   },
+  {
+    subject: 'Psychology',
+    terms: [
+      'cognition', 'cognitive', 'memory', 'conditioning', 'reinforcement', 'behaviorism',
+      'perception', 'attention', 'neurotransmitter', 'dopamine', 'serotonin', 'hippocampus',
+      'amygdala', 'synaptic', 'schema', 'heuristics', 'developmental', 'personality',
+    ],
+    peerTerms: [
+      'Operant conditioning', 'Classical conditioning', 'Working memory', 'Long-term potentiation',
+      'Cognitive dissonance', 'Confirmation bias', 'Episodic memory', 'Sensory register',
+    ],
+  },
+  {
+    subject: 'Medicine & Anatomy',
+    terms: [
+      'cardiac', 'ventricle', 'atrium', 'aorta', 'nephron', 'glomerulus', 'alveoli',
+      'hemoglobin', 'pathology', 'etiology', 'diagnosis', 'homeostasis', 'hormone',
+      'endocrine', 'immune', 'antibody', 'antigen', 'inflammation', 'vascular', 'artery',
+    ],
+    peerTerms: [
+      'Stroke volume', 'Cardiac output', 'Glomerular filtration', 'Adaptive immunity',
+      'Negative feedback', 'Baroreceptor reflex', 'Gas exchange', 'Renin-angiotensin system',
+    ],
+  },
+  {
+    subject: 'History & Governance',
+    terms: [
+      'sovereignty', 'constitution', 'empire', 'revolution', 'treaty', 'democracy',
+      'parliament', 'federalism', 'republic', 'legislation', 'colonial', 'industrialization',
+      'feudalism', 'renaissance', 'diplomacy', 'statute', 'jurisdiction', 'amendment',
+    ],
+    peerTerms: [
+      'Separation of powers', 'Constitutional monarchy', 'Social contract', 'Judicial review',
+      'Balance of power', 'Mercantilism', 'Popular sovereignty', 'Federal republic',
+    ],
+  },
+  {
+    subject: 'Accounting & Finance',
+    terms: [
+      'liability', 'equity', 'asset', 'depreciation', 'amortization', 'dividend',
+      'revenue', 'solvency', 'liquidity', 'valuation', 'balance sheet', 'cash flow',
+      'compound interest', 'portfolio', 'arbitrage', 'bond', 'yield', 'accrual',
+    ],
+    peerTerms: [
+      'Present value', 'Working capital', 'Return on equity', 'Debt-to-equity ratio',
+      'Accrual accounting', 'Systematic risk', 'Weighted average cost of capital', 'Operating margin',
+    ],
+  },
+  {
+    subject: 'Financial Markets & Forex Trading',
+    terms: [
+      'forex', 'foreign exchange', 'currency pair', 'candlestick', 'candlesticks',
+      'ohlc', 'pip', 'pips', 'bid', 'ask', 'spread', 'leverage', 'lot size',
+      'stop loss', 'take profit', 'price action', 'chart pattern', 'trendline',
+      'moving average', 'ema', 'sma', 'rsi', 'macd', 'bollinger', 'fibonacci',
+      'retracement', 'breakout', 'doji', 'engulfing', 'pin bar', 'hammer',
+      'shooting star', 'head and shoulders', 'double top', 'double bottom',
+      'bullish', 'bearish', 'exchange rate', 'base currency', 'quote currency',
+      'timeframe', 'swing trading', 'scalping', 'day trading', 'order block',
+      'support and resistance', 'eur/usd', 'gbp/usd', 'usd/jpy', 'margin call',
+      'technical analysis', 'fundamental analysis', 'wick', 'shadow',
+    ],
+    peerTerms: [
+      'Support and resistance', 'Candlestick anatomy', 'Risk-to-reward ratio',
+      'Moving average crossover', 'Trendline breakout', 'Fibonacci retracement',
+      'Base and quote currency', 'Stop-loss placement',
+    ],
+  },
+  {
+    subject: 'Law & Legal Studies',
+    terms: [
+      'tort', 'contract', 'plaintiff', 'defendant', 'jurisdiction', 'precedent',
+      'stare decisis', 'negligence', 'liability', 'indictment', 'verdict',
+      'statute', 'injunction', 'consideration', 'fiduciary', 'appellate',
+    ],
+    peerTerms: [
+      'Breach of duty', 'Strict liability', 'Judicial precedent', 'Consideration in contracts',
+      'Due process', 'Statutory interpretation',
+    ],
+  },
+  {
+    subject: 'Engineering & Applied Systems',
+    terms: [
+      'structural load', 'beam', 'stress', 'strain', 'shear', 'bending moment',
+      'control system', 'feedback loop', 'pid controller', 'signal processing',
+      'thermodynamic cycle', 'fluid mechanics', 'bernoulli', 'reynolds number',
+    ],
+    peerTerms: [
+      'Shear force diagram', 'Stress-strain curve', 'PID control', 'Laminar flow',
+    ],
+  },
 ];
 
 // ============================================================================
@@ -579,7 +670,9 @@ export function chunkDocumentText(
   const normalized = normalizeText(extractedText);
   if (!normalized) return [];
 
-  const normalizedMarkers = normalized.replace(/(^|\n)Page\s+(\d+)\s*:\s*/gi, '$1[Page $2]\n');
+  const normalizedMarkers = normalized
+    .replace(/(^|\n)(?:[-=]{2,})\s*(?:Pages?|Slide)\s+(\d+)\s*(?:[-=]{2,})[ \t]*/gi, '$1[Page $2]\n')
+    .replace(/(^|\n)Page\s+(\d+)\s*:\s*/gi, '$1[Page $2]\n');
   const pageSegments = normalizedMarkers.split(/(?=\[Page\s+\d+\])/i);
   const chunks: DocumentChunk[] = [];
   let chunkPosition = 0;
@@ -982,6 +1075,14 @@ export function retrieveRelevantPassages(
 // STRUCTURED ACADEMIC DOCUMENT INTELLIGENCE HELPERS (SHARED BY ALL ENGINES)
 // ============================================================================
 
+const AMBIGUOUS_DOMAIN_TERMS = new Set([
+  'resistance', 'momentum', 'potential', 'power', 'current', 'wave',
+  'base', 'acid', 'cell', 'heart', 'market', 'bond', 'work', 'energy',
+  'trend', 'volume', 'frequency', 'margin', 'rate', 'order', 'action',
+  'level', 'range', 'ratio', 'yield', 'equity', 'capital', 'circulation',
+  'hammer', 'shadow', 'liquidity', 'investment', 'interest',
+]);
+
 export function inferSubjectArea(
   title: string,
   text: string,
@@ -992,26 +1093,40 @@ export function inferSubjectArea(
     return cleanRequested;
   }
 
-  const combined = `${title} ${text}`.toLowerCase();
+  const lowerTitle = (title || '').toLowerCase();
+  const combined = `${lowerTitle} ${text}`.toLowerCase();
   let bestSubject = cleanRequested || 'General Studies';
   let bestScore = 0;
 
   for (const entry of SUBJECT_LEXICONS) {
     let score = 0;
+    let unambiguousHits = 0;
     for (const term of entry.terms) {
-      const regex = new RegExp(`\\b${term}\\b`, 'g');
+      const escaped = escapeRegExp(term);
+      const regex = new RegExp(`\\b${escaped}\\b`, 'g');
       const matches = combined.match(regex);
-      if (matches) {
-        score += Math.min(3, matches.length);
+      if (!matches) continue;
+
+      const isMultiWord = term.includes(' ') || term.includes('/');
+      const isAmbiguous = !isMultiWord && AMBIGUOUS_DOMAIN_TERMS.has(term);
+      const titleHit = new RegExp(`\\b${escaped}\\b`).test(lowerTitle);
+
+      if (isAmbiguous) {
+        score += Math.min(1.4, matches.length * 0.7);
+      } else {
+        unambiguousHits += 1;
+        const unitWeight = isMultiWord ? 2.4 : 1.4;
+        score += Math.min(4.5, matches.length * unitWeight) + (titleHit ? 3 : 0);
       }
     }
-    if (score > bestScore) {
+
+    if ((unambiguousHits >= 1 || score >= 5) && score > bestScore) {
       bestScore = score;
       bestSubject = entry.subject;
     }
   }
 
-  return bestScore >= 3 ? bestSubject : cleanRequested || 'General Studies';
+  return bestScore >= 3.5 ? bestSubject : cleanRequested || 'General Studies';
 }
 
 export function getSubjectPeerTerms(subjectArea: string): string[] {
@@ -1110,7 +1225,7 @@ export function stripBoilerplatePrefix(text: string): string {
 export function isMetaFillerSentence(text: string): boolean {
   const lower = text.toLowerCase().trim();
   if (
-    /^(?:this (?:document|chapter|section|lecture|guide|paper|text) (?:discusses|covers|introduces|explains|presents|outlines|focuses on)|in this (?:chapter|section|lesson|unit|module),?\s+we\s+(?:will|shall)?\s*(?:learn|explore|study|cover|discuss)|welcome to|read the following|see figure|refer to table|table of contents|page \d+ of \d+|all rights reserved|copyright)/i.test(
+    /^(?:this (?:document|chapter|section|lecture|guide|paper|text|module|unit) (?:discusses|covers|introduces|explains|presents|outlines|focuses on)|in this (?:chapter|section|lesson|unit|module|lecture),?\s+(?:we\s+(?:will|shall)?|you\s+will)?\s*(?:learn|explore|study|cover|discuss|examine)|by the end of this (?:chapter|section|lesson|unit|module|lecture),?\s+(?:you|students)\s+(?:will|should)|learning objectives?\s*:|course\s+(?:code|title|syllabus|outline)\s*:|instructor\s*:|lecturer\s*:|professor\s*:|office hours?\s*:|recommended reading\s*:|bibliography\s*:|welcome to|read the following|see figure|refer to (?:table|figure)|table of contents|page \d+ of \d+|all rights reserved|copyright|isbn\s*[:\d-]|doi\s*:)/i.test(
       lower
     )
   ) {
@@ -1264,7 +1379,9 @@ interface ParsedPageSegment {
 }
 
 function splitPagesPreservingMarkers(normalized: string): ParsedPageSegment[] {
-  const normalizedMarkers = normalized.replace(/(^|\n)Page\s+(\d+)\s*:\s*/gi, '$1[Page $2]\n');
+  const normalizedMarkers = normalized
+    .replace(/(^|\n)(?:[-=]{2,})\s*(?:Pages?|Slide)\s+(\d+)\s*(?:[-=]{2,})[ \t]*/gi, '$1[Page $2]\n')
+    .replace(/(^|\n)Page\s+(\d+)\s*:\s*/gi, '$1[Page $2]\n');
 
   if (!/\[Page\s+\d+\]/i.test(normalizedMarkers)) {
     return [{ pageNumber: null, text: normalizedMarkers }];
@@ -3136,3 +3253,131 @@ export function buildStructuredRagIntelligence(
 export function buildSectionClusterHeading(units: AnalyzedUnit[], fallbackIdx: number): string {
   return buildClusterHeading(units, fallbackIdx);
 }
+
+/**
+ * Extracts ordered, user-selectable document sections cleanly from any extracted
+ * document text so users can choose exact chapters, headings, or topical segments
+ * inside the Document Summarizer modal before generating a summary.
+ */
+export function buildExtractedDocumentSections(
+  extractedText: string,
+  options?: { title?: string; subjectArea?: string }
+): {
+  contentHash: string;
+  detectedSubject: string;
+  sections: ExtractedDocumentSection[];
+} {
+  const profile = analyzeDocumentIntelligence(extractedText, options);
+
+  interface RawSectionGroup {
+    heading: string;
+    pageNumbers: number[];
+    units: AnalyzedUnit[];
+  }
+
+  const groups: RawSectionGroup[] = [];
+
+  if (profile.sections.length >= 2 || (profile.sections.length === 1 && profile.units.length <= 8)) {
+    for (let i = 0; i < profile.sections.length; i++) {
+      const sec = profile.sections[i];
+      if (sec.units.length === 0) continue;
+      // Split unusually huge single-heading/page sections (> 18 units) into clean parts
+      if (sec.units.length > 18 && profile.sections.length <= 2) {
+        const chunkSize = 7;
+        for (let start = 0; start < sec.units.length; start += chunkSize) {
+          const slice = sec.units.slice(start, start + chunkSize);
+          const partHeading =
+            profile.quality.hasStructuredHeadings
+              ? `${sec.heading}${sec.units.length > chunkSize ? ` (Part ${Math.floor(start / chunkSize) + 1})` : ''}`
+              : buildClusterHeading(slice, groups.length);
+          groups.push({
+            heading: partHeading,
+            pageNumbers: Array.from(
+              new Set(slice.map((u) => u.pageNumber).filter((p): p is number => p !== null))
+            ).sort((a, b) => a - b),
+            units: slice,
+          });
+        }
+      } else {
+        groups.push({
+          heading: sec.heading,
+          pageNumbers: sec.pageNumbers,
+          units: sec.units,
+        });
+      }
+    }
+  } else if (profile.units.length > 0) {
+    const chunkSize = Math.max(4, Math.ceil(profile.units.length / 4));
+    for (let start = 0; start < profile.units.length; start += chunkSize) {
+      const slice = profile.units.slice(start, start + chunkSize);
+      groups.push({
+        heading: buildClusterHeading(slice, groups.length),
+        pageNumbers: Array.from(
+          new Set(slice.map((u) => u.pageNumber).filter((p): p is number => p !== null))
+        ).sort((a, b) => a - b),
+        units: slice,
+      });
+    }
+  }
+
+  const sections: ExtractedDocumentSection[] = groups.map((g, idx) => {
+    const orderedUnits = [...g.units].sort((a, b) => a.orderIndex - b.orderIndex);
+    const bodyLines: string[] = [];
+    let lastPage: number | null = null;
+    let lastSubheading: string | null = null;
+
+    for (const u of orderedUnits) {
+      if (u.pageNumber !== null && u.pageNumber !== lastPage) {
+        bodyLines.push(`[Page ${u.pageNumber}]`);
+        lastPage = u.pageNumber;
+      }
+      if (u.subheading && u.subheading !== lastSubheading) {
+        bodyLines.push(`### ${u.subheading}`);
+        lastSubheading = u.subheading;
+      }
+      bodyLines.push(u.isBullet ? `- ${u.text}` : u.text);
+    }
+
+    const sectionText = `## ${g.heading}\n${bodyLines.join('\n')}`;
+    const wordCount = sectionText.split(/\s+/).filter(Boolean).length;
+    const rawPreview = (orderedUnits[0]?.formattedText || orderedUnits[0]?.text || '')
+      .replace(/\(Pages?\s+\d+[^)]*\)/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const preview =
+      rawPreview.length > 130 ? `${rawPreview.slice(0, 127).trimEnd()}…` : rawPreview;
+
+    return {
+      id: `sec-${profile.contentHash.slice(0, 8)}-${idx}`,
+      index: idx,
+      heading: g.heading,
+      preview: preview || g.heading,
+      wordCount,
+      unitCount: orderedUnits.length,
+      pageNumbers: g.pageNumbers,
+      text: sectionText,
+    };
+  });
+
+  if (sections.length === 0 && profile.normalizedText.trim().length > 0) {
+    const fallbackWordCount = profile.normalizedText.split(/\s+/).filter(Boolean).length;
+    const snippet = profile.normalizedText.replace(/\s+/g, ' ').trim();
+    sections.push({
+      id: `sec-${profile.contentHash.slice(0, 8)}-0`,
+      index: 0,
+      heading: options?.title?.trim() || 'Document Overview',
+      preview: snippet.length > 130 ? `${snippet.slice(0, 127).trimEnd()}…` : snippet,
+      wordCount: fallbackWordCount,
+      unitCount: 1,
+      pageNumbers: [],
+      text: profile.normalizedText,
+    });
+  }
+
+  return {
+    contentHash: profile.contentHash,
+    detectedSubject: profile.subjectArea,
+    sections,
+  };
+}
+

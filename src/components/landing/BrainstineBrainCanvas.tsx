@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
   createBrainstineSceneObjects,
   updateBrainstineAnimation,
@@ -125,34 +126,45 @@ export default function BrainstineBrainCanvas({
     const scene = new THREE.Scene();
     scene.fog = new THREE.FogExp2(0x050914, 0.045);
 
-    const camera = new THREE.PerspectiveCamera(40, width / height, 0.1, 45);
-    camera.position.set(-1.1, 0.35, 2.2);
+    const camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 45);
+    camera.position.set(0, 0.3, 5.15);
 
-    // Studio Neuroscience Lighting Rig provides sufficient illumination
-    scene.environment = null;
+    // Lightweight PMREM RoomEnvironment for crisp clearcoat & metallic platform reflections
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    const roomEnv = new RoomEnvironment();
+    const envRenderTarget = pmremGenerator.fromScene(roomEnv, 0.04);
+    scene.environment = envRenderTarget.texture;
+    scene.environmentIntensity = 0.45;
+    roomEnv.dispose();
+    pmremGenerator.dispose();
 
     // Cinematic Studio Neuroscience Lighting Rig
     const hemiLight = new THREE.HemisphereLight(0x93c5fd, 0x050914, 0.65);
     scene.add(hemiLight);
 
-    const keyLight = new THREE.DirectionalLight(0xeef6ff, 2.65);
+    const keyLight = new THREE.DirectionalLight(0xeef6ff, 2.55);
     keyLight.position.set(3.2, 4.4, 4.2);
     scene.add(keyLight);
 
-    const rimLightCyan = new THREE.DirectionalLight(0x38bdf8, 2.25);
+    const rimLightCyan = new THREE.DirectionalLight(0x38bdf8, 2.35);
     rimLightCyan.position.set(-4.2, 2.0, -3.2);
     scene.add(rimLightCyan);
 
     const fillPointViolet = new THREE.PointLight(0x8b5cf6, 3.6, 14, 1.4);
-    fillPointViolet.position.set(3.0, -2.0, -2.2);
+    fillPointViolet.position.set(3.0, -1.6, -2.2);
     scene.add(fillPointViolet);
 
     const crownGlow = new THREE.PointLight(0x38bdf8, 2.4, 10, 1.5);
-    crownGlow.position.set(-1.2, 2.8, 2.2);
+    crownGlow.position.set(-1.2, 2.9, 2.2);
     scene.add(crownGlow);
 
+    // Upward platform bounce illumination onto the underside of the brain & cerebellum
+    const platformBounceLight = new THREE.PointLight(0x38bdf8, 2.8, 8, 1.4);
+    platformBounceLight.position.set(0, -1.18, 0.22);
+    scene.add(platformBounceLight);
+
     const sceneObjects = createBrainstineSceneObjects(isSoftwareGl);
-    sceneObjects.root.scale.setScalar(phaseRef.current === 'hero' ? 1.04 : 1.12);
+    sceneObjects.root.scale.setScalar(phaseRef.current === 'hero' ? 1.0 : 1.08);
     scene.add(sceneObjects.root);
 
     // Pointer parallax & drag state
@@ -282,8 +294,8 @@ export default function BrainstineBrainCanvas({
       elapsed += delta;
 
       const currentPhase = phaseRef.current;
-      // Keep full brain neatly framed even on narrow portrait mobile containers
-      const portraitDistanceBoost = currentAspect < 0.85 ? 0.75 : currentAspect < 1.05 ? 0.3 : 0;
+      // Keep full brain + orbital rings + pedestal neatly framed even on narrow portrait containers
+      const portraitDistanceBoost = currentAspect < 0.92 ? 1.25 : currentAspect < 1.18 ? 0.85 : 0;
 
       if (currentPhase === 'intro' || currentPhase === 'transitioning') {
         // Dramatic close-up over cortical folds (0s–1.1s) -> majestic pull-back & orbit (1.1s–3.6s)
@@ -319,19 +331,19 @@ export default function BrainstineBrainCanvas({
         );
         sceneObjects.root.scale.setScalar(nextScale);
       } else {
-        // Hero mode: large monumental framing with gentle idle camera drift + pointer/drag responsiveness
-        const idleCamX = Math.sin(elapsed * 0.35) * 0.22;
-        const heroZ = 3.55 + portraitDistanceBoost;
+        // Hero mode: centered monumental framing keeping brain, rings & illuminated platform completely unclipped
+        const idleCamX = Math.sin(elapsed * 0.32) * 0.18;
+        const heroZ = 5.15 + portraitDistanceBoost;
 
         camera.position.x = THREE.MathUtils.damp(camera.position.x, idleCamX, 2.5, delta);
-        camera.position.y = THREE.MathUtils.damp(camera.position.y, 0.16, 2.5, delta);
+        camera.position.y = THREE.MathUtils.damp(camera.position.y, 0.28, 2.5, delta);
         camera.position.z = THREE.MathUtils.damp(camera.position.z, heroZ, 2.5, delta);
 
-        desiredLookTarget.set(0, -0.04, 0);
+        desiredLookTarget.set(0, -0.16, 0);
         lookTarget.lerp(desiredLookTarget, 1 - Math.exp(-3.0 * delta));
         camera.lookAt(lookTarget);
 
-        const nextScale = THREE.MathUtils.damp(sceneObjects.root.scale.x, 1.08, 3.0, delta);
+        const nextScale = THREE.MathUtils.damp(sceneObjects.root.scale.x, 1.02, 3.0, delta);
         sceneObjects.root.scale.setScalar(nextScale);
       }
 
@@ -361,6 +373,7 @@ export default function BrainstineBrainCanvas({
       resizeObserver.disconnect();
 
       sceneObjects.dispose();
+      envRenderTarget.dispose();
       renderer.dispose();
       if (canvas.parentElement === container) {
         container.removeChild(canvas);

@@ -12,6 +12,7 @@ import {
 } from './documentEngine.ts';
 import { formatScientificText, stripUnsupportedDisplaySymbols } from '../src/lib/scientificFormatter.ts';
 import {
+  sanitizeStructuredSummary,
   stripSourceFilenameFromTitle,
   stripSummarySourceAndPageRefs,
 } from '../src/lib/summarySanitizer.ts';
@@ -374,7 +375,9 @@ function buildSectionPointsAndSubsections(
 
   if (!hasSubheadings) {
     return {
-      sourcePoints: ordered.map((u) => stripBoilerplatePrefix(u.formattedText)),
+      sourcePoints: ordered
+        .map((u) => sanitizeSummaryText(stripBoilerplatePrefix(u.formattedText)))
+        .filter(Boolean),
       subsections: [],
     };
   }
@@ -382,7 +385,8 @@ function buildSectionPointsAndSubsections(
   const topPoints: string[] = [];
   const subMap = new Map<string, string[]>();
   for (const u of ordered) {
-    const clean = stripBoilerplatePrefix(u.formattedText);
+    const clean = sanitizeSummaryText(stripBoilerplatePrefix(u.formattedText));
+    if (!clean) continue;
     if (u.subheading) {
       const arr = subMap.get(u.subheading) || [];
       arr.push(clean);
@@ -462,16 +466,36 @@ export function generateExtractiveSummary(
   const dedupedUnits = profile.units;
   const wordCount = profile.quality.wordCount;
 
-  const sanitizeOut = (text: string) =>
-    formatScientificText(sanitizeSummaryText(text));
+  const simplifyForSimpleStyle = (text: string): string => {
+    if (summaryLevel !== 'short') return text;
+    let out = text
+      .replace(/\bis characterized by the fact that\b/gi, 'works because')
+      .replace(/\bhas the capacity to\b/gi, 'can')
+      .replace(/\bexhibits a tendency to\b/gi, 'tends to')
+      .replace(/\bfacilitates the process of\b/gi, 'helps')
+      .replace(/\butilize(?:s|d)?\b/gi, (m) => (m.endsWith('s') ? 'uses' : m.endsWith('d') ? 'used' : 'use'))
+      .replace(/\bsubsequently\b/gi, 'then')
+      .replace(/\bpredominantly\b/gi, 'mainly')
+      .replace(/\bfundamentally\b/gi, 'at its core')
+      .replace(/\bin conjunction with\b/gi, 'together with')
+      .replace(/\bin the event that\b/gi, 'if')
+      .replace(/\bprior to\b/gi, 'before')
+      .replace(/\bwith respect to\b/gi, 'regarding');
+    out = out.replace(/\s{2,}/g, ' ').trim();
+    return out.length > 0 ? out.charAt(0).toUpperCase() + out.slice(1) : out;
+  };
 
+  const sanitizeOut = (text: string) =>
+    simplifyForSimpleStyle(formatScientificText(sanitizeSummaryText(text)));
+
+  const totalSections = Math.max(1, profile.sections.length);
   const limits =
     summaryLevel === 'short'
       ? {
           overview: 2,
-          concepts: 5,
+          concepts: Math.max(5, Math.min(8, totalSections)),
           pointsPerConcept: 2,
-          defs: 4,
+          defs: 5,
           clsGroups: 3,
           charsPerType: 1,
           exPerType: 1,
@@ -492,47 +516,47 @@ export function generateExtractiveSummary(
       : summaryLevel === 'comprehensive'
         ? {
             overview: 3,
-            concepts: 20,
-            pointsPerConcept: 6,
-            defs: 14,
-            clsGroups: 8,
+            concepts: Math.max(24, totalSections + 4),
+            pointsPerConcept: 7,
+            defs: 16,
+            clsGroups: 10,
             charsPerType: 5,
             exPerType: 3,
-            charTopics: 8,
+            charTopics: 10,
             charPoints: 5,
-            procGroups: 6,
-            procSteps: 8,
-            formulas: 10,
-            facts: 8,
-            examples: 8,
-            distinctions: 8,
-            terms: 20,
-            difficult: 4,
-            tables: 3,
-            revision: 6,
-            takeaways: 7,
+            procGroups: 8,
+            procSteps: 10,
+            formulas: 12,
+            facts: 10,
+            examples: 10,
+            distinctions: 10,
+            terms: 24,
+            difficult: 5,
+            tables: 4,
+            revision: 8,
+            takeaways: 8,
           }
         : {
             overview: 2,
-            concepts: 10,
+            concepts: Math.max(12, Math.min(18, totalSections + 2)),
             pointsPerConcept: 4,
-            defs: 8,
-            clsGroups: 5,
+            defs: 9,
+            clsGroups: 6,
             charsPerType: 3,
             exPerType: 2,
-            charTopics: 5,
+            charTopics: 6,
             charPoints: 4,
-            procGroups: 4,
+            procGroups: 5,
             procSteps: 6,
-            formulas: 6,
-            facts: 5,
-            examples: 5,
-            distinctions: 5,
-            terms: 14,
+            formulas: 7,
+            facts: 6,
+            examples: 6,
+            distinctions: 6,
+            terms: 16,
             difficult: 3,
             tables: 2,
             revision: 0,
-            takeaways: 5,
+            takeaways: 6,
           };
 
   const usedPool: Array<{ fp: string; tokens: Set<string> }> = [];
@@ -1055,9 +1079,16 @@ export function generateExtractiveSummary(
     }
   }
 
-  // Comprehensive-only non-redundant cause & formula study checks
+  // Detailed & Comprehensive concept relationships & formula study checks
   const revisionNotes: string[] = [];
   if (limits.revision > 0) {
+    for (const rel of profile.sectionRelationships) {
+      if (revisionNotes.length >= limits.revision) break;
+      const line = sanitizeOut(rel.connectionNote);
+      if (line && !revisionNotes.includes(line)) {
+        revisionNotes.push(line);
+      }
+    }
     for (const ce of profile.causeEffects) {
       if (revisionNotes.length >= limits.revision) break;
       const line = sanitizeOut(`Cause & Effect: ${ce.cause} → ${ce.effect}.`);
@@ -1263,10 +1294,10 @@ export function generateExtractiveSummary(
 
   const { visualAids, visualDiagrams } = evaluateVisualLearningNeeds(baseSummary);
 
-  return {
+  return sanitizeStructuredSummary({
     ...baseSummary,
     visualDiagrams,
     visualAids,
     markdown: buildDocumentSummaryMarkdown(baseSummary),
-  };
+  });
 }

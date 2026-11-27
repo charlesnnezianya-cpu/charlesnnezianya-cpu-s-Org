@@ -478,6 +478,9 @@ export function AiChatWorkspace({
 
     setMessages((prev) => [...prev, tempUserMsg]);
 
+    let latestSources: ChatRetrievedSource[] = [];
+    let latestRagMeta: ChatRagMeta | undefined;
+
     try {
       const accessToken = isSupabaseConfigured ? await getOptionalAccessToken() : null;
       const fallbackLocalMaterials =
@@ -524,6 +527,8 @@ export function AiChatWorkspace({
             ? (payload.sources as ChatRetrievedSource[])
             : [];
           const meta = (payload.ragMeta as ChatRagMeta | undefined) || undefined;
+          latestSources = srcs;
+          latestRagMeta = meta;
           setStreamingRag({ sources: srcs, ragMeta: meta });
         },
         onChunk: (_delta, accumulated) => {
@@ -534,8 +539,10 @@ export function AiChatWorkspace({
       const assistantReply: string = data.reply || '';
       const suggestedTitle: string | undefined = data.suggestedTitle;
       const subjectArea: string | undefined = data.subjectArea;
-      const finalSources: ChatRetrievedSource[] = Array.isArray(data.sources) ? data.sources : [];
-      const finalRagMeta: ChatRagMeta | undefined = data.ragMeta;
+      const finalSources: ChatRetrievedSource[] = Array.isArray(data.sources)
+        ? data.sources
+        : latestSources;
+      const finalRagMeta: ChatRagMeta | undefined = data.ragMeta ?? latestRagMeta;
       setStreamingContent('');
       setStreamingRag(null);
 

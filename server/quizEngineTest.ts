@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { generateGroundedQuizQuestions } from './quizEngine.ts';
+import { buildAssessmentBlueprint, generateGroundedQuizQuestions } from './quizEngine.ts';
 
 function runQuizEngineTests() {
   console.log('[QuizEngine Test Suite] Starting intelligent deterministic quiz & exam verification...');
@@ -27,7 +27,7 @@ Mitochondria generate cellular ATP through oxidative phosphorylation across the 
 Aerobic Respiration Reaction: C6H12O6 + 6O2 -> 6CO2 + 6H2O
 Kinetic Energy: KE = 0.5mv^2, where m is particle mass in kg and v is velocity in m/s.`;
 
-  // 1. Multi-template rich generation + zero generic placeholders + valid topicTag
+  // 1. Multi-template rich generation + zero generic placeholders + clean academic topicTag (never Page N)
   const practiceQuestions = generateGroundedQuizQuestions(multiSectionBioDoc, 10, 'intermediate', {
     assessmentMode: 'practice',
     title: 'Plant Bioenergetics',
@@ -54,8 +54,21 @@ Kinetic Energy: KE = 0.5mv^2, where m is particle mass in kg and v is velocity i
     );
     assert.equal(q.expectedAnswer, q.options[q.correctOptionIndex]);
     assert.ok(
-      typeof q.topicTag === 'string' && /^Page \d+$/.test(q.topicTag),
-      `Expected "Page N" topicTag, got "${q.topicTag}"`
+      typeof q.topicTag === 'string' &&
+        q.topicTag.trim().length >= 3 &&
+        !/\bPage\s+\d+\b/i.test(q.topicTag),
+      `Expected clean academic section topicTag without Page N, got "${q.topicTag}"`
+    );
+    assert.ok(
+      q.cognitiveBand === 'knowledge' ||
+        q.cognitiveBand === 'comprehension' ||
+        q.cognitiveBand === 'application' ||
+        q.cognitiveBand === 'analysis',
+      `Question ${q.number} must specify valid cognitiveBand, got "${q.cognitiveBand}"`
+    );
+    assert.ok(
+      typeof q.questionCategory === 'string' && q.questionCategory.length > 0,
+      `Question ${q.number} must specify questionCategory`
     );
     for (const banned of forbiddenPlaceholders) {
       assert.ok(
@@ -64,22 +77,34 @@ Kinetic Energy: KE = 0.5mv^2, where m is particle mass in kg and v is velocity i
       );
     }
   }
-  console.log('Test 1 [Multi-Template Grounding & Zero Fake Placeholders]: PASS');
+  console.log('Test 1 [Multi-Template Grounding, Clean Topic Tags & Zero Fake Placeholders]: PASS');
 
-  // 2. Exam Mode distributes questions across multiple pages/sections
+  // 2. Exam Mode distributes questions across multiple academic sections & builds blueprint
   const examQuestions = generateGroundedQuizQuestions(multiSectionBioDoc, 6, 'mixed', {
     assessmentMode: 'exam',
     title: 'Bioenergetics Midterm',
   });
   assert.equal(examQuestions.length, 6);
-  const examPages = new Set(examQuestions.map((q) => q.topicTag));
+  const examTopics = new Set(examQuestions.map((q) => q.topicTag));
   assert.ok(
-    examPages.has('Page 1') && examPages.has('Page 2') && examPages.has('Page 3'),
-    `Exam mode must distribute across Page 1, Page 2, and Page 3 (got ${Array.from(examPages).join(', ')})`
+    examTopics.has('Light-Dependent Reactions') &&
+      examTopics.has('The Calvin Cycle') &&
+      examTopics.has('Cellular Respiration & Energetics'),
+    `Exam mode must distribute across Light-Dependent Reactions, The Calvin Cycle, and Cellular Respiration & Energetics (got ${Array.from(examTopics).join(', ')})`
   );
-  console.log('Test 2 [Exam Mode Multi-Section Distribution]: PASS');
+  const blueprint = buildAssessmentBlueprint(examQuestions);
+  assert.equal(blueprint.totalQuestions, 6);
+  assert.ok(blueprint.topics.length >= 3, 'Blueprint should summarize all covered exam sections');
+  assert.equal(
+    blueprint.cognitiveMix.knowledge +
+      blueprint.cognitiveMix.comprehension +
+      blueprint.cognitiveMix.application +
+      blueprint.cognitiveMix.analysis,
+    6
+  );
+  console.log('Test 2 [Exam Mode Multi-Section Distribution & Blueprint]: PASS');
 
-  // 3. Cognitive difficulty differentiation (easy favors recall vs advanced favors application/formulas/distinctions)
+  // 3. Cognitive difficulty differentiation (easy favors recall vs advanced favors application/analysis)
   const easyQuestions = generateGroundedQuizQuestions(multiSectionBioDoc, 5, 'easy', {
     assessmentMode: 'practice',
   });
@@ -91,15 +116,20 @@ Kinetic Energy: KE = 0.5mv^2, where m is particle mass in kg and v is velocity i
     JSON.stringify(advancedQuestions.map((q) => q.question)),
     'Easy and Advanced difficulties should prioritize different cognitive question types'
   );
+  const advancedHigherOrderCount = advancedQuestions.filter(
+    (q) => q.cognitiveBand === 'application' || q.cognitiveBand === 'analysis'
+  ).length;
   assert.ok(
-    advancedQuestions.some(
-      (q) =>
-        q.question.includes('equation') ||
-        q.question.includes('comparison') ||
-        q.question.includes('immediately after') ||
-        q.question.includes('direct effect')
+    advancedHigherOrderCount >= 3,
+    `Advanced difficulty must prioritize application/analysis bands (got ${advancedHigherOrderCount}/5)`
+  );
+  assert.ok(
+    advancedQuestions.some((q) =>
+      /(equation|comparison|immediately after|direct consequence|factor of four|doubles|non-functional|blocked|EXCEPT|most directly responsible)/i.test(
+        q.question
+      )
     ),
-    'Advanced difficulty should emphasize application, formula, sequence, or distinction questions'
+    'Advanced difficulty should emphasize application, quantitative reasoning, sequence, scenario, or distinction questions'
   );
   console.log('Test 3 [Cognitive Difficulty Calibration (Easy vs Advanced)]: PASS');
 

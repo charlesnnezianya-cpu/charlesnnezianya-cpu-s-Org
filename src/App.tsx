@@ -7,6 +7,45 @@ import { DashboardLayout } from './components/DashboardLayout';
 import { PrivacyPolicyPage } from './components/PrivacyPolicyPage';
 import { WelcomePage } from './components/WelcomePage';
 
+import type { DashboardSection } from './types/brainstine';
+
+const PENDING_SECTION_KEY = 'brainstine-pending-section';
+const VALID_SECTIONS: ReadonlySet<DashboardSection> = new Set([
+  'overview',
+  'history',
+  'summarizer',
+  'chat',
+  'tutor',
+  'quizzes',
+  'summaries',
+  'materials',
+  'settings',
+]);
+
+function readPendingSection(): DashboardSection | null {
+  try {
+    const raw = window.sessionStorage?.getItem(PENDING_SECTION_KEY);
+    if (raw && VALID_SECTIONS.has(raw as DashboardSection)) {
+      return raw as DashboardSection;
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return null;
+}
+
+function writePendingSection(section: DashboardSection | null): void {
+  try {
+    if (section) {
+      window.sessionStorage?.setItem(PENDING_SECTION_KEY, section);
+    } else {
+      window.sessionStorage?.removeItem(PENDING_SECTION_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
 function normalizePath(rawPath: string): string {
   const cleaned = rawPath.replace(/\/+$/, '');
   return cleaned === '' ? '/' : cleaned;
@@ -41,6 +80,9 @@ function BrainstineRoot() {
   const { setTheme } = useTheme();
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authMode, setAuthMode] = useState<AuthModalMode>('signin');
+  const [pendingSection, setPendingSection] = useState<DashboardSection | null>(() =>
+    readPendingSection()
+  );
   const [pathname, setPathname] = useState<string>(() => normalizePath(window.location.pathname));
   const syncedThemeUserRef = useRef<string | null>(null);
 
@@ -99,10 +141,25 @@ function BrainstineRoot() {
     }
   }, [oauthError, user]);
 
-  const handleOpenAuth = (mode: AuthModalMode) => {
-    setAuthMode(mode);
-    setAuthModalOpen(true);
-  };
+  const handleOpenAuth = useCallback(
+    (mode: AuthModalMode, targetSection?: DashboardSection) => {
+      if (targetSection && VALID_SECTIONS.has(targetSection)) {
+        setPendingSection(targetSection);
+        writePendingSection(targetSection);
+      } else {
+        setPendingSection(null);
+        writePendingSection(null);
+      }
+      setAuthMode(mode);
+      setAuthModalOpen(true);
+    },
+    []
+  );
+
+  const handleConsumePendingSection = useCallback(() => {
+    setPendingSection(null);
+    writePendingSection(null);
+  }, []);
 
   // Public /privacy route is immediately accessible with zero authentication gate or delay
   if (isPrivacyRoute) {
@@ -110,7 +167,7 @@ function BrainstineRoot() {
       <>
         <PrivacyPolicyPage
           onNavigateHome={() => navigateToPath('/')}
-          onOpenAuth={handleOpenAuth}
+          onOpenAuth={(mode) => handleOpenAuth(mode)}
           isSignedIn={Boolean(user)}
         />
         <AuthModal
@@ -139,7 +196,10 @@ function BrainstineRoot() {
   return (
     <>
       {user && !isPasswordRecovery ? (
-        <DashboardLayout />
+        <DashboardLayout
+          initialSection={pendingSection}
+          onConsumeInitialSection={handleConsumePendingSection}
+        />
       ) : (
         <WelcomePage
           onOpenAuth={handleOpenAuth}

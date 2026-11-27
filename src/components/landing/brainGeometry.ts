@@ -19,9 +19,17 @@ export interface BrainstineSceneObjects {
   root: THREE.Group;
   brainGroup: THREE.Group;
   orbitalGroup: THREE.Group;
+  platformGroup: THREE.Group;
   primaryOrbitRing: THREE.Mesh;
   secondaryOrbitRing: THREE.Mesh;
+  tertiaryOrbitRing: THREE.Mesh;
   orbitSparkA: THREE.Mesh;
+  orbitSparkAStrobe: THREE.Sprite;
+  orbitSparkB: THREE.Mesh;
+  orbitSparkBStrobe: THREE.Sprite;
+  platformInnerRing: THREE.Mesh;
+  platformOuterArc: THREE.Mesh;
+  lightBeamUniforms: Array<{ value: number }>;
   particlesNear: THREE.Points;
   particlesFar: THREE.Points;
   synapticPulses: SynapticPulse[];
@@ -102,12 +110,12 @@ function projectToCortex(
 ): { x: number; y: number; z: number; foldValue: number; lateralFactor: number } {
   const s = nx * side; // -1 = medial midline wall, +1 = lateral outer cortex
 
-  // Continuous C1 mapping from flattened interhemispheric medial face to rounded outer cortex
+  // Continuous C1 mapping from close interhemispheric medial face to rounded outer cortex
   let radialWidth: number;
   if (s <= 0) {
-    radialWidth = 0.044 + 0.036 * Math.pow(1 + s, 2);
+    radialWidth = 0.018 + 0.032 * Math.pow(1 + s, 2);
   } else {
-    radialWidth = 0.08 + 0.77 * s * (1.14 - 0.24 * s);
+    radialWidth = 0.05 + 0.80 * s * (1.14 - 0.24 * s);
   }
   const lateralFactor = smoothstep(-0.08, 0.55, s);
 
@@ -191,9 +199,9 @@ function buildCorticalHemisphereGeometry(
   const pos = geo.attributes.position;
   const colors = new Float32Array(pos.count * 3);
 
-  const deepSulcusColor = new THREE.Color(side < 0 ? 0x0b1c47 : 0x15154a);
-  const midCortexColor = new THREE.Color(side < 0 ? 0x3b82f6 : 0x6366f1);
-  const gyrusCrestColor = new THREE.Color(side < 0 ? 0xdbeafe : 0xe0f2fe);
+  const deepSulcusColor = new THREE.Color(side < 0 ? 0x050f2c : 0x0b0d36);
+  const midCortexColor = new THREE.Color(side < 0 ? 0x2563eb : 0x4f46e5);
+  const gyrusCrestColor = new THREE.Color(side < 0 ? 0xbae6fd : 0xc7d2fe);
   const tmpColor = new THREE.Color();
   const v = new THREE.Vector3();
 
@@ -361,11 +369,19 @@ export function createBrainstineSceneObjects(isSoftwareGl: boolean): BrainstineS
 
   const root = new THREE.Group();
   const brainGroup = new THREE.Group();
+  brainGroup.position.y = 0.28;
+  brainGroup.rotation.y = 0.72;
+  brainGroup.rotation.x = 0.08;
   const orbitalGroup = new THREE.Group();
+  orbitalGroup.position.y = 0.25;
+  const platformGroup = new THREE.Group();
+  platformGroup.position.y = -1.28;
+  root.add(platformGroup);
   root.add(brainGroup);
   root.add(orbitalGroup);
 
   const cortexShaderUniforms: Array<{ value: number }> = [];
+  const lightBeamUniforms: Array<{ value: number }> = [];
 
   // Realistic Neuroscience Translucent Glass-Porcelain Cortex Materials
   const leftCortexMat = trackMat(
@@ -388,8 +404,8 @@ export function createBrainstineSceneObjects(isSoftwareGl: boolean): BrainstineS
       sheen: 0.55,
       sheenRoughness: 0.35,
       sheenColor: new THREE.Color(0x38bdf8),
-      emissive: new THREE.Color(0x091a42),
-      emissiveIntensity: 0.3,
+      emissive: new THREE.Color(0x061233),
+      emissiveIntensity: 0.18,
     })
   );
 
@@ -401,7 +417,7 @@ export function createBrainstineSceneObjects(isSoftwareGl: boolean): BrainstineS
       roughness: isSoftwareGl ? 0.24 : 0.17,
       transmission: isSoftwareGl ? 0 : 0.26,
       transparent: true,
-      opacity: isSoftwareGl ? 0.9 : 0.96,
+      opacity: isSoftwareGl ? 0.94 : 0.97,
       ior: 1.48,
       thickness: isSoftwareGl ? 0 : 0.7,
       attenuationColor: new THREE.Color(0x6d28d9),
@@ -413,8 +429,8 @@ export function createBrainstineSceneObjects(isSoftwareGl: boolean): BrainstineS
       sheen: 0.6,
       sheenRoughness: 0.32,
       sheenColor: new THREE.Color(0x8b5cf6),
-      emissive: new THREE.Color(0x0f1646),
-      emissiveIntensity: 0.32,
+      emissive: new THREE.Color(0x0b0f3a),
+      emissiveIntensity: 0.2,
     })
   );
 
@@ -511,15 +527,15 @@ export function createBrainstineSceneObjects(isSoftwareGl: boolean): BrainstineS
     new THREE.Vector3(0, 0.16, -0.44),
     new THREE.Vector3(0, -0.12, -0.56),
   ]);
-  const callosumGeo = trackGeo(new THREE.TubeGeometry(callosumCurve, 40, 0.045, 12, false));
+  const callosumGeo = trackGeo(new THREE.TubeGeometry(callosumCurve, 40, 0.024, 12, false));
   const callosumMat = trackMat(
     new THREE.MeshStandardMaterial({
-      color: 0x38bdf8,
+      color: 0x1e40af,
       emissive: 0x38bdf8,
-      emissiveIntensity: 1.05,
-      roughness: 0.2,
+      emissiveIntensity: 0.55,
+      roughness: 0.25,
       transparent: true,
-      opacity: 0.82,
+      opacity: 0.6,
     })
   );
   brainGroup.add(new THREE.Mesh(callosumGeo, callosumMat));
@@ -756,52 +772,269 @@ export function createBrainstineSceneObjects(isSoftwareGl: boolean): BrainstineS
     });
   });
 
-  // Subtle Tilted (-24 deg) Brainstine Orbital Light Framing (kept delicate so Brain stays star)
-  orbitalGroup.rotation.z = THREE.MathUtils.degToRad(-24);
-  orbitalGroup.rotation.x = THREE.MathUtils.degToRad(12);
+  // Continuously Rotating Glowing Orbital Rings & Dual Insight Sparks
+  orbitalGroup.rotation.z = THREE.MathUtils.degToRad(-22);
+  orbitalGroup.rotation.x = THREE.MathUtils.degToRad(14);
 
-  const primaryOrbitGeo = trackGeo(new THREE.TorusGeometry(1.92, 0.0065, 12, 160));
+  const primaryOrbitGeo = trackGeo(new THREE.TorusGeometry(1.88, 0.008, 12, 160));
   const primaryOrbitMat = trackMat(
     new THREE.MeshStandardMaterial({
       color: 0x7dd3fc,
       emissive: 0x38bdf8,
-      emissiveIntensity: 1.0,
-      roughness: 0.25,
+      emissiveIntensity: 1.25,
+      roughness: 0.2,
       transparent: true,
-      opacity: 0.44,
+      opacity: 0.58,
     })
   );
   const primaryOrbitRing = new THREE.Mesh(primaryOrbitGeo, primaryOrbitMat);
   primaryOrbitRing.rotation.x = Math.PI / 2;
   orbitalGroup.add(primaryOrbitRing);
 
-  const secondaryOrbitGeo = trackGeo(new THREE.TorusGeometry(2.15, 0.0045, 10, 144));
+  const secondaryOrbitGeo = trackGeo(new THREE.TorusGeometry(2.14, 0.006, 10, 144));
   const secondaryOrbitMat = trackMat(
     new THREE.MeshStandardMaterial({
       color: 0xc4b5fd,
-      emissive: 0x7c3aed,
-      emissiveIntensity: 0.85,
-      roughness: 0.3,
+      emissive: 0x8b5cf6,
+      emissiveIntensity: 1.15,
+      roughness: 0.24,
       transparent: true,
-      opacity: 0.28,
+      opacity: 0.44,
     })
   );
   const secondaryOrbitRing = new THREE.Mesh(secondaryOrbitGeo, secondaryOrbitMat);
-  secondaryOrbitRing.rotation.x = Math.PI / 2 + 0.34;
-  secondaryOrbitRing.rotation.y = 0.45;
+  secondaryOrbitRing.rotation.x = Math.PI / 2 + 0.38;
+  secondaryOrbitRing.rotation.y = 0.46;
   orbitalGroup.add(secondaryOrbitRing);
 
-  const sparkGeoA = trackGeo(new THREE.OctahedronGeometry(0.042, 0));
+  const tertiaryOrbitGeo = trackGeo(new THREE.TorusGeometry(1.64, 0.0045, 10, 132));
+  const tertiaryOrbitMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x93c5fd,
+      emissive: 0x60a5fa,
+      emissiveIntensity: 0.95,
+      roughness: 0.26,
+      transparent: true,
+      opacity: 0.32,
+    })
+  );
+  const tertiaryOrbitRing = new THREE.Mesh(tertiaryOrbitGeo, tertiaryOrbitMat);
+  tertiaryOrbitRing.rotation.x = Math.PI / 2 - 0.36;
+  tertiaryOrbitRing.rotation.y = -0.52;
+  orbitalGroup.add(tertiaryOrbitRing);
+
+  const sparkGeoA = trackGeo(new THREE.OctahedronGeometry(0.044, 0));
   const sparkMatA = trackMat(
     new THREE.MeshStandardMaterial({
       color: 0xe0f2fe,
       emissive: 0x38bdf8,
-      emissiveIntensity: 1.8,
+      emissiveIntensity: 1.9,
       roughness: 0.1,
     })
   );
   const orbitSparkA = new THREE.Mesh(sparkGeoA, sparkMatA);
-  orbitalGroup.add(orbitSparkA);
+  const sparkHaloMatA = trackMat(
+    new THREE.SpriteMaterial({
+      map: glowSpriteTex,
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.85,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    })
+  );
+  const orbitSparkAStrobe = new THREE.Sprite(sparkHaloMatA);
+  orbitSparkAStrobe.scale.setScalar(0.32);
+  orbitalGroup.add(orbitSparkA, orbitSparkAStrobe);
+
+  const sparkGeoB = trackGeo(new THREE.OctahedronGeometry(0.036, 0));
+  const sparkMatB = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xf3e8ff,
+      emissive: 0xa855f7,
+      emissiveIntensity: 1.85,
+      roughness: 0.1,
+    })
+  );
+  const orbitSparkB = new THREE.Mesh(sparkGeoB, sparkMatB);
+  const sparkHaloMatB = trackMat(
+    new THREE.SpriteMaterial({
+      map: glowSpriteTex,
+      color: 0xa855f7,
+      transparent: true,
+      opacity: 0.82,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    })
+  );
+  const orbitSparkBStrobe = new THREE.Sprite(sparkHaloMatB);
+  orbitSparkBStrobe.scale.setScalar(0.28);
+  orbitalGroup.add(orbitSparkB, orbitSparkBStrobe);
+
+  // Futuristic Illuminated Circular Platform Underneath + Soft Upward Volumetric Light Rays
+  const platformBodyGeo = trackGeo(new THREE.CylinderGeometry(1.22, 1.44, 0.14, 64));
+  const platformBodyMat = trackMat(
+    new THREE.MeshPhysicalMaterial({
+      color: 0x091638,
+      metalness: 0.72,
+      roughness: 0.24,
+      clearcoat: 0.75,
+      clearcoatRoughness: 0.15,
+      emissive: 0x081336,
+      emissiveIntensity: 0.45,
+    })
+  );
+  const platformBody = new THREE.Mesh(platformBodyGeo, platformBodyMat);
+  platformBody.position.y = -0.09;
+  platformGroup.add(platformBody);
+
+  const platformTopRingGeo = trackGeo(new THREE.TorusGeometry(1.22, 0.014, 14, 128));
+  const platformTopRingMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xbae6fd,
+      emissive: 0x38bdf8,
+      emissiveIntensity: 1.35,
+      roughness: 0.18,
+      metalness: 0.3,
+    })
+  );
+  const platformTopRing = new THREE.Mesh(platformTopRingGeo, platformTopRingMat);
+  platformTopRing.rotation.x = Math.PI / 2;
+  platformTopRing.position.y = -0.02;
+  platformGroup.add(platformTopRing);
+
+  const platformInnerRingGeo = trackGeo(new THREE.RingGeometry(0.74, 0.81, 72));
+  const platformInnerRingMat = trackMat(
+    new THREE.MeshBasicMaterial({
+      color: 0x7dd3fc,
+      transparent: true,
+      opacity: 0.68,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  );
+  const platformInnerRing = new THREE.Mesh(platformInnerRingGeo, platformInnerRingMat);
+  platformInnerRing.rotation.x = -Math.PI / 2;
+  platformInnerRing.position.y = -0.012;
+  platformGroup.add(platformInnerRing);
+
+  const platformOuterArcGeo = trackGeo(new THREE.RingGeometry(1.42, 1.47, 72, 1, 0, Math.PI * 1.45));
+  const platformOuterArcMat = trackMat(
+    new THREE.MeshBasicMaterial({
+      color: 0xa78bfa,
+      transparent: true,
+      opacity: 0.56,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  );
+  const platformOuterArc = new THREE.Mesh(platformOuterArcGeo, platformOuterArcMat);
+  platformOuterArc.rotation.x = -Math.PI / 2;
+  platformOuterArc.position.y = -0.025;
+  platformGroup.add(platformOuterArc);
+
+  const emitterDiscGeo = trackGeo(new THREE.CircleGeometry(1.16, 64));
+  const emitterDiscMat = trackMat(
+    new THREE.MeshBasicMaterial({
+      map: glowSpriteTex,
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.72,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  );
+  const emitterDisc = new THREE.Mesh(emitterDiscGeo, emitterDiscMat);
+  emitterDisc.rotation.x = -Math.PI / 2;
+  emitterDisc.position.y = -0.01;
+  platformGroup.add(emitterDisc);
+
+  const floorReflectGeo = trackGeo(new THREE.CircleGeometry(2.35, 64));
+  const floorReflectMat = trackMat(
+    new THREE.MeshBasicMaterial({
+      map: glowSpriteTex,
+      color: 0x6366f1,
+      transparent: true,
+      opacity: 0.28,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  );
+  const floorReflect = new THREE.Mesh(floorReflectGeo, floorReflectMat);
+  floorReflect.rotation.x = -Math.PI / 2;
+  floorReflect.position.y = -0.17;
+  platformGroup.add(floorReflect);
+
+  const createVolumetricBeamMaterial = (
+    bottomColor: number,
+    topColor: number,
+    baseOpacity: number,
+    rayFreq: number
+  ) => {
+    const uTime = { value: 0 };
+    lightBeamUniforms.push(uTime);
+    return trackMat(
+      new THREE.ShaderMaterial({
+        uniforms: {
+          uTime,
+          uBottomColor: { value: new THREE.Color(bottomColor) },
+          uTopColor: { value: new THREE.Color(topColor) },
+          uOpacity: { value: baseOpacity },
+          uRayFreq: { value: rayFreq },
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          varying vec3 vNormalView;
+          varying vec3 vViewPos;
+          void main() {
+            vUv = uv;
+            vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+            vViewPos = -mvPos.xyz;
+            vNormalView = normalize(normalMatrix * normal);
+            gl_Position = projectionMatrix * mvPos;
+          }
+        `,
+        fragmentShader: `
+          uniform float uTime;
+          uniform vec3 uBottomColor;
+          uniform vec3 uTopColor;
+          uniform float uOpacity;
+          uniform float uRayFreq;
+          varying vec2 vUv;
+          varying vec3 vNormalView;
+          varying vec3 vViewPos;
+          void main() {
+            float verticalFade = smoothstep(0.0, 0.14, vUv.y) * (1.0 - smoothstep(0.32, 1.0, vUv.y));
+            float angle = vUv.x * 6.2831853;
+            float rays = 0.65 + 0.35 * sin(angle * uRayFreq + uTime * 0.55) * cos(angle * (uRayFreq * 0.5) - uTime * 0.35);
+            vec3 viewDir = normalize(vViewPos);
+            float edgeSoftness = pow(abs(dot(normalize(vNormalView), viewDir)), 0.75);
+            vec3 col = mix(uBottomColor, uTopColor, smoothstep(0.05, 0.85, vUv.y));
+            float alpha = verticalFade * rays * edgeSoftness * uOpacity;
+            gl_FragColor = vec4(col, alpha);
+          }
+        `,
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+      })
+    );
+  };
+
+  const outerBeamGeo = trackGeo(new THREE.CylinderGeometry(1.52, 0.94, 2.35, 48, 1, true));
+  const outerBeamMat = createVolumetricBeamMaterial(0x38bdf8, 0x8b5cf6, 0.22, 10.0);
+  const outerBeam = new THREE.Mesh(outerBeamGeo, outerBeamMat);
+  outerBeam.position.y = 1.16;
+  platformGroup.add(outerBeam);
+
+  const innerBeamGeo = trackGeo(new THREE.CylinderGeometry(0.96, 0.56, 2.1, 40, 1, true));
+  const innerBeamMat = createVolumetricBeamMaterial(0x7dd3fc, 0x6366f1, 0.16, 6.0);
+  const innerBeam = new THREE.Mesh(innerBeamGeo, innerBeamMat);
+  innerBeam.position.y = 1.04;
+  platformGroup.add(innerBeam);
 
   // Depth-of-Field Layered Particles (crisp near-field specks + soft distant bokeh circles)
   const bokehTex = createSoftGlowTexture(0.62, 0.34);
@@ -853,19 +1086,19 @@ export function createBrainstineSceneObjects(isSoftwareGl: boolean): BrainstineS
   };
 
   const particlesNear = buildParticleLayer(
-    isSoftwareGl ? 50 : 95,
+    isSoftwareGl ? 56 : 110,
     1.85,
-    3.1,
-    0.055,
-    0.65,
+    3.25,
+    0.058,
+    0.7,
     glowSpriteTex
   );
   const particlesFar = buildParticleLayer(
-    isSoftwareGl ? 30 : 55,
-    3.4,
+    isSoftwareGl ? 32 : 64,
+    3.45,
     6.4,
     0.16,
-    0.32,
+    0.34,
     bokehTex
   );
   root.add(particlesNear, particlesFar);
@@ -874,9 +1107,17 @@ export function createBrainstineSceneObjects(isSoftwareGl: boolean): BrainstineS
     root,
     brainGroup,
     orbitalGroup,
+    platformGroup,
     primaryOrbitRing,
     secondaryOrbitRing,
+    tertiaryOrbitRing,
     orbitSparkA,
+    orbitSparkAStrobe,
+    orbitSparkB,
+    orbitSparkBStrobe,
+    platformInnerRing,
+    platformOuterArc,
+    lightBeamUniforms,
     particlesNear,
     particlesFar,
     synapticPulses,
@@ -902,15 +1143,20 @@ export function updateBrainstineAnimation(
   for (const u of objects.cortexShaderUniforms) {
     u.value = elapsed;
   }
+  for (const u of objects.lightBeamUniforms) {
+    u.value = elapsed;
+  }
 
-  // Subtle poised floating motion
-  objects.brainGroup.position.y = Math.sin(elapsed * 0.95) * 0.055;
+  // Smooth poised floating motion above the illuminated pedestal
+  const floatOffset = Math.sin(elapsed * 0.95) * 0.055;
+  objects.brainGroup.position.y = 0.26 + floatOffset;
+  objects.orbitalGroup.position.y = 0.24 + floatOffset * 0.65;
 
   // Slow showcase rotation revealing all angles of the sculpted lobes + cerebellum
-  const baseSpeed = phase === 'intro' ? 0.24 : 0.18;
+  const baseSpeed = phase === 'intro' ? 0.24 : 0.2;
   const targetTiltX =
-    phase === 'hero' ? pointer.y * 0.15 : 0.06 + Math.sin(elapsed * 0.45) * 0.04;
-  const targetOffsetY = phase === 'hero' ? pointer.x * 0.32 + pointer.dragOffsetY : 0;
+    phase === 'hero' ? pointer.y * 0.14 : 0.06 + Math.sin(elapsed * 0.45) * 0.04;
+  const targetOffsetY = phase === 'hero' ? pointer.x * 0.34 + pointer.dragOffsetY : 0;
 
   objects.brainGroup.rotation.y += delta * baseSpeed;
   objects.brainGroup.rotation.x = THREE.MathUtils.damp(
@@ -926,13 +1172,27 @@ export function updateBrainstineAnimation(
     delta
   );
 
-  // Subtle counter-rotation of framing halo ring + insight spark
-  objects.primaryOrbitRing.rotation.z = elapsed * 0.22;
-  objects.secondaryOrbitRing.rotation.z = -elapsed * 0.15;
+  // Continuous multi-axis orbital ring rotation + dual sparks
+  objects.primaryOrbitRing.rotation.z = elapsed * 0.24;
+  objects.secondaryOrbitRing.rotation.z = -elapsed * 0.17;
+  objects.tertiaryOrbitRing.rotation.z = elapsed * 0.13;
 
   const angleA = elapsed * 0.62;
-  objects.orbitSparkA.position.set(Math.cos(angleA) * 1.92, 0, Math.sin(angleA) * 1.92);
-  objects.orbitSparkA.rotation.y = elapsed * 1.4;
+  objects.orbitSparkA.position.set(Math.cos(angleA) * 1.88, 0, Math.sin(angleA) * 1.88);
+  objects.orbitSparkA.rotation.y = elapsed * 1.5;
+  objects.orbitSparkAStrobe.position.copy(objects.orbitSparkA.position);
+
+  const angleB = -elapsed * 0.48 + 2.1;
+  const bx = Math.cos(angleB) * 2.14;
+  const bz = Math.sin(angleB) * 2.14;
+  objects.orbitSparkB.position.set(bx * 0.9, Math.sin(angleB) * 0.78, bz * 0.92);
+  objects.orbitSparkB.rotation.y = -elapsed * 1.3;
+  objects.orbitSparkBStrobe.position.copy(objects.orbitSparkB.position);
+
+  // Illuminated platform subtle energy pulse & rotating telemetry arc
+  objects.platformOuterArc.rotation.z = elapsed * 0.22;
+  (objects.platformInnerRing.material as THREE.MeshBasicMaterial).opacity =
+    0.54 + Math.sin(elapsed * 1.6) * 0.16;
 
   // Travelling light pulses gliding smoothly through cortical pathways
   for (const pulse of objects.synapticPulses) {
@@ -956,8 +1216,8 @@ export function updateBrainstineAnimation(
   }
 
   // Subtle breathing luminescence across pathway filaments
-  objects.circuitTubeMaterials[0].emissiveIntensity = 1.05 + Math.sin(elapsed * 1.4) * 0.25;
-  objects.circuitTubeMaterials[1].emissiveIntensity = 0.95 + Math.cos(elapsed * 1.1) * 0.22;
+  objects.circuitTubeMaterials[0].emissiveIntensity = 1.1 + Math.sin(elapsed * 1.4) * 0.25;
+  objects.circuitTubeMaterials[1].emissiveIntensity = 1.0 + Math.cos(elapsed * 1.1) * 0.22;
 
   // Slow atmospheric depth particle drift
   objects.particlesNear.rotation.y = elapsed * 0.035;

@@ -258,7 +258,9 @@ export function SummaryVisualBlock({
               {(visual.attribution || visual.license) && (
                 <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400 select-none">
                   <span>
-                    Source & License: {visual.attribution || ''} · {visual.license || 'Public Domain'}
+                    Academic Credit & License: {visual.attribution || ''}
+                    {visual.attribution && visual.license ? ' · ' : ''}
+                    {visual.license || 'Open Academic Asset'}
                   </span>
                   {visual.exactResolution && (
                     <span className="font-mono tabular-nums">{visual.exactResolution}</span>

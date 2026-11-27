@@ -56,12 +56,17 @@ import {
 } from './groqService.ts';
 import {
   analyzeDocumentIntelligence,
+  buildExtractedDocumentSections,
   fetchAuthorizedUserMaterials,
   getOrBuildDocumentChunks,
   retrieveRelevantPassages,
   setBoundedCacheEntry,
 } from './documentEngine.ts';
-import { generateGroundedQuizQuestions, getAcademicTopicPrimer } from './quizEngine.ts';
+import {
+  buildAssessmentBlueprint,
+  generateGroundedQuizQuestions,
+  getAcademicTopicPrimer,
+} from './quizEngine.ts';
 import { generateExtractiveSummary } from './summaryEngine.ts';
 import {
   buildChatRagContext,
@@ -1296,17 +1301,25 @@ export function createApiApp() {
           }
 
           const resolvedTextTitle = titleInput || 'Pasted Study Notes';
-          const textCacheKey = `text:${crypto
+          const textCacheKey = `v2:text:${crypto
             .createHash('sha256')
             .update(`${resolvedTextTitle}\0${rawText}`)
             .digest('hex')}`;
           const cachedTextResult = extractionCache.get(textCacheKey);
           if (cachedTextResult && cachedTextResult.expiresAt > Date.now()) {
+            res.setHeader('Cache-Control', 'no-store');
             return res.json(cachedTextResult.result);
           }
 
           const chunks = chunkText(rawText);
+          const { contentHash, detectedSubject, sections } = buildExtractedDocumentSections(rawText, {
+            title: resolvedTextTitle,
+          });
           const result: ExtractionResult = {
+            extractionId: `ext-${contentHash.slice(0, 12)}-${Date.now().toString(36)}`,
+            contentHash,
+            detectedSubject,
+            sections,
             title: resolvedTextTitle,
             materialType: 'text',
             fileName: null,
@@ -1326,6 +1339,7 @@ export function createApiApp() {
             { result, expiresAt: Date.now() + EXTRACTION_CACHE_TTL_MS },
             60
           );
+          res.setHeader('Cache-Control', 'no-store');
           return res.json(result);
         }
 
@@ -1345,11 +1359,24 @@ export function createApiApp() {
             : baseTitle;
 
         const fileHash = crypto.createHash('sha256').update(file.buffer).digest('hex');
-        const fileCacheKey = `file:${materialType}:${fileHash}:${requestedTitle}:${file.originalname}`;
+        const fileCacheKey = `v2:file:${materialType}:${fileHash}:${requestedTitle}:${file.originalname}`;
         const cachedFileResult = extractionCache.get(fileCacheKey);
         if (cachedFileResult && cachedFileResult.expiresAt > Date.now()) {
+          res.setHeader('Cache-Control', 'no-store');
           return res.json(cachedFileResult.result);
         }
+
+        const isReadableExtractedText = (txt: string): boolean => {
+          const clean = (txt || '').replace(/\[Page\s+\d+\]/gi, ' ').trim();
+          if (clean.length < 40) return false;
+          const totalTokens = clean.split(/\s+/).filter(Boolean);
+          if (totalTokens.length < 6) return false;
+          const alphaWords = clean.match(/\b[a-zA-Z]{2,}\b/g) || [];
+          const alphaRatio = alphaWords.length / totalTokens.length;
+          if (alphaWords.length < 6 || alphaRatio < 0.28) return false;
+          if (/(?:%PDF-|endobj|endstream|flatedecode)/i.test(clean.slice(0, 400))) return false;
+          return true;
+        };
 
         let extractedText = '';
         let pageCount: number | null = null;
@@ -1370,7 +1397,7 @@ export function createApiApp() {
             const pdfPages = Array.isArray(pdfRes.text)
               ? pdfRes.text
               : [String(pdfRes.text || '')];
-            extractedText = pdfPages
+            const candidateText = pdfPages
               .map((pageText, i) => {
                 const cleaned = pageText.replace(/[ \t]+/g, ' ').trim();
                 return cleaned ? `[Page ${i + 1}]\n${cleaned}` : '';
@@ -1378,7 +1405,10 @@ export function createApiApp() {
               .filter(Boolean)
               .join('\n\n')
               .trim();
-            extractionMethod = 'pdf-text';
+            if (isReadableExtractedText(candidateText)) {
+              extractedText = candidateText;
+              extractionMethod = 'pdf-text';
+            }
           } catch (pdfErr) {
             logServerWarn('materials.extract.pdf_text', 'Primary PDF text extraction failed', pdfErr);
           }
@@ -1546,7 +1576,15 @@ export function createApiApp() {
         }
 
         const chunks = chunkText(extractedText);
+        const { contentHash, detectedSubject, sections } = buildExtractedDocumentSections(
+          extractedText,
+          { title: requestedTitle }
+        );
         const result: ExtractionResult = {
+          extractionId: `ext-${contentHash.slice(0, 12)}-${Date.now().toString(36)}`,
+          contentHash,
+          detectedSubject,
+          sections,
           title: requestedTitle,
           materialType,
           fileName: file.originalname,
@@ -1568,6 +1606,7 @@ export function createApiApp() {
           60
         );
 
+        res.setHeader('Cache-Control', 'no-store');
         return res.json(result);
       } catch (err: unknown) {
         return sendSafeApiError(res, 'materials.extract', err);
@@ -1575,19 +1614,88 @@ export function createApiApp() {
     }
   );
 
-  app.post('/api/summaries/extractive', (req: Request, res: Response) => {
+  app.post('/api/materials/sections', (req: Request, res: Response) => {
     try {
-      const { extractedText, title, subjectArea, summaryLevel } = (req.body || {}) as {
+      const { extractedText, title, subjectArea } = (req.body || {}) as {
         extractedText?: string;
         title?: string;
         subjectArea?: string;
-        summaryLevel?: SummaryLevel;
       };
 
       if (!extractedText || typeof extractedText !== 'string' || extractedText.trim().length < 20) {
         return res.status(400).json({
+          error: 'Insufficient study material text to segment sections.',
+        });
+      }
+
+      const boundedText = extractedText.trim().slice(0, 1_200_000);
+      const result = buildExtractedDocumentSections(boundedText, {
+        title: (title || 'Study Material').trim(),
+        subjectArea: (subjectArea || '').trim(),
+      });
+
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json(result);
+    } catch (err: unknown) {
+      return sendSafeApiError(res, 'materials.sections', err);
+    }
+  });
+
+  app.post('/api/summaries/extractive', (req: Request, res: Response) => {
+    try {
+      const {
+        extractedText,
+        title,
+        subjectArea,
+        summaryLevel,
+        selectedSectionIndices,
+        selectedSectionTexts,
+      } = (req.body || {}) as {
+        extractedText?: string;
+        title?: string;
+        subjectArea?: string;
+        summaryLevel?: SummaryLevel;
+        selectedSectionIndices?: number[];
+        selectedSectionTexts?: string[];
+      };
+
+      let effectiveText = '';
+      if (Array.isArray(selectedSectionTexts) && selectedSectionTexts.length > 0) {
+        effectiveText = selectedSectionTexts
+          .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+          .join('\n\n')
+          .trim();
+      } else if (typeof extractedText === 'string' && extractedText.trim().length >= 20) {
+        if (Array.isArray(selectedSectionIndices) && selectedSectionIndices.length > 0) {
+          const { sections } = buildExtractedDocumentSections(extractedText.trim().slice(0, 1_200_000), {
+            title: (title || 'Document Summary').trim(),
+            subjectArea: (subjectArea || '').trim(),
+          });
+          const indexSet = new Set(
+            selectedSectionIndices.filter((n) => typeof n === 'number' && Number.isInteger(n) && n >= 0)
+          );
+          const picked = sections.filter((s) => indexSet.has(s.index));
+          effectiveText =
+            picked.length > 0
+              ? picked.map((s) => s.text).join('\n\n').trim()
+              : extractedText.trim();
+        } else {
+          effectiveText = extractedText.trim();
+        }
+      }
+
+      if (!effectiveText || effectiveText.length < 20) {
+        return res.status(400).json({
           error:
-            'Insufficient study material text. Please extract or paste at least 20 characters before summarizing.',
+            'Insufficient study material text. Please extract or select at least one readable section before summarizing.',
+        });
+      }
+
+      const alphaWords = (effectiveText.match(/[a-zA-Z]{2,}/g) || []).length;
+      if (alphaWords < 3) {
+        return res.status(422).json({
+          error:
+            'The provided document content appears unreadable or contains no valid text to summarize.',
         });
       }
 
@@ -1596,14 +1704,29 @@ export function createApiApp() {
           ? summaryLevel
           : 'detailed';
 
-      const boundedText = extractedText.trim().slice(0, 1_200_000);
+      // Preserve subject inference cleanly from the full document if available so section filtering never loses domain context
+      const inferredFromFull =
+        typeof extractedText === 'string' && extractedText.trim().length >= 20
+          ? analyzeDocumentIntelligence(extractedText.trim().slice(0, 1_200_000), {
+              title: (title || 'Document Summary').trim(),
+              subjectArea: (subjectArea || '').trim(),
+            }).subjectArea
+          : (subjectArea || '').trim();
+
+      const resolvedSubjectInput =
+        (subjectArea && subjectArea.trim().toLowerCase() !== 'general studies'
+          ? subjectArea.trim()
+          : '') || inferredFromFull || 'General Studies';
+
+      const boundedText = effectiveText.slice(0, 1_200_000);
       const summary = generateExtractiveSummary(
         (title || 'Document Summary').trim(),
-        (subjectArea || 'General Studies').trim(),
+        resolvedSubjectInput,
         boundedText,
         level
       );
 
+      res.setHeader('Cache-Control', 'no-store');
       return res.json({
         ...summary,
         generationMode: 'extractive' as const,
@@ -1790,6 +1913,7 @@ export function createApiApp() {
         requestedQuestionCount: totalCount,
         questionCount: sanitizedQuestions.length,
         insufficientSourceNote,
+        blueprint: buildAssessmentBlueprint(sanitizedQuestions),
         questions: sanitizedQuestions,
       };
 

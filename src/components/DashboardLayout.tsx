@@ -49,14 +49,32 @@ import { SavedSummariesView } from './SavedSummariesView';
 import { StudySummarizer } from './StudySummarizer';
 import { ThemeSelector } from './ThemeSelector';
 
-export function DashboardLayout() {
+interface DashboardLayoutProps {
+  initialSection?: DashboardSection | null;
+  onConsumeInitialSection?: () => void;
+}
+
+export function DashboardLayout({
+  initialSection = null,
+  onConsumeInitialSection,
+}: DashboardLayoutProps) {
   const { user, profile, signOut } = useAuth();
 
-  const [activeSection, setActiveSection] = useState<DashboardSection>('overview');
+  const [activeSection, setActiveSection] = useState<DashboardSection>(
+    () => initialSection ?? 'overview'
+  );
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  useEffect(() => {
+    if (initialSection) {
+      setActiveSection(initialSection);
+      onConsumeInitialSection?.();
+    }
+  }, [initialSection, onConsumeInitialSection]);
 
   const [geminiConfigured, setGeminiConfigured] = useState(true);
   const [loadingData, setLoadingData] = useState(true);
+  const [workspaceLoadError, setWorkspaceLoadError] = useState<string | null>(null);
   const [materials, setMaterials] = useState<StudyMaterialRecord[]>([]);
   const [summaries, setSummaries] = useState<StudySummaryRecord[]>([]);
   const [activities, setActivities] = useState<StudyActivityRecord[]>([]);
@@ -101,21 +119,33 @@ export function DashboardLayout() {
 
   const loadWorkspaceData = useCallback(async () => {
     if (!user) return;
+    setWorkspaceLoadError(null);
     try {
-      const [mats, sums, acts, qzs, atts, sessions] = await Promise.all([
-        listStudyMaterials(user.id).catch(() => []),
-        listStudySummaries(user.id).catch(() => []),
-        listStudyActivities(user.id, 30).catch(() => []),
-        listQuizzes(user.id).catch(() => []),
-        listQuizAttempts(user.id).catch(() => []),
-        listAllAiSessions(user.id).catch(() => []),
+      const results = await Promise.allSettled([
+        listStudyMaterials(user.id),
+        listStudySummaries(user.id),
+        listStudyActivities(user.id, 30),
+        listQuizzes(user.id),
+        listQuizAttempts(user.id),
+        listAllAiSessions(user.id),
       ]);
-      setMaterials(mats);
-      setSummaries(sums);
-      setActivities(acts);
-      setQuizzes(qzs);
-      setAttempts(atts);
-      setAiSessions(sessions);
+      const [matsRes, sumsRes, actsRes, qzsRes, attsRes, sessionsRes] = results;
+
+      if (matsRes.status === 'fulfilled') setMaterials(matsRes.value);
+      if (sumsRes.status === 'fulfilled') setSummaries(sumsRes.value);
+      if (actsRes.status === 'fulfilled') setActivities(actsRes.value);
+      if (qzsRes.status === 'fulfilled') setQuizzes(qzsRes.value);
+      if (attsRes.status === 'fulfilled') setAttempts(attsRes.value);
+      if (sessionsRes.status === 'fulfilled') setAiSessions(sessionsRes.value);
+
+      const failedCount = results.filter((r) => r.status === 'rejected').length;
+      if (failedCount > 0) {
+        setWorkspaceLoadError(
+          failedCount === results.length
+            ? 'Unable to load your saved workspace records right now. Check your connection and retry.'
+            : 'Some saved workspace sections could not be refreshed right now.'
+        );
+      }
     } finally {
       setLoadingData(false);
     }
@@ -386,6 +416,25 @@ export function DashboardLayout() {
         </header>
 
         <main className="mx-auto w-full max-w-6xl flex-1 px-3.5 py-5 sm:px-6 lg:px-8 lg:py-8">
+          {workspaceLoadError && (
+            <div
+              role="alert"
+              className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/35 dark:text-amber-200"
+            >
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+                <span>{workspaceLoadError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={loadWorkspaceData}
+                className="rounded-lg border border-amber-300 bg-white px-3 py-1 font-semibold text-amber-900 transition-colors hover:bg-amber-100 dark:border-amber-800 dark:bg-slate-900 dark:text-amber-200 dark:hover:bg-amber-950"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
           {loadingData ? (
             <div className="space-y-6">
               <div className="h-44 animate-pulse rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-[#0D162B]" />

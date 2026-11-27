@@ -61,6 +61,13 @@ function cleanSingleLineSourceAndPageRefs(line: string): string {
   }
 
   let out = line
+    // Remove inline PDF page boundary markers like "--- Page 1 ---" or "=== Page 2 ==="
+    .replace(/(?:[-=]{2,})\s*(?:Pages?|Slide|Sheet)\s+\d+(?:\s*[-–,]\s*\d+)*\s*(?:[-=]{2,})\s*/gi, ' ')
+    // Remove inline metadata labels like "Source: Biology_101.pdf."
+    .replace(
+      /(?:^|\s)(?:sources?|references?|document\s+source|source\s+document|uploaded\s+file|file\s+location|storage\s+path|pdf\s+source)\s*:\s*[^\n.]*\.?/gi,
+      ''
+    )
     // Remove raw URLs and Supabase/storage object paths
     .replace(/https?:\/\/[^\s)>\]]+/gi, '')
     .replace(/(?:study-materials|storage\/v1\/object)\/[^\s)>\]]+/gi, '')
@@ -297,7 +304,31 @@ export function sanitizeStructuredSummary(summary: StructuredSummary): Structure
           })),
         }
       : {}),
-    ...(summary.visualDiagrams ? { visualDiagrams: summary.visualDiagrams } : {}),
+    ...(summary.visualDiagrams
+      ? {
+          visualDiagrams: summary.visualDiagrams.map((d) => ({
+            ...d,
+            title: cleanStr(d.title),
+            subject: cleanStr(d.subject),
+            caption: cleanStr(d.caption),
+            nodes: (d.nodes || []).map((n) => ({
+              ...n,
+              label: cleanStr(n.label),
+              ...(n.sublabel ? { sublabel: cleanStr(n.sublabel) } : {}),
+              ...(n.detail ? { detail: cleanStr(n.detail) } : {}),
+            })),
+            ...(d.columns ? { columns: d.columns.map(cleanStr) } : {}),
+            ...(d.rows
+              ? {
+                  rows: d.rows.map((r) => ({
+                    label: cleanStr(r.label),
+                    cells: (r.cells || []).map(cleanStr),
+                  })),
+                }
+              : {}),
+          })),
+        }
+      : {}),
     ...(summary.visualAids
       ? {
           visualAids: summary.visualAids.map((v) => ({

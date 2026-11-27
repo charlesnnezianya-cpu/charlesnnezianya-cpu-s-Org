@@ -739,6 +739,8 @@ export async function listQuizzes(userId: string): Promise<QuizRecord[]> {
           options: Array.isArray(q.options) ? [...q.options] : undefined,
           maxMarks: q.maxMarks || 1,
           ...(q.topicTag ? { topicTag: q.topicTag } : {}),
+          ...(q.cognitiveBand ? { cognitiveBand: q.cognitiveBand } : {}),
+          ...(q.questionCategory ? { questionCategory: q.questionCategory } : {}),
           ...(q.visualAid ? { visualAid: q.visualAid } : {}),
         }))
       : [],
