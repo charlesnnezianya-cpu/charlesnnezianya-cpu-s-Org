@@ -91,18 +91,27 @@ export function clearResolvedGeminiModelCache(): void {
 }
 
 export function isGeminiConfigured(): boolean {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey =
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.VITE_GEMINI_API_KEY;
   return Boolean(apiKey && apiKey.trim() !== '' && apiKey !== 'MY_GEMINI_API_KEY');
 }
 
 export function getGeminiClient(): GoogleGenAI {
-  if (!isGeminiConfigured()) {
+  const apiKey =
+    (
+      process.env.GEMINI_API_KEY ||
+      process.env.GOOGLE_API_KEY ||
+      process.env.VITE_GEMINI_API_KEY
+    )?.trim() || '';
+  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
     throw new AiConfigurationError(
       'GEMINI_API_KEY is missing on the server. Set GEMINI_API_KEY in Secrets (or your deployment environment variables) to enable AI features.'
     );
   }
   return new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
+    apiKey,
     httpOptions: {
       headers: {
         'User-Agent': 'aistudio-build',

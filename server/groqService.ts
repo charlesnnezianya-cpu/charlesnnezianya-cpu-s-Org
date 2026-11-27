@@ -45,9 +45,9 @@ const keyStates: Record<'groq-key1' | 'groq-key2' | 'groq-key3', KeyState> = {
  * (with fallback to GROQ_API_KEY for KEY 1).
  */
 export function getGroqKeyConfig(): GroqKeyConfig {
-  const k1 = (process.env.GROQ_API_KEY_1 || process.env.GROQ_API_KEY)?.trim();
-  const k2 = process.env.GROQ_API_KEY_2?.trim();
-  const k3 = process.env.GROQ_API_KEY_3?.trim();
+  const k1 = (process.env.GROQ_API_KEY_1 || process.env.GROQ_API_KEY1 || process.env.GROQ_API_KEY)?.trim();
+  const k2 = (process.env.GROQ_API_KEY_2 || process.env.GROQ_API_KEY2)?.trim();
+  const k3 = (process.env.GROQ_API_KEY_3 || process.env.GROQ_API_KEY3)?.trim();
 
   const sanitize = (k?: string | null): string | null => {
     if (!k) return null;

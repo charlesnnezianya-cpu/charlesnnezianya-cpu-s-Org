@@ -682,11 +682,16 @@ export function createApiApp() {
     const rawUrl = req.url || '/';
     try {
       const parsed = new URL(rawUrl, 'http://localhost');
-      if (parsed.pathname === '/api/index' || parsed.searchParams.has('__apiPath')) {
+      if (parsed.searchParams.has('__apiPath')) {
         const apiPathRaw = parsed.searchParams.get('__apiPath') ?? '';
         parsed.searchParams.delete('__apiPath');
         const cleanPath = apiPathRaw.replace(/^\/+/, '');
         const nextPathname = cleanPath ? `/api/${cleanPath}` : '/api';
+        const nextSearch = parsed.searchParams.toString();
+        req.url = `${nextPathname}${nextSearch ? `?${nextSearch}` : ''}`;
+      } else if (parsed.pathname === '/api/index' || parsed.pathname.startsWith('/api/index/')) {
+        const rest = parsed.pathname.replace(/^\/api\/index\/?/, '');
+        const nextPathname = rest ? `/api/${rest}` : '/api';
         const nextSearch = parsed.searchParams.toString();
         req.url = `${nextPathname}${nextSearch ? `?${nextSearch}` : ''}`;
       }
@@ -713,6 +718,10 @@ export function createApiApp() {
       .trim()
       .toLowerCase();
     if (requestHost && parsedOrigin.host.toLowerCase() === requestHost) {
+      return true;
+    }
+
+    if (parsedOrigin.hostname.toLowerCase().endsWith('.vercel.app')) {
       return true;
     }
 
@@ -765,6 +774,28 @@ export function createApiApp() {
     next();
   });
 
+  // Support pre-parsed bodies from serverless platforms (e.g. Vercel, AWS Lambda)
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    const r = req as Request & { _body?: boolean };
+    if (r.body !== undefined && !r._body) {
+      r._body = true;
+      if (typeof r.body === 'string' && req.headers['content-type']?.includes('application/json')) {
+        try {
+          r.body = JSON.parse(r.body);
+        } catch {
+          // keep as string
+        }
+      } else if (Buffer.isBuffer(r.body) && req.headers['content-type']?.includes('application/json')) {
+        try {
+          r.body = JSON.parse(r.body.toString('utf8'));
+        } catch {
+          // keep as buffer
+        }
+      }
+    }
+    next();
+  });
+
   app.use(express.json({ limit: '20mb' }));
   app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
     if (err instanceof SyntaxError && 'body' in (err as object)) {
@@ -796,8 +827,9 @@ export function createApiApp() {
   );
 
   app.get('/api/health', async (req: Request, res: Response) => {
-    const groqKeyConfig = getGroqKeyConfig();
-    const groqConfigured = Boolean(groqKeyConfig.key1 || groqKeyConfig.key2 || groqKeyConfig.key3);
+    try {
+      const groqKeyConfig = getGroqKeyConfig();
+      const groqConfigured = Boolean(groqKeyConfig.key1 || groqKeyConfig.key2 || groqKeyConfig.key3);
     const geminiConfigured = isGeminiConfigured();
     const aiConfigured = groqConfigured || geminiConfigured;
 
@@ -979,20 +1011,23 @@ export function createApiApp() {
       });
     }
 
-    res.json({
-      ok: true,
-      aiConfigured,
-      geminiConfigured,
-      groqConfigured,
-      groqKeys: {
-        key1: Boolean(groqKeyConfig.key1),
-        key2: Boolean(groqKeyConfig.key2),
-        key3: Boolean(groqKeyConfig.key3),
-      },
-      supabaseConfigured,
-      configuredModel: configuredEnvModel ? 'locked' : 'default',
-      activeModel: groqConfigured ? GROQ_MODEL : (resolvedState ? 'ready' : activeModel ? 'ready' : 'unavailable'),
-    });
+      res.json({
+        ok: true,
+        aiConfigured,
+        geminiConfigured,
+        groqConfigured,
+        groqKeys: {
+          key1: Boolean(groqKeyConfig.key1),
+          key2: Boolean(groqKeyConfig.key2),
+          key3: Boolean(groqKeyConfig.key3),
+        },
+        supabaseConfigured,
+        configuredModel: configuredEnvModel ? 'locked' : 'default',
+        activeModel: groqConfigured ? GROQ_MODEL : (resolvedState ? 'ready' : activeModel ? 'ready' : 'unavailable'),
+      });
+    } catch (err: unknown) {
+      return sendSafeApiError(res, 'api.health', err);
+    }
   });
 
   app.get('/api/auth/oauth-status', async (req: Request, res: Response) => {
