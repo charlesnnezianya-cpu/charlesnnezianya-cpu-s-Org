@@ -36,6 +36,7 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
     signInWithEmail,
     signUpWithEmail,
     signUpWithPhone,
+    signInWithPhoneMagicLink,
     signInWithGoogle,
     requestPasswordReset,
     updatePassword,
@@ -184,27 +185,17 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
         setErrorMsg(phoneValidation.error || 'Please enter a valid phone number.');
         return;
       }
-      if (!password) {
-        setErrorMsg('Please enter your password.');
+      if (!email.trim() || !email.includes('@')) {
+        setErrorMsg('Please enter the email address associated with your phone account to receive a secure sign-in magic link.');
         return;
       }
 
       setSubmitting(true);
       try {
-        // Sign in with phone credential or email if stored
-        await signInWithEmail({ email: phoneValidation.e164, password });
-        onClose();
-      } catch (phoneErr: unknown) {
-        try {
-          if (email.trim() && email.includes('@')) {
-            await signInWithEmail({ email: email.trim(), password });
-            onClose();
-            return;
-          }
-          throw phoneErr;
-        } catch (err: unknown) {
-          setErrorMsg(sanitizeUserErrorMessage(err, 'sign in'));
-        }
+        await signInWithPhoneMagicLink({ email: email.trim() });
+        setVerificationSentTo(email.trim());
+      } catch (err: unknown) {
+        setErrorMsg(sanitizeUserErrorMessage(err, 'sign in'));
       } finally {
         setSubmitting(false);
       }
@@ -671,9 +662,7 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
                         htmlFor="auth-phone-linked-email"
                         className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
                       >
-                        Email address{' '}
-                        {mode === 'signup' && <span className="text-red-500">*</span>}
-                        {mode === 'signin' && <span className="font-normal text-slate-400">(optional fallback)</span>}
+                        Email address <span className="text-red-500">*</span>
                       </label>
                       <div className="relative">
                         <Mail
@@ -683,7 +672,7 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
                         <input
                           id="auth-phone-linked-email"
                           type="email"
-                          required={mode === 'signup'}
+                          required
                           autoComplete="email"
                           value={email}
                           onChange={(e) => setEmail(e.target.value)}
@@ -691,78 +680,79 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
                           className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
                         />
                       </div>
-                      {mode === 'signup' && (
-                        <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-                          We will send your account verification link to this email address.
-                        </p>
-                      )}
+                      <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                        {mode === 'signup'
+                          ? 'We will send your account verification link to this email address.'
+                          : 'We will send a secure sign-in magic link to this email address.'}
+                      </p>
                     </div>
                   )}
-
-                  <div>
-                    <label
-                      htmlFor="auth-phone-password"
-                      className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
-                    >
-                      Password
-                    </label>
-                    <div className="relative">
-                      <Lock
-                        className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
-                        aria-hidden="true"
-                      />
-                      <input
-                        id="auth-phone-password"
-                        type={showPassword ? 'text' : 'password'}
-                        required
-                        minLength={mode === 'signin' ? 6 : 8}
-                        autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        placeholder={mode === 'signin' ? 'Enter your password' : 'At least 8 characters'}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-10 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowPassword((prev) => !prev)}
-                        aria-label={showPassword ? 'Hide password' : 'Show password'}
-                        className="absolute top-1/2 right-1.5 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-md text-slate-400 hover:text-slate-600 select-none dark:hover:text-slate-200"
-                      >
-                        {showPassword ? (
-                          <EyeOff className="h-4 w-4" aria-hidden="true" />
-                        ) : (
-                          <Eye className="h-4 w-4" aria-hidden="true" />
-                        )}
-                      </button>
-                    </div>
-                  </div>
-
                   {mode === 'signup' && (
-                    <div>
-                      <label
-                        htmlFor="auth-phone-confirm-password"
-                        className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
-                      >
-                        Confirm password
-                      </label>
-                      <div className="relative">
-                        <KeyRound
-                          className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
-                          aria-hidden="true"
-                        />
-                        <input
-                          id="auth-phone-confirm-password"
-                          type={showPassword ? 'text' : 'password'}
-                          required
-                          minLength={8}
-                          autoComplete="new-password"
-                          value={confirmPassword}
-                          onChange={(e) => setConfirmPassword(e.target.value)}
-                          placeholder="Re-enter your password"
-                          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
-                        />
+                    <>
+                      <div>
+                        <label
+                          htmlFor="auth-phone-password"
+                          className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
+                        >
+                          Password
+                        </label>
+                        <div className="relative">
+                          <Lock
+                            className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
+                            aria-hidden="true"
+                          />
+                          <input
+                            id="auth-phone-password"
+                            type={showPassword ? 'text' : 'password'}
+                            required
+                            minLength={8}
+                            autoComplete="new-password"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            placeholder="At least 8 characters"
+                            className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-10 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowPassword((prev) => !prev)}
+                            aria-label={showPassword ? 'Hide password' : 'Show password'}
+                            className="absolute top-1/2 right-1.5 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-md text-slate-400 hover:text-slate-600 select-none dark:hover:text-slate-200"
+                          >
+                            {showPassword ? (
+                              <EyeOff className="h-4 w-4" aria-hidden="true" />
+                            ) : (
+                              <Eye className="h-4 w-4" aria-hidden="true" />
+                            )}
+                          </button>
+                        </div>
                       </div>
-                    </div>
+
+                      <div>
+                        <label
+                          htmlFor="auth-phone-confirm-password"
+                          className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
+                        >
+                          Confirm password
+                        </label>
+                        <div className="relative">
+                          <KeyRound
+                            className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
+                            aria-hidden="true"
+                          />
+                          <input
+                            id="auth-phone-confirm-password"
+                            type={showPassword ? 'text' : 'password'}
+                            required
+                            minLength={8}
+                            autoComplete="new-password"
+                            value={confirmPassword}
+                            onChange={(e) => setConfirmPassword(e.target.value)}
+                            placeholder="Re-enter your password"
+                            className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
+                          />
+                        </div>
+                      </div>
+                    </>
                   )}
 
                   <button
@@ -775,7 +765,7 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
                         ? 'Processing...'
                         : mode === 'signup'
                           ? 'Create Account & Send Verification'
-                          : 'Sign In with Phone'}
+                          : 'Send Sign-In Magic Link'}
                     </span>
                     {!submitting && <ArrowRight className="h-4 w-4" aria-hidden="true" />}
                   </button>

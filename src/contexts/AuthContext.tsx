@@ -42,6 +42,7 @@ interface AuthContextValue {
     password: string;
     displayName: string;
   }) => Promise<{ needsEmailVerification: boolean }>;
+  signInWithPhoneMagicLink: (params: { email: string }) => Promise<void>;
   signInWithGoogle: () => Promise<void>;
   requestPasswordReset: (email: string) => Promise<void>;
   updatePassword: (newPassword: string) => Promise<void>;
@@ -448,6 +449,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return { needsEmailVerification: true };
   };
 
+  const signInWithPhoneMagicLink = async ({ email }: { email: string }) => {
+    const client = requireSupabase();
+    const redirectTo = window.location.origin;
+    const { error } = await client.auth.signInWithOtp({
+      email: email.trim(),
+      options: {
+        emailRedirectTo: redirectTo,
+      },
+    });
+    if (error) {
+      throw new Error(
+        formatFriendlyAuthError(
+          error.message,
+          'We could not send the sign-in magic link. Please check your email address and try again.'
+        )
+      );
+    }
+  };
+
   const signInWithGoogle = async () => {
     const client = requireSupabase();
     setOauthError(null);
@@ -613,6 +633,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         signUpWithEmail,
         signInWithEmail,
         signUpWithPhone,
+        signInWithPhoneMagicLink,
         signInWithGoogle,
         requestPasswordReset,
         updatePassword,
