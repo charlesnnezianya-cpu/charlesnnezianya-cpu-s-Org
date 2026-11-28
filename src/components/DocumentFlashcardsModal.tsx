@@ -277,7 +277,8 @@ export function DocumentFlashcardsModal({
     if (!isOpen) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
         return;
       }
       if (e.key === 'ArrowRight') {
@@ -287,6 +288,9 @@ export function DocumentFlashcardsModal({
         e.preventDefault();
         handlePrev();
       } else if (e.key === ' ' || e.key === 'Enter') {
+        if (target?.closest('button, a, [role="button"], select')) {
+          return;
+        }
         e.preventDefault();
         handleFlip();
       } else if (e.key === 'Escape') {
@@ -436,6 +440,7 @@ export function DocumentFlashcardsModal({
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
+                    e.stopPropagation();
                     handleFlip();
                   }
                 }}

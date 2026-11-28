@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Camera, ExternalLink, Info, Layers, Maximize2, X } from 'lucide-react';
 import type { SummaryVisualAid } from '../types/brainstine';
 import { EducationalDiagramRenderer } from './EducationalDiagramRenderer';
@@ -32,6 +32,17 @@ export function SummaryVisualBlock({
 }: SummaryVisualBlockProps) {
   const [imageFailed, setImageFailed] = useState(false);
   const [lightboxOpen, setLightboxOpen] = useState(false);
+
+  useEffect(() => {
+    if (!lightboxOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setLightboxOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [lightboxOpen]);
 
   if (!visual) return null;
 
@@ -230,9 +241,9 @@ export function SummaryVisualBlock({
 
               {visual.verifiedLabels && visual.verifiedLabels.length > 0 && (
                 <div className="border-t border-slate-200 pt-3 dark:border-slate-800">
-                  <h6 className="font-display text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                  <h5 className="font-display text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                     Component Callouts
-                  </h6>
+                  </h5>
                   <dl className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
                     {visual.verifiedLabels.map((item, idx) => (
                       <div key={idx} className="text-xs leading-relaxed">

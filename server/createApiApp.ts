@@ -86,6 +86,12 @@ import {
   startServerAssessmentSession,
   submitAndGradeServerAssessment,
 } from './assessmentService.ts';
+import {
+  fetchVerifiedSupabaseUserFromBearer,
+  isResendConfigured,
+  processAuthenticatedWelcomeEmail,
+  type WelcomeAuthEvent,
+} from './welcomeEmailService.ts';
 
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -721,16 +727,16 @@ export function createApiApp() {
       return true;
     }
 
-    if (parsedOrigin.hostname.toLowerCase().endsWith('.vercel.app')) {
-      return true;
-    }
-
     const configuredOrigins = new Set<string>();
     const envCandidates = [
       process.env.APP_URL,
       process.env.VITE_APP_URL,
       ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : []),
       process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined,
+      process.env.VERCEL_BRANCH_URL ? `https://${process.env.VERCEL_BRANCH_URL}` : undefined,
+      process.env.VERCEL_PROJECT_PRODUCTION_URL
+        ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
+        : undefined,
     ];
     for (const candidate of envCandidates) {
       if (!candidate || !candidate.trim()) continue;
@@ -846,6 +852,19 @@ export function createApiApp() {
     const activeModel = getGeminiModel();
 
     if (req.query.probe === '1') {
+      if (supabaseConfigured) {
+        const probeUser = await resolveAuthorizedUserFromBearer(req.headers.authorization);
+        if (!probeUser) {
+          return res.status(401).json({
+            error: 'Authentication is required to run diagnostic probes.',
+          });
+        }
+      } else if (process.env.NODE_ENV === 'production') {
+        return res.status(401).json({
+          error: 'Authentication is required to run diagnostic probes.',
+        });
+      }
+
       let groqProbe: { ok: boolean; provider?: string; error?: string; latencyMs: number } | null = null;
       if (groqConfigured) {
         const groqStart = Date.now();
@@ -1003,6 +1022,7 @@ export function createApiApp() {
         keyFailoverTest: keyFailoverTestResult,
         groqDiagnostics: getGroqServiceDiagnostics(),
         assessmentSecretConfigured,
+        welcomeEmailConfigured: isResendConfigured(),
         supabaseConfigured,
         supabaseHealthy,
         supabaseSchema,
@@ -1021,6 +1041,7 @@ export function createApiApp() {
           key2: Boolean(groqKeyConfig.key2),
           key3: Boolean(groqKeyConfig.key3),
         },
+        welcomeEmailConfigured: isResendConfigured(),
         supabaseConfigured,
         configuredModel: configuredEnvModel ? 'locked' : 'default',
         activeModel: groqConfigured ? GROQ_MODEL : (resolvedState ? 'ready' : activeModel ? 'ready' : 'unavailable'),
@@ -1054,9 +1075,11 @@ export function createApiApp() {
         : null;
 
       const googleEnabled = Boolean(settingsJson?.external?.google);
+      const rawRedirectTo =
+        typeof req.query.redirectTo === 'string' ? req.query.redirectTo.trim() : '';
       const originParam =
-        typeof req.query.redirectTo === 'string' && req.query.redirectTo.trim()
-          ? req.query.redirectTo.trim()
+        rawRedirectTo && isOriginAllowed(rawRedirectTo, req)
+          ? rawRedirectTo
           : `${req.protocol}://${req.get('host') || 'localhost:3000'}`;
 
       const authRes = await fetch(
@@ -1080,33 +1103,41 @@ export function createApiApp() {
       if (location) {
         try {
           const parsedLoc = new URL(location);
+          const supabaseHost = new URL(supabaseUrl).host;
+          const isSafeOAuthHost =
+            parsedLoc.protocol === 'https:' &&
+            (parsedLoc.hostname === 'accounts.google.com' || parsedLoc.host === supabaseHost);
+
           const clientIdParam = parsedLoc.searchParams.get('client_id') || '';
           hasClientId = Boolean(clientIdParam.trim());
           const cbUri = parsedLoc.searchParams.get('redirect_uri') || '';
           callbackMatchesSupabase = cbUri === `${supabaseUrl}/auth/v1/callback`;
 
-          const gRes = await fetch(location, { redirect: 'manual' });
-          const gLoc = gRes.headers.get('location');
-          if (gLoc) {
-            try {
-              const gLocUrl = new URL(gLoc, 'https://accounts.google.com');
-              const explicitErr =
-                gLocUrl.searchParams.get('error') || gLocUrl.searchParams.get('errorCode') || '';
-              const authErrorB64 = gLocUrl.searchParams.get('authError') || '';
-              let decodedAuthError = '';
-              if (authErrorB64) {
-                try {
-                  decodedAuthError = Buffer.from(authErrorB64, 'base64').toString('utf8');
-                } catch {
-                  decodedAuthError = '';
+          if (isSafeOAuthHost) {
+            const gRes = await fetch(parsedLoc.toString(), { redirect: 'manual' });
+            const gLoc = gRes.headers.get('location');
+            if (gLoc) {
+              try {
+                const gLocUrl = new URL(gLoc, 'https://accounts.google.com');
+                const explicitErr =
+                  gLocUrl.searchParams.get('error') || gLocUrl.searchParams.get('errorCode') || '';
+                const authErrorB64 = gLocUrl.searchParams.get('authError') || '';
+                let decodedAuthError = '';
+                if (authErrorB64) {
+                  try {
+                    decodedAuthError = Buffer.from(authErrorB64, 'base64').toString('utf8');
+                  } catch {
+                    decodedAuthError = '';
+                  }
                 }
-              }
 
-              let googleErrorDetail = '';
-              if (gLocUrl.pathname.includes('/signin/oauth/error')) {
-                const errPageRes = await fetch(gLocUrl.toString(), {
-                  headers: { 'Accept-Language': 'en-US,en;q=0.9' },
-                });
+                let googleErrorDetail = '';
+                const isSafeGoogleErrorHost =
+                  gLocUrl.protocol === 'https:' && gLocUrl.hostname === 'accounts.google.com';
+                if (isSafeGoogleErrorHost && gLocUrl.pathname.includes('/signin/oauth/error')) {
+                  const errPageRes = await fetch(gLocUrl.toString(), {
+                    headers: { 'Accept-Language': 'en-US,en;q=0.9' },
+                  });
                 const html = await errPageRes.text().catch(() => '');
                 const cleaned = html
                   .replace(/<script[\s\S]*?<\/script>/gi, ' ')
@@ -1120,24 +1151,25 @@ export function createApiApp() {
                 googleErrorDetail = (match ? match[0] : '').trim();
               }
 
-              const combinedHint = `${explicitErr} ${decodedAuthError} ${googleErrorDetail}`.toLowerCase();
-              if (combinedHint.includes('redirect_uri_mismatch')) {
-                googleErrorType = 'redirect_uri_mismatch';
-              } else if (combinedHint.includes('org_internal')) {
-                googleErrorType = 'org_internal';
-              } else if (combinedHint.includes('access_denied')) {
-                googleErrorType = 'access_denied';
-              } else if (combinedHint.includes('deleted_client')) {
-                googleErrorType = 'deleted_client';
-              } else if (combinedHint.includes('invalid_client')) {
-                googleErrorType = 'invalid_client';
-              } else if (combinedHint.includes('disallowed_useragent')) {
-                googleErrorType = 'disallowed_useragent';
-              } else if (gLocUrl.pathname.includes('/signin/oauth/error')) {
-                googleErrorType = 'oauth_configuration_error';
+                const combinedHint = `${explicitErr} ${decodedAuthError} ${googleErrorDetail}`.toLowerCase();
+                if (combinedHint.includes('redirect_uri_mismatch')) {
+                  googleErrorType = 'redirect_uri_mismatch';
+                } else if (combinedHint.includes('org_internal')) {
+                  googleErrorType = 'org_internal';
+                } else if (combinedHint.includes('access_denied')) {
+                  googleErrorType = 'access_denied';
+                } else if (combinedHint.includes('deleted_client')) {
+                  googleErrorType = 'deleted_client';
+                } else if (combinedHint.includes('invalid_client')) {
+                  googleErrorType = 'invalid_client';
+                } else if (combinedHint.includes('disallowed_useragent')) {
+                  googleErrorType = 'disallowed_useragent';
+                } else if (gLocUrl.pathname.includes('/signin/oauth/error')) {
+                  googleErrorType = 'oauth_configuration_error';
+                }
+              } catch {
+                // ignore malformed redirect URL
               }
-            } catch {
-              // ignore malformed redirect URL
             }
           }
         } catch {
@@ -1160,6 +1192,53 @@ export function createApiApp() {
         error: 'Unable to check sign-in availability right now.',
         referenceId: refId,
       });
+    }
+  });
+
+  const ALLOWED_WELCOME_EVENTS = new Set<WelcomeAuthEvent>([
+    'signup',
+    'oauth_callback',
+    'email_verified',
+    'phone_verified',
+    'email_linked_after_phone_signup',
+    'session_check',
+  ]);
+
+  app.post('/api/auth/welcome-email', async (req: Request, res: Response) => {
+    try {
+      const verified = await fetchVerifiedSupabaseUserFromBearer(req.headers.authorization);
+      if (!verified) {
+        return res.status(401).json({
+          error: 'Authentication is required before triggering welcome email delivery.',
+        });
+      }
+
+      const rawEvent =
+        typeof req.body?.authEvent === 'string' ? req.body.authEvent.trim() : 'session_check';
+      const authEvent: WelcomeAuthEvent = ALLOWED_WELCOME_EVENTS.has(rawEvent as WelcomeAuthEvent)
+        ? (rawEvent as WelcomeAuthEvent)
+        : 'session_check';
+
+      const forwardedProto = (req.headers['x-forwarded-proto'] as string | undefined)
+        ?.split(',')[0]
+        ?.trim();
+      const forwardedHost = (req.headers['x-forwarded-host'] as string | undefined)
+        ?.split(',')[0]
+        ?.trim();
+      const host = forwardedHost || req.get('host') || '';
+      const proto = forwardedProto || req.protocol || 'https';
+      const requestOrigin = host ? `${proto}://${host}` : null;
+
+      const outcome = await processAuthenticatedWelcomeEmail({
+        user: verified.user,
+        accessToken: verified.accessToken,
+        authEvent,
+        requestOrigin,
+      });
+
+      return res.json(outcome);
+    } catch (err: unknown) {
+      return sendSafeApiError(res, 'auth.welcome_email', err);
     }
   });
 

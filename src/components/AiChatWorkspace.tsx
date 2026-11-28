@@ -63,6 +63,7 @@ import {
   SnapTriggerButtons,
 } from './SnapPhotoControl';
 import { SubjectVisualBanner } from './SubjectVisualBanner';
+import chatbotHeroImage from '../assets/images/ai_chatbot_humanoid_robot_1795861207608.jpg';
 
 interface AiChatWorkspaceProps {
   materials: StudyMaterialRecord[];
@@ -120,6 +121,7 @@ export function AiChatWorkspace({
     ragMeta?: ChatRagMeta;
   } | null>(null);
   const [expandedSourceKey, setExpandedSourceKey] = useState<string | null>(null);
+  const [heroImageError, setHeroImageError] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const inFlightRef = useRef(false);
@@ -761,6 +763,7 @@ export function AiChatWorkspace({
                     tabIndex={0}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
                         handleSelectSession(session);
                       }
                     }}
@@ -822,7 +825,15 @@ export function AiChatWorkspace({
 
           <div className="flex items-center gap-2 shrink-0">
             {/* Document Context Picker */}
-            <div className="relative">
+            <div
+              className="relative"
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' && contextPickerOpen) {
+                  e.stopPropagation();
+                  setContextPickerOpen(false);
+                }
+              }}
+            >
               <button
                 type="button"
                 onClick={() => setContextPickerOpen((prev) => !prev)}
@@ -962,14 +973,32 @@ export function AiChatWorkspace({
               <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
             </div>
           ) : messages.length === 0 ? (
-            <div className="mx-auto flex max-w-xl flex-col items-center justify-center py-20 text-center">
-              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-100 text-blue-700 shadow-xs dark:bg-blue-950/60 dark:text-cyan-400">
-                <Sparkles className="h-7 w-7" aria-hidden="true" />
-              </div>
-              <h3 className="mt-4 text-base font-bold text-slate-900 dark:text-white">
+            <div className="mx-auto flex w-full max-w-2xl flex-col items-center justify-center py-4 text-center sm:py-6">
+              <figure className="w-full overflow-hidden rounded-2xl border border-slate-200/90 bg-slate-100 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+                {!heroImageError ? (
+                  <img
+                    src={chatbotHeroImage}
+                    alt="Sophisticated humanoid AI robot in a modern digital research environment"
+                    loading="eager"
+                    decoding="async"
+                    fetchPriority="high"
+                    referrerPolicy="no-referrer"
+                    onError={() => setHeroImageError(true)}
+                    className="aspect-video max-h-60 w-full object-cover object-[center_18%] sm:max-h-72 lg:max-h-80"
+                  />
+                ) : (
+                  <div className="flex aspect-video max-h-60 w-full flex-col items-center justify-center bg-gradient-to-br from-[#0F1E3D] via-[#163462] to-[#0B1730] p-6 text-white sm:max-h-72 lg:max-h-80">
+                    <Sparkles className="h-9 w-9 text-cyan-300" aria-hidden="true" />
+                    <p className="mt-2 font-display text-sm font-semibold text-white">
+                      AI Academic Chatbot
+                    </p>
+                  </div>
+                )}
+              </figure>
+              <h3 className="mt-5 font-display text-lg font-bold tracking-tight text-slate-900 sm:text-xl dark:text-white">
                 AI Academic Chatbot
               </h3>
-              <p className="mt-1.5 text-xs leading-relaxed text-slate-600 dark:text-slate-400">
+              <p className="mt-1.5 max-w-xl text-xs leading-relaxed text-slate-600 sm:text-sm dark:text-slate-400">
                 Type any academic question, problem, or topic below. Ask for step-by-step solutions, explanations, or attach your study materials for targeted answers.
               </p>
             </div>

@@ -1,58 +1,57 @@
 # Security Summary
 
-During the Step 5 end-to-end integration and security review of Brainstine, the API server, retrieval services, and frontend client modules were audited for cross-origin exposure, server-side request forgery (SSRF), authentication/isolation bypasses, input validation gaps, and secret/provider leakage.
+During the application-wide repair, optimization, and security review of Brainstine, the Express API server, authentication and welcome email pipelines, document extraction/summarization/PDF export modules, RAG retrieval services, assessment engine, and React UI components were audited and hardened across the stack.
 
 ### Verified Fixes Applied
 
-1. **Restricted Cross-Origin Resource Sharing (CORS Allowlist)**
-   - **Risk**: `/server/createApiApp.ts` previously reflected any incoming `Origin` header back in `Access-Control-Allow-Origin` on all `/api/*` endpoints, allowing untrusted third-party sites to perform cross-origin requests against authenticated API routes.
-   - **Remediation**: Replaced unconditional origin reflection with an allowlist validator (`isOriginAllowed`) permitting only same-host origins (`Host`/`X-Forwarded-Host`), explicitly configured deployment origins (`APP_URL`, `VITE_APP_URL`, `VERCEL_URL`, `ALLOWED_ORIGINS`), and loopback development hosts outside production. Untrusted `OPTIONS` preflight requests now receive HTTP `403` without `Access-Control-Allow-Origin`.
+1. **Restricted Cross-Origin Resource Sharing (Strict CORS Allowlist)**
+   - **Risk**: `/server/createApiApp.ts` previously allowed any origin ending in `.vercel.app`, which permitted unrelated third-party `.vercel.app` deployments to make cross-origin requests against Brainstine API endpoints.
+   - **Remediation**: Removed the blanket `.vercel.app` suffix allow rule in `isOriginAllowed`, retaining exact host matching (`Host` / `X-Forwarded-Host`), explicitly configured origins (`APP_URL`, `VITE_APP_URL`, `ALLOWED_ORIGINS`), deployment-scoped Vercel system URLs (`VERCEL_URL`, `VERCEL_BRANCH_URL`, `VERCEL_PROJECT_PRODUCTION_URL`), and non-production loopback hosts. Untrusted preflight `OPTIONS` requests return HTTP `403` without `Access-Control-Allow-Origin`.
 
-2. **Strict Host Validation for Staged File Retrieval (SSRF Prevention)**
-   - **Risk**: In `/api/materials/extract`, `signedStorageUrl` checked `(expectedHost && host === expectedHost) || host.endsWith('.supabase.co')`, which permitted signed URLs pointing to unrelated external `.supabase.co` projects even when the application's Supabase host was configured.
-   - **Remediation**: Enforced exact hostname matching against `expectedHost` whenever Supabase is configured, restricted fallback wildcard `.supabase.co` checks strictly to unconfigured environments, and explicitly blocked loopback/private/link-local hostnames (`localhost`, `127.0.0.1`, `::1`, `10.*`, `172.16-31.*`, `192.168.*`, `169.254.*`, `.local`, `.internal`).
+2. **Authenticated Diagnostic Health Probes**
+   - **Risk**: `/api/health?probe=1` executed live upstream AI and Supabase REST schema probes for anonymous callers.
+   - **Remediation**: Kept `GET /api/health` lightweight for availability monitoring while gating `?probe=1` diagnostics behind valid Supabase Bearer authentication (`resolveAuthorizedUserFromBearer`) when Supabase is configured (or denying unauthenticated probes in production), returning HTTP `401` to anonymous callers.
 
-3. **Authenticated RAG Material Isolation**
-   - **Risk**: In `/server/chatRagService.ts` and `/server/tutorRagService.ts`, unauthenticated requests could supply `studyMaterials` along with a client-provided `userId` even when live Supabase authentication was active.
-   - **Remediation**: Blocked caller-supplied `studyMaterials` indexing whenever Supabase is configured and the request lacks a valid verified Bearer token. Also added a cache bypass check when an explicitly attached document ID is absent from the short-lived per-user cache.
+3. **OAuth Status Probe SSRF & Redirect Target Hardening**
+   - **Risk**: `/api/auth/oauth-status` accepted an arbitrary `redirectTo` query parameter and followed redirect `Location` headers without strict protocol/host verification.
+   - **Remediation**: Validated `req.query.redirectTo` against `isOriginAllowed(rawRedirectTo, req)` before forwarding to Supabase Auth, and enforced `https:` host checks (`accounts.google.com` or the configured Supabase project host) prior to outbound probe requests.
 
-4. **Server-Side Input Bounds on Quiz Grading**
-   - **Risk**: `/api/quizzes/grade` accepted unbounded `questions` arrays, unvalidated `selectedOptionIndex` / `correctOptionIndex` bounds, and uncapped `maxMarks` / `timeTakenSeconds` values.
-   - **Remediation**: Enforced a hard cap of `70` questions per submission, validated option arrays and integer index bounds (returning HTTP `400` for out-of-range selections or malformed questions), and clamped `maxMarks` (`1..20`), written `textResponse` length (`8,000` chars), and `timeTakenSeconds` (`0..14,400`).
+4. **Server-Side Cryptographic & API Key Isolation**
+   - **Risk**: `/server/geminiService.ts` read `process.env.VITE_GEMINI_API_KEY` as a server fallback, and `/server/assessmentService.ts` fell back to a static salt string when `ASSESSMENT_KEY_SECRET` was missing or weak.
+   - **Remediation**: Restricted server Gemini credentials strictly to `GEMINI_API_KEY` / `GOOGLE_API_KEY`, and replaced the static fallback literal with a process-scoped CSPRNG key (`crypto.randomBytes(32)`) while logging a production startup warning if `ASSESSMENT_KEY_SECRET` is missing or weak.
 
-5. **Client Technical Error Scrubbing**
-   - **Risk**: `CLIENT_TECHNICAL_LEAK_PATTERNS` in `/src/lib/apiClient.ts` scrubbed Gemini identifiers and `AIza...` keys, but did not catch Groq identifiers or `gsk_...` key prefixes.
-   - **Remediation**: Added `/groq/i`, `/groq_api_key/i`, and `/gsk_[a-z0-9_-]{10,}/i` to `CLIENT_TECHNICAL_LEAK_PATTERNS`.
+5. **Strict Host Validation for Staged File Retrieval & RAG Isolation**
+   - Validated staged `signedStorageUrl` targets in `/api/materials/extract` against the configured Supabase host while blocking loopback, private, and link-local hosts.
+   - Blocked unauthenticated caller-supplied `studyMaterials` spoofing in `chatRagService.ts` and `tutorRagService.ts` whenever Supabase authentication is active.
+   - Maintained sealed server-side assessment answer keys (`correctOptionIndex` and `expectedAnswer` never exposed before submission), bounded question/answer validation, and atomic single-delivery dedupe for `/api/auth/welcome-email`.
 
-6. **Dependency & Residual Considerations**
-   - `bun audit` reported 2 moderate advisories in transitive build-time dependencies (`glob@11.1.0` and `minimatch@10.2.6, 5.1.9`) under `vite-plugin-pwa > workbox-build`; no runtime application dependencies reported advisories.
-   - Browser-rendered academic markdown runs through React JSX (`AcademicContentRenderer.tsx`) without `dangerouslySetInnerHTML`, `innerHTML`, `eval`, or `new Function`, and `EducationalDiagramRenderer.tsx` now filters non-finite coordinates before rendering SVG plots.
-   - Quiz answer keys (`correctOptionIndex` / `expectedAnswer`) are currently included in client session state to support stateless/saved assessment review; separating grading keys entirely server-side requires authenticated server-persisted quiz storage.
+6. **Client & Application-Wide Reliability Fixes**
+   - Upgraded `/src/lib/pdfExport.ts` and `/src/components/SummaryDisplay.tsx` to preserve all summary sections (`sourceNotice`, `Concept Clarifications`, definitions, formulas, comparison tables, visual summaries, recaps, and takeaways), render `Page X of Y` footers with orphan-heading prevention and exact UTF-8 byte `xref` offsets, extend mobile object-URL lifetimes (`30s`), and show PDF download feedback.
+   - Fixed keyboard double-flip/button conflicts in `/src/components/DocumentFlashcardsModal.tsx`, isolated non-blocking study activity logging in `/src/components/StudySummarizer.tsx`, added `Escape` dismissal across modals/drawers/pickers (`DashboardLayout.tsx`, `AuthModal.tsx`, `SummaryVisualBlock.tsx`, `AiTutorWorkspace.tsx`, `AiChatWorkspace.tsx`), added keyboard navigation to interactive SVG diagram nodes (`EducationalDiagramRenderer.tsx`), replaced `innerHTML` clearing with `replaceChildren()` (`BrainstineBrainCanvas.tsx`), added phone-account support in `ProfileSettingsView.tsx`, updated `PrivacyPolicyPage.tsx` disclosures, aligned `AuthModal` dark surface consistency with `WelcomePage`, and included `public/brainstine-logo.png` in `/vercel.json` serverless function packaging.
+
+7. **Dependency & Residual Considerations**
+   - `bun audit` reported 2 moderate advisories in transitive build-time dependencies (`glob` and `minimatch`) under `vite-plugin-pwa > workbox-build`; zero runtime application dependencies reported advisories.
+   - Browser-rendered academic content uses React JSX (`AcademicContentRenderer.tsx`) without `dangerouslySetInnerHTML`, `innerHTML`, `eval`, or `new Function`.
+   - Live transactional welcome email delivery in production requires configuring `RESEND_API_KEY` and `WELCOME_EMAIL_FROM` (verified domain sender) in deployment environment variables, alongside Supabase and `ASSESSMENT_KEY_SECRET`.
 
 ---
 
 ## PoC Verification
 
-All checks below were executed locally against the updated codebase via `npx tsx server/qaIntegrationTest.ts` after all fixes were applied:
+All checks below were executed against the final repaired codebase and passed with exit code `0`:
 
-1. **CORS Allowlist Enforcement (Test 2 of 8)**
-   - Sent `OPTIONS /api/health` with `Origin: https://evil-attacker.example` while `APP_URL=https://brainstine.example.com` -> verified status `403` and `Access-Control-Allow-Origin: null`.
-   - Sent `GET /api/health` with `Origin: https://evil-attacker.example` -> verified `Access-Control-Allow-Origin: null`.
-   - Sent `OPTIONS /api/health` with `Origin: https://brainstine.example.com` -> verified status `204` and exact origin allow header.
+1. **Integration & Security Test Suite (`npx tsx server/qaIntegrationTest.ts` — 31/31 Passed)**
+   - **Strict CORS Rejection (Tests 2 & 29)**: Verified untrusted origins including `https://evil-tenant-app.vercel.app` receive HTTP `403` on `OPTIONS` preflight and zero `Access-Control-Allow-Origin` header, while configured `APP_URL` passes with `204`.
+   - **Diagnostic Probe Auth Gate (Test 30)**: Verified anonymous `GET /api/health` returns `200`, anonymous `GET /api/health?probe=1` returns `401` when Supabase auth is active, and authenticated Bearer requests succeed with `200`.
+   - **SSRF & Secret Isolation (Tests 3, 11, 13)**: Verified foreign Supabase hosts and loopback IPs are blocked (`400`), unauthenticated RAG `studyMaterials` spoofing returns `0` passages, and weak/missing `ASSESSMENT_KEY_SECRET` values operate via ephemeral sealing without secret leaks.
+   - **Persistent Assessments & Concurrency (Tests 7–20)**: Verified Practice Mode lock/feedback survival, Timed Exam countdown survival across server restarts, expired auto-submission, completed session lock (`409`), and concurrent double-submission protection (`200` + `409`).
+   - **Document Summarizer & Welcome Email (Tests 21–28)**: Verified section extraction, section subset summarization, unreadable content rejection (`422`), exact HTML/plaintext template escaping, logo PNG rendering with graceful fallback, authenticated `welcome-email` trigger (`401` unauthenticated), phone-only skip without email invention, and concurrent dedupe.
+   - **Multi-Page Academic PDF Export (Test 31)**: Verified `buildSummaryPdfBytes()` generates a valid `%PDF-1.4` multi-page document (4 pages) ending in `xref` / `%%EOF` with `Page 1 of 4`..`Page 4 of 4` footers and full section coverage (`sourceNotice`, formulas, tables, `Concept Clarifications`).
 
-2. **SSRF Protection on `/api/materials/extract` (Test 3 of 8)**
-   - Set `VITE_SUPABASE_URL=https://myproject.supabase.co` and submitted `signedStorageUrl: https://attacker-other.supabase.co/storage/v1/object/sign/study-materials/leak.pdf?token=abc` -> verified HTTP `400` rejection.
-   - Submitted loopback URL `https://127.0.0.1/storage/v1/object/sign/study-materials/leak.pdf?token=abc` -> verified HTTP `400` rejection.
-
-3. **Quiz Grading Input Bounds (Test 6 of 8)**
-   - Submitted `selectedOptionIndex: 99` against 4-option objective question -> verified HTTP `400` rejection.
-   - Submitted `71` questions to `POST /api/quizzes/grade` -> verified HTTP `400` rejection.
-
-4. **Unauthenticated RAG Material Spoofing Protection (Test 7 of 8)**
-   - Configured `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`, then called `buildChatRagContext()` and `buildTutorRagContext()` without a Bearer token while passing `userId: 'spoofed-victim-user-id'` and `studyMaterials` -> verified `searchedDocumentsCount === 0` and `sources.length === 0` in both services.
-
-5. **Supporting Deterministic & RAG Suites**
-   - `npx tsx server/documentEngineTest.ts`: 7/7 checks passed (including cross-user isolation).
-   - `npx tsx server/summaryEngineTest.ts`: 5/5 checks passed.
-   - `npx tsx server/chatRagTest.ts`: 8/8 checks passed.
-   - `npx tsx server/tutorRagTest.ts`: 7/7 test groups passed (including HTTP/SSE validation).
+2. **Supporting Engine & RAG Suites + Serverless Bundle**
+   - `npx tsx server/documentEngineTest.ts`: passed.
+   - `npx tsx server/summaryEngineTest.ts`: passed.
+   - `npx tsx server/quizEngineTest.ts`: passed.
+   - `npx tsx server/chatRagTest.ts`: passed.
+   - `npx tsx server/tutorRagTest.ts`: passed.
+   - `npx esbuild api/index.ts --bundle --platform=node --format=esm --outfile=/dev/null`: bundled cleanly (`6.0mb`).

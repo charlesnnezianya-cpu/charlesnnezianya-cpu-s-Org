@@ -18,6 +18,7 @@ export type ServerOperation =
   | 'ai.tutor'
   | 'ai.tutor.stream'
   | 'auth.oauth_status'
+  | 'auth.welcome_email'
   | 'api.health'
   | 'api.not_found'
   | 'api.unhandled';

@@ -85,6 +85,7 @@ export function SummaryDisplay({
 }: SummaryDisplayProps) {
   const summary = useMemo(() => sanitizeStructuredSummary(rawSummary), [rawSummary]);
   const [copied, setCopied] = useState(false);
+  const [pdfStatus, setPdfStatus] = useState<'idle' | 'saved' | 'error'>('idle');
   const [flashcardsOpen, setFlashcardsOpen] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>({
     overview: true,
@@ -128,6 +129,17 @@ export function SummaryDisplay({
       setTimeout(() => setCopied(false), 2000);
     } catch {
       // ignore clipboard errors
+    }
+  };
+
+  const handleExportPdf = () => {
+    try {
+      exportSummaryToPdf(summary);
+      setPdfStatus('saved');
+      window.setTimeout(() => setPdfStatus('idle'), 2500);
+    } catch {
+      setPdfStatus('error');
+      window.setTimeout(() => setPdfStatus('idle'), 3000);
     }
   };
 
@@ -260,11 +272,17 @@ export function SummaryDisplay({
 
           <button
             type="button"
-            onClick={() => exportSummaryToPdf(summary)}
+            onClick={handleExportPdf}
             className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap shrink-0 sm:min-h-8 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
           >
-            <FileDown className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Export PDF</span>
+            {pdfStatus === 'saved' ? (
+              <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+            ) : (
+              <FileDown className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+            <span>
+              {pdfStatus === 'saved' ? 'PDF Saved' : pdfStatus === 'error' ? 'Export Failed' : 'Export PDF'}
+            </span>
           </button>
 
           {onSave && (

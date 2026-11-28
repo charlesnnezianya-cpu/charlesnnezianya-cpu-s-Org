@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createApiApp } from './createApiApp.ts';
+import {
+  WELCOME_EMAIL_SUBJECT,
+  __unsafeResetWelcomeEmailMemoryForTest,
+  __unsafeSetCachedLogoBase64ForTest,
+  buildWelcomeEmailHtml,
+  buildWelcomeEmailText,
+} from './welcomeEmailService.ts';
 import { buildChatRagContext } from './chatRagService.ts';
 import { buildTutorRagContext } from './tutorRagService.ts';
 import {
@@ -12,6 +19,7 @@ import {
   startServerAssessmentSession,
   submitAndGradeServerAssessment,
 } from './assessmentService.ts';
+import { buildSummaryPdfBytes } from '../src/lib/pdfExport.ts';
 import type {
   ActiveAssessmentSummary,
   GeneratedQuizPayload,
@@ -49,6 +57,9 @@ interface MockSupabaseState {
   quizzes: Array<Record<string, unknown>>;
   assessment_sessions: Array<Record<string, unknown>>;
   quiz_attempts: Array<Record<string, unknown>>;
+  profiles?: Array<Record<string, unknown>>;
+  welcome_email_logs?: Array<Record<string, unknown>>;
+  authUsers?: Record<string, Record<string, unknown>>;
 }
 
 function parseEqParam(val: string | null): string | null {
@@ -73,12 +84,15 @@ async function startMockSupabaseServer(state: MockSupabaseState): Promise<{
   const server = http.createServer(async (req, res) => {
     const reqUrl = new URL(req.url || '/', 'http://127.0.0.1');
     const authHeader = req.headers.authorization || '';
+    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
     const callerId =
-      authHeader === 'Bearer token-user-a'
+      bearerToken === 'token-user-a'
         ? 'user-a'
-        : authHeader === 'Bearer token-user-b'
+        : bearerToken === 'token-user-b'
           ? 'user-b'
-          : null;
+          : state.authUsers && bearerToken && state.authUsers[bearerToken]
+            ? String(state.authUsers[bearerToken].id)
+            : null;
 
     const sendJson = (status: number, body: unknown) => {
       res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -96,6 +110,9 @@ async function startMockSupabaseServer(state: MockSupabaseState): Promise<{
 
     if (reqUrl.pathname === '/auth/v1/user') {
       if (!callerId) return sendJson(401, { error: 'Invalid JWT' });
+      if (state.authUsers && state.authUsers[bearerToken]) {
+        return sendJson(200, state.authUsers[bearerToken]);
+      }
       return sendJson(200, {
         id: callerId,
         email: `${callerId}@university.edu`,
@@ -110,7 +127,7 @@ async function startMockSupabaseServer(state: MockSupabaseState): Promise<{
     if (!tableMatch) {
       return sendJson(404, { error: 'Not found' });
     }
-    const table = tableMatch[1] as keyof MockSupabaseState;
+    const table = tableMatch[1] as keyof Omit<MockSupabaseState, 'authUsers'>;
     if (!state[table]) {
       return sendJson(404, { message: `Could not find table ${table}`, code: 'PGRST205' });
     }
@@ -126,14 +143,29 @@ async function startMockSupabaseServer(state: MockSupabaseState): Promise<{
           });
         }
       }
+      if (table === 'profiles' && state.profiles) {
+        const existingIdx = state.profiles.findIndex((p) => p.id === body.id);
+        if (existingIdx >= 0) {
+          return sendJson(200, [state.profiles[existingIdx]]);
+        }
+      }
       const nowIso = new Date().toISOString();
-      const row: Record<string, unknown> = {
-        id: `${table}-${idCounter++}-${Math.random().toString(36).slice(2, 8)}`,
-        created_at: nowIso,
-        ...body,
-        user_id: callerId,
-      };
-      state[table].push(row);
+      const row: Record<string, unknown> =
+        table === 'profiles'
+          ? {
+              created_at: nowIso,
+              welcome_email_status: null,
+              welcome_email_sent_at: null,
+              ...body,
+              id: callerId,
+            }
+          : {
+              id: `${table}-${idCounter++}-${Math.random().toString(36).slice(2, 8)}`,
+              created_at: nowIso,
+              ...body,
+              user_id: callerId,
+            };
+      (state[table] as Array<Record<string, unknown>>).push(row);
       return sendJson(201, [row]);
     }
 
@@ -142,20 +174,37 @@ async function startMockSupabaseServer(state: MockSupabaseState): Promise<{
     const sessionEq = parseEqParam(reqUrl.searchParams.get('session_id'));
     const statusEq = parseEqParam(reqUrl.searchParams.get('status'));
     const statusIn = parseInParam(reqUrl.searchParams.get('status'));
+    const welcomeSentNull = reqUrl.searchParams.get('welcome_email_sent_at') === 'is.null';
+    const orFilter = reqUrl.searchParams.get('or') || '';
 
     const matchesFilter = (row: Record<string, unknown>): boolean => {
       // RLS enforcement: caller can only touch their own rows
-      if (row.user_id !== callerId) return false;
+      const ownerId = table === 'profiles' ? row.id : row.user_id;
+      if (ownerId !== callerId) return false;
       if (userEq && row.user_id !== userEq) return false;
       if (idEq && row.id !== idEq) return false;
       if (sessionEq && row.session_id !== sessionEq) return false;
       if (statusEq && row.status !== statusEq) return false;
       if (statusIn && !statusIn.includes(String(row.status))) return false;
+      if (welcomeSentNull && row.welcome_email_sent_at !== null && row.welcome_email_sent_at !== undefined) {
+        return false;
+      }
+      if (orFilter.includes('welcome_email_status.is.null')) {
+        const ws = row.welcome_email_status;
+        const allowed =
+          ws === null ||
+          ws === undefined ||
+          ws === 'failed' ||
+          ws === 'not_configured' ||
+          ws === 'skipped_no_email' ||
+          ws === 'skipped_existing_account';
+        if (!allowed) return false;
+      }
       return true;
     };
 
     if (req.method === 'GET') {
-      let rows = state[table].filter(matchesFilter);
+      let rows = (state[table] as Array<Record<string, unknown>>).filter(matchesFilter);
       const order = reqUrl.searchParams.get('order');
       if (order === 'last_saved_at.desc') {
         rows = [...rows].sort(
@@ -172,10 +221,11 @@ async function startMockSupabaseServer(state: MockSupabaseState): Promise<{
     if (req.method === 'PATCH') {
       const body = await readJsonBody();
       const updated: Array<Record<string, unknown>> = [];
-      for (let i = 0; i < state[table].length; i++) {
-        if (matchesFilter(state[table][i])) {
-          state[table][i] = { ...state[table][i], ...body };
-          updated.push(state[table][i]);
+      const rows = state[table] as Array<Record<string, unknown>>;
+      for (let i = 0; i < rows.length; i++) {
+        if (matchesFilter(rows[i])) {
+          rows[i] = { ...rows[i], ...body };
+          updated.push(rows[i]);
         }
       }
       return sendJson(200, updated);
@@ -1307,7 +1357,386 @@ Capital circulation in EUR/USD moves between support demand floors and resistanc
             }),
           });
           assert.equal(badRes.status, 422);
-          console.log('PASS [22/22] Unreadable text cleanly rejected with HTTP 422');
+          console.log('PASS [22/27] Unreadable text cleanly rejected with HTTP 422');
+        }
+
+        // 23-27. Automated Welcome Email System (Auth, Exact Template/Logo, Dedupe, Phone, Returning Login, Provider Resilience)
+        {
+          __unsafeResetWelcomeEmailMemoryForTest();
+          const prevResendKey = process.env.RESEND_API_KEY;
+          const prevWelcomeFrom = process.env.WELCOME_EMAIL_FROM;
+          const origFetch = globalThis.fetch;
+
+          const nowIso = new Date().toISOString();
+          const oldIso = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+
+          const welcomeDb: MockSupabaseState = {
+            quizzes: [],
+            assessment_sessions: [],
+            quiz_attempts: [],
+            profiles: [
+              { id: 'new-google-user', email: 'amara@university.edu', display_name: 'Amara <Okafor>', welcome_email_status: null, welcome_email_sent_at: null },
+              { id: 'phone-no-email-user', email: '', phone: '+14155550199', display_name: 'Kofi', welcome_email_status: null, welcome_email_sent_at: null },
+              { id: 'returning-user', email: 'olduser@university.edu', display_name: 'Returning Student', welcome_email_status: null, welcome_email_sent_at: null },
+              { id: 'retry-user', email: 'retry@university.edu', display_name: 'Retry Student', welcome_email_status: null, welcome_email_sent_at: null },
+            ],
+            welcome_email_logs: [],
+            authUsers: {
+              'token-new-google': {
+                id: 'new-google-user',
+                email: 'amara@university.edu',
+                created_at: nowIso,
+                confirmed_at: nowIso,
+                app_metadata: { provider: 'google' },
+                user_metadata: { full_name: 'Amara <Okafor>' },
+              },
+              'token-phone-only': {
+                id: 'phone-no-email-user',
+                email: null,
+                phone: '+14155550199',
+                created_at: nowIso,
+                phone_confirmed_at: nowIso,
+                app_metadata: { provider: 'phone' },
+                user_metadata: { display_name: 'Kofi' },
+              },
+              'token-returning': {
+                id: 'returning-user',
+                email: 'olduser@university.edu',
+                created_at: oldIso,
+                email_confirmed_at: oldIso,
+                last_sign_in_at: nowIso,
+                app_metadata: { provider: 'email' },
+                user_metadata: { display_name: 'Returning Student' },
+              },
+              'token-retry-fail': {
+                id: 'retry-user',
+                email: 'retry@university.edu',
+                created_at: nowIso,
+                email_confirmed_at: nowIso,
+                app_metadata: { provider: 'email' },
+                user_metadata: { display_name: 'Retry Student' },
+              },
+            },
+          };
+
+          const welcomeSb = await startMockSupabaseServer(welcomeDb);
+          process.env.VITE_SUPABASE_URL = welcomeSb.url;
+          process.env.VITE_SUPABASE_ANON_KEY = 'anon-key-test';
+          const welcomeServer = await startTestServer();
+
+          try {
+            // 23. Template Content, HTML Escaping, Bundled Logo & Graceful Fallback When Logo Unavailable
+            const renderedHtml = buildWelcomeEmailHtml({
+              displayName: 'Amara <script>alert(1)</script>',
+              logoSrc: 'https://brainstine.com/brainstine-logo.png',
+              ctaUrl: 'https://brainstine.com',
+            });
+            const fallbackHtml = buildWelcomeEmailHtml({
+              displayName: 'Amara',
+              logoSrc: null,
+              ctaUrl: 'https://brainstine.com',
+            });
+            const renderedText = buildWelcomeEmailText('Amara');
+            assert.equal(WELCOME_EMAIL_SUBJECT, 'Welcome to Brainstine — Your Academic Journey Starts Here!');
+            assert.equal(renderedHtml.includes('<script>'), false, 'HTML must escape user display name');
+            assert.ok(renderedHtml.includes('https://brainstine.com/brainstine-logo.png'), 'Must render generated Brainstine logo PNG');
+            assert.equal(renderedHtml.includes('<svg'), false, 'Must never inject raw SVG into email HTML');
+            assert.equal(fallbackHtml.includes('<img'), false, 'Fallback HTML when logo unavailable must omit broken img tag');
+            assert.ok(fallbackHtml.includes('Brain<span style="color: #1D4ED8;">stine</span>'), 'Fallback HTML must render clean Brainstine wordmark');
+            assert.ok(renderedHtml.includes('We&#39;re delighted to have you join our learning community.') || renderedHtml.includes("We're delighted to have you join our learning community."));
+            assert.ok(renderedText.includes('Hello Amara,'));
+            assert.ok(renderedText.includes('Start exploring, keep learning, and make every study session count.'));
+            assert.ok(renderedText.includes('Happy Learning!'));
+            assert.ok(renderedText.includes('The Brainstine Team'));
+            console.log('PASS [23/28] Welcome email template renders created logo PNG, escapes HTML, and degrades cleanly when logo unavailable');
+
+            // 24. Unauthenticated POST /api/auth/welcome-email is rejected with 401
+            const unauthRes = await origFetch(`${welcomeServer.baseUrl}/api/auth/welcome-email`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ authEvent: 'signup' }),
+            });
+            assert.equal(unauthRes.status, 401);
+            console.log('PASS [24/27] Unauthenticated welcome email request rejected with HTTP 401');
+
+            // 25. Missing RESEND_API_KEY honestly reports not_configured (no fake sent status)
+            delete process.env.RESEND_API_KEY;
+            const unconfRes = await origFetch(`${welcomeServer.baseUrl}/api/auth/welcome-email`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer token-new-google',
+              },
+              body: JSON.stringify({ authEvent: 'oauth_callback' }),
+            });
+            assert.equal(unconfRes.status, 200);
+            const unconfJson = (await unconfRes.json()) as { ok: boolean; status: string };
+            assert.equal(unconfJson.ok, false);
+            assert.equal(unconfJson.status, 'not_configured');
+            console.log('PASS [25/27] Missing Resend API key handled gracefully without fake simulation');
+
+            // 26. Phone-only registration without email skips without inventing an email + returning login skipped
+            process.env.RESEND_API_KEY = 're_test_key_123';
+            process.env.WELCOME_EMAIL_FROM = 'Brainstine <welcome@brainstine.com>';
+
+            const resendPayloads: Array<Record<string, unknown>> = [];
+            let resendShouldFail = false;
+            globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+              const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+              if (urlStr === 'https://api.resend.com/emails') {
+                const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+                resendPayloads.push(body);
+                if (resendShouldFail) {
+                  return new Response(JSON.stringify({ message: 'Transient provider outage' }), { status: 500 });
+                }
+                return new Response(JSON.stringify({ id: `re_msg_${resendPayloads.length}` }), {
+                  status: 200,
+                  headers: { 'Content-Type': 'application/json' },
+                });
+              }
+              return origFetch(input, init);
+            }) as typeof fetch;
+
+            const phoneSkipRes = await origFetch(`${welcomeServer.baseUrl}/api/auth/welcome-email`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer token-phone-only',
+              },
+              body: JSON.stringify({ authEvent: 'phone_verified' }),
+            });
+            const phoneSkipJson = (await phoneSkipRes.json()) as { ok: boolean; status: string };
+            assert.equal(phoneSkipJson.status, 'skipped_no_email');
+
+            const returningRes = await origFetch(`${welcomeServer.baseUrl}/api/auth/welcome-email`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer token-returning',
+              },
+              body: JSON.stringify({ authEvent: 'session_check' }),
+            });
+            const returningJson = (await returningRes.json()) as { ok: boolean; status: string };
+            assert.equal(returningJson.status, 'skipped_existing_account');
+            assert.equal(resendPayloads.length, 0);
+            console.log('PASS [26/27] Phone-only & returning sign-ins skip cleanly without inventing emails');
+
+            // 27. Concurrent/Repeated New Sign-Up Sends Exactly Once via Resend + Provider Failure Recorded
+            const [c1, c2] = await Promise.all([
+              origFetch(`${welcomeServer.baseUrl}/api/auth/welcome-email`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: 'Bearer token-new-google',
+                },
+                body: JSON.stringify({ authEvent: 'oauth_callback' }),
+              }),
+              origFetch(`${welcomeServer.baseUrl}/api/auth/welcome-email`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: 'Bearer token-new-google',
+                },
+                body: JSON.stringify({ authEvent: 'signup' }),
+              }),
+            ]);
+            const j1 = (await c1.json()) as { ok: boolean; status: string };
+            const j2 = (await c2.json()) as { ok: boolean; status: string };
+            assert.equal(j1.status, 'sent');
+            assert.equal(j2.status, 'sent'); // Second awaits the same in-flight promise
+            assert.equal(resendPayloads.length, 1, 'Resend must be called only once across concurrent triggers');
+            assert.deepEqual(resendPayloads[0].to, ['amara@university.edu']);
+            assert.equal(resendPayloads[0].subject, WELCOME_EMAIL_SUBJECT);
+
+            // Subsequent replay after memory reset still blocked by DB welcome_email_sent_at
+            __unsafeResetWelcomeEmailMemoryForTest();
+            const replayRes = await origFetch(`${welcomeServer.baseUrl}/api/auth/welcome-email`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer token-new-google',
+              },
+              body: JSON.stringify({ authEvent: 'oauth_callback' }),
+            });
+            const replayJson = (await replayRes.json()) as { ok: boolean; status: string };
+            assert.equal(replayJson.status, 'already_sent');
+            assert.equal(resendPayloads.length, 1, 'Database lock must block replay across restarts');
+
+            // Provider failure handling
+            resendShouldFail = true;
+            const failRes = await origFetch(`${welcomeServer.baseUrl}/api/auth/welcome-email`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer token-retry-fail',
+              },
+              body: JSON.stringify({ authEvent: 'signup' }),
+            });
+            assert.equal(failRes.status, 200);
+            const failJson = (await failRes.json()) as { ok: boolean; status: string };
+            assert.equal(failJson.ok, false);
+            assert.equal(failJson.status, 'failed');
+            console.log('PASS [27/28] Atomic dedupe, Resend delivery, CID/PNG logo payload, and failure logging verified');
+
+            // 28. Logo unavailability tolerance: even if local logo & public URL are both unavailable, email still sends cleanly
+            resendShouldFail = false;
+            const noLogoDbProfile = {
+              id: 'retry-user',
+              email: 'retry@university.edu',
+              display_name: 'Retry Student',
+              welcome_email_status: 'failed',
+              welcome_email_sent_at: null,
+            };
+            welcomeDb.profiles = welcomeDb.profiles?.map((p) =>
+              p.id === 'retry-user' ? noLogoDbProfile : p
+            );
+            __unsafeResetWelcomeEmailMemoryForTest();
+            __unsafeSetCachedLogoBase64ForTest(null);
+            const prevAppUrlForLogo = process.env.APP_URL;
+            delete process.env.APP_URL;
+            try {
+              const noLogoRes = await origFetch(`${welcomeServer.baseUrl}/api/auth/welcome-email`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: 'Bearer token-retry-fail',
+                },
+                body: JSON.stringify({ authEvent: 'signup' }),
+              });
+              assert.equal(noLogoRes.status, 200);
+              const noLogoJson = (await noLogoRes.json()) as { ok: boolean; status: string };
+              assert.equal(noLogoJson.ok, true);
+              assert.equal(noLogoJson.status, 'sent');
+              const sentPayload = resendPayloads[resendPayloads.length - 1];
+              assert.equal(String(sentPayload.html || '').includes('<img'), false, 'Unavailable logo must omit broken image tag cleanly');
+              assert.equal('attachments' in sentPayload, false, 'Unavailable logo must not send empty attachments');
+              console.log('PASS [28/28] Welcome email succeeds with clean typographic header when logo image is unavailable');
+            } finally {
+              __unsafeSetCachedLogoBase64ForTest(undefined);
+              if (prevAppUrlForLogo !== undefined) process.env.APP_URL = prevAppUrlForLogo;
+            }
+          } finally {
+            globalThis.fetch = origFetch;
+            if (prevResendKey === undefined) delete process.env.RESEND_API_KEY;
+            else process.env.RESEND_API_KEY = prevResendKey;
+            if (prevWelcomeFrom === undefined) delete process.env.WELCOME_EMAIL_FROM;
+            else process.env.WELCOME_EMAIL_FROM = prevWelcomeFrom;
+            await new Promise<void>((resolve) => welcomeServer.server.close(() => resolve()));
+            await new Promise<void>((resolve) => welcomeSb.server.close(() => resolve()));
+          }
+        }
+
+        // 29. Security PoC: Reject arbitrary *.vercel.app origins on CORS
+        {
+          const attackerOrigin = 'https://evil-tenant-app.vercel.app';
+          const badPreflight = await fetch(`${serverB.baseUrl}/api/health`, {
+            method: 'OPTIONS',
+            headers: { Origin: attackerOrigin },
+          });
+          assert.equal(badPreflight.status, 403, 'Arbitrary third-party .vercel.app preflight must be blocked');
+          assert.equal(badPreflight.headers.get('access-control-allow-origin'), null);
+
+          const badGet = await fetch(`${serverB.baseUrl}/api/health`, {
+            headers: { Origin: attackerOrigin },
+          });
+          assert.equal(badGet.headers.get('access-control-allow-origin'), null);
+          console.log('PASS [29/31] Arbitrary third-party .vercel.app origins rejected by strict CORS allowlist');
+        }
+
+        // 30. Security PoC: Unauthenticated /api/health?probe=1 blocked when Supabase auth is active
+        {
+          const anonHealth = await fetch(`${serverB.baseUrl}/api/health`);
+          assert.equal(anonHealth.status, 200);
+
+          const anonProbe = await fetch(`${serverB.baseUrl}/api/health?probe=1`);
+          assert.equal(anonProbe.status, 401, 'Anonymous diagnostic probe must be rejected when Supabase is active');
+
+          const authedProbe = await fetch(`${serverB.baseUrl}/api/health?probe=1`, {
+            headers: { Authorization: 'Bearer token-user-a' },
+          });
+          assert.equal(authedProbe.status, 200);
+          console.log('PASS [30/31] Diagnostic /api/health?probe=1 requires valid Bearer authentication');
+        }
+
+        // 31. Academic Summary PDF Export: Multi-page Pagination, Page X of Y Footer, and All Content Sections
+        {
+          const longConcepts = Array.from({ length: 12 }, (_, idx) => ({
+            heading: `Core Mechanism Section ${idx + 1}`,
+            sourcePoints: [
+              `Cellular transport stage ${idx + 1} regulates membrane potential via selective ion channels and ATP-driven active gradients across biological bilayers.`,
+              `Secondary feedback pathway ${idx + 1} stabilizes osmotic equilibrium under fluctuating extracellular concentrations during sustained metabolic load.`,
+            ],
+            aiClarification: `Key cellular mechanism insight ${idx + 1}.`,
+            subsections: [
+              {
+                heading: `Sub-pathway ${idx + 1}.A`,
+                points: [
+                  `Allosteric modulation shifts reaction kinetics toward cooperative substrate binding.`,
+                ],
+              },
+            ],
+            examples: [`Clinical illustration ${idx + 1} demonstrates renal sodium reabsorption.`],
+          }));
+
+          const pdfBytes = buildSummaryPdfBytes({
+            title: 'Membrane Transport & Cellular Bioenergetics.pdf',
+            subjectArea: 'Biology',
+            summaryLevel: 'comprehensive',
+            wordCount: 840,
+            sourceNotice: 'Generated from selected Chapters 2 to 4.',
+            topicOverview:
+              'Membrane transport coordinates passive diffusion, facilitated transport, and ATP-powered ion pumps.',
+            mainConcepts: longConcepts,
+            importantDefinitions: [
+              { term: 'Osmosis', definition: 'Net diffusion of water across a semipermeable membrane.', origin: 'source' },
+            ],
+            formulasOrFrameworks: [
+              {
+                name: 'Nernst Equation',
+                expressionOrStructure: 'E = (RT / zF) * ln([ion]_out / [ion]_in)',
+                usage: 'Computes the equilibrium electrical potential for a single permeant ion.',
+                variables: [{ symbol: 'z', meaning: 'Ion valence' }],
+              },
+            ],
+            importantFacts: ['Sodium-potassium ATPase exports 3 Na+ for every 2 K+ imported.'],
+            relevantExamples: [
+              { title: 'Neuronal Repolarization', example: 'Voltage-gated K+ efflux restores resting potential.', origin: 'source' },
+            ],
+            comparisonTables: [
+              {
+                title: 'Passive vs Active Transport',
+                headers: ['Criterion', 'Passive', 'Active'],
+                rows: [{ criterion: 'Energy Input', values: ['None (down gradient)', 'Direct or coupled ATP'] }],
+              },
+            ],
+            difficultConceptExplanations: [
+              {
+                concept: 'Electrochemical Gradient',
+                plainExplanation: 'Combines both concentration push and electrical charge pull acting on an ion.',
+                sourceContext: 'Observed across polarized plasma membranes.',
+              },
+            ],
+            keyTerminology: ['Osmosis', 'ATPase', 'Electrochemical Gradient'],
+            revisionNotes: ['Check charge balance across transport stoichiometry before calculating net flux.'],
+            keyTakeaways: ['Active pumps maintain gradients used by secondary symporters.'],
+            markdown: '# Membrane Transport',
+            chunkCount: 3,
+            generatedAt: '2026-11-28T00:00:00.000Z',
+          });
+
+          const pdfText = Buffer.from(pdfBytes).toString('latin1');
+          assert.ok(pdfText.startsWith('%PDF-1.4\n'), 'PDF must begin with valid %PDF-1.4 header');
+          assert.ok(pdfText.includes('\nxref\n') && pdfText.endsWith('%%EOF'), 'PDF must end with xref and %%EOF');
+          assert.ok(pdfText.includes('Note: Generated from selected Chapters 2 to 4.'), 'Must include sourceNotice');
+          assert.ok(pdfText.includes('Concept Clarifications'), 'Must include difficultConceptExplanations section');
+          assert.ok(pdfText.includes('Electrochemical Gradient'), 'Must preserve concept clarification terms');
+          assert.ok(pdfText.includes('Nernst Equation'), 'Must include formulas');
+          assert.ok(pdfText.includes('Page 1 of '), 'Must include Page 1 of N numbering');
+          const countMatch = pdfText.match(/\/Type \/Pages \/Kids \[[^\]]+\] \/Count (\d+)/);
+          const pageCount = countMatch ? Number(countMatch[1]) : 0;
+          assert.ok(pageCount >= 2, `Expected multi-page PDF (>= 2 pages), got ${pageCount}`);
+          assert.ok(pdfText.includes(`Page ${pageCount} of ${pageCount}`), 'Final page footer must include total page count');
+          console.log(`PASS [31/31] Academic PDF export generated valid ${pageCount}-page PDF with all sections & Page X of Y numbering`);
         }
       } finally {
         await new Promise<void>((resolve) => serverB.server.close(() => resolve()));
@@ -1316,7 +1745,7 @@ Capital circulation in EUR/USD moves between support demand floors and resistanc
       await new Promise<void>((resolve) => mockSb.server.close(() => resolve()));
     }
 
-    console.log('\nALL 22 STEP-5A & STEP-5B QA, SUMMARIZER & SECURITY TESTS PASSED.');
+    console.log('\nALL 31 STEP-5A & STEP-5B QA, SUMMARIZER, PDF EXPORT, SECURITY & WELCOME EMAIL TESTS PASSED.');
   } finally {
     if (prevSupabaseUrl === undefined) delete process.env.VITE_SUPABASE_URL;
     else process.env.VITE_SUPABASE_URL = prevSupabaseUrl;

@@ -120,8 +120,7 @@ export default function BrainstineBrainCanvas({
     canvas.style.height = '100%';
     canvas.style.display = 'block';
     canvas.style.touchAction = 'pan-y';
-    container.innerHTML = '';
-    container.appendChild(canvas);
+    container.replaceChildren(canvas);
 
     const scene = new THREE.Scene();
     scene.fog = new THREE.FogExp2(0x050914, 0.045);

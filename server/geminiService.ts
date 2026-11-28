@@ -93,8 +93,7 @@ export function clearResolvedGeminiModelCache(): void {
 export function isGeminiConfigured(): boolean {
   const apiKey =
     process.env.GEMINI_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    process.env.VITE_GEMINI_API_KEY;
+    process.env.GOOGLE_API_KEY;
   return Boolean(apiKey && apiKey.trim() !== '' && apiKey !== 'MY_GEMINI_API_KEY');
 }
 
@@ -102,8 +101,7 @@ export function getGeminiClient(): GoogleGenAI {
   const apiKey =
     (
       process.env.GEMINI_API_KEY ||
-      process.env.GOOGLE_API_KEY ||
-      process.env.VITE_GEMINI_API_KEY
+      process.env.GOOGLE_API_KEY
     )?.trim() || '';
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
     throw new AiConfigurationError(

@@ -110,8 +110,8 @@ export function PrivacyPolicyPage({
             workspace designed to help students organize course materials, generate structured study summaries, practice
             with quizzes and timed examinations, and study with an Academic Chatbot and Personal AI Tutor. This Privacy
             Policy explains clearly what personal and study information we collect, why we collect it, how it is processed
-            with Supabase and the Google Gemini API, how long we retain it, and how you can delete your records or your
-            entire account at any time.
+            with Supabase, Groq, the Google Gemini API, and transactional email delivery, how long we retain it, and how
+            you can delete your records or your entire account at any time.
           </p>
 
           {/* Quick Section Jump Links */}
@@ -150,7 +150,7 @@ export function PrivacyPolicyPage({
                 </h3>
                 <ul className="mt-2.5 list-disc space-y-1.5 pl-5 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
                   <li>Your full name or chosen display name.</li>
-                  <li>Your email address used to sign in and verify your account.</li>
+                  <li>Your email address or phone number used to sign in and verify your account.</li>
                   <li>Your Google profile photo (avatar image URL) when you choose to sign in with Google OAuth.</li>
                 </ul>
               </div>
@@ -298,13 +298,24 @@ export function PrivacyPolicyPage({
 
               <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-5 dark:border-slate-800 dark:bg-slate-900/50">
                 <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
-                  Google Gemini API (AI Processing)
+                  Google Gemini API &amp; Groq (AI Processing)
                 </h3>
                 <p className="mt-1.5 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
-                  When you click summarize, generate a quiz, submit theory answers for grading, or send a message/photo
+                  When you click summarize, generate a quiz, submit questions, or send a message/photo
                   to the Academic Chatbot or Personal AI Tutor, Brainstine transmits the relevant study text, image, or
-                  prompt from our server to the Google Gemini API solely to generate your requested educational
-                  response.
+                  prompt from our server to our configured AI inference providers (Groq and Google Gemini API) solely to
+                  generate your requested educational response.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-5 dark:border-slate-800 dark:bg-slate-900/50">
+                <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
+                  Resend (Transactional Welcome &amp; Account Emails)
+                </h3>
+                <p className="mt-1.5 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+                  When you register a new account that includes a verified email address, Brainstine sends a one-time
+                  welcome email via Resend using only your display name and email address. Phone-only registrations without
+                  an email address do not trigger welcome emails.
                 </p>
               </div>
             </div>
@@ -321,8 +332,9 @@ export function PrivacyPolicyPage({
                   <strong>We do NOT share data with advertisers, ad networks, or data brokers.</strong>
                 </li>
                 <li>
-                  We only disclose data outside Supabase and Google Gemini if legally required to comply with valid
-                  applicable law or to protect the safety and security of users and our platform.
+                  We only disclose data outside our infrastructure, AI inference, and email delivery providers if
+                  legally required to comply with valid applicable law or to protect the safety and security of users
+                  and our platform.
                 </li>
               </ul>
             </div>

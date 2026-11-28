@@ -200,9 +200,6 @@ export function StudySummarizer({
     ) {
       return extractedSections;
     }
-    if (extractedSections.length > 0 && editableExtractedText.trim() === extraction?.extractedText.trim()) {
-      return extractedSections;
-    }
     return buildFallbackSections(
       editableExtractedText,
       editableTitle || extraction?.title || 'Study Material'
@@ -871,15 +868,19 @@ export function StudySummarizer({
           );
         }
 
-        await recordStudyActivity({
-          userId: user.id,
-          activityType: 'summarize',
-          title: generated.title,
-          detail: `Generated ${STYLE_LABELS[summaryLevel]} Summary`,
-          materialType: extraction?.materialType || 'text',
-          summaryLevel,
-        });
-        onActivityRecorded?.();
+        try {
+          await recordStudyActivity({
+            userId: user.id,
+            activityType: 'summarize',
+            title: generated.title,
+            detail: `Generated ${STYLE_LABELS[summaryLevel]} Summary`,
+            materialType: extraction?.materialType || 'text',
+            summaryLevel,
+          });
+          onActivityRecorded?.();
+        } catch (activityErr) {
+          console.warn('Study activity sync warning:', activityErr);
+        }
       }
 
       if (user && isConfigured && savedRecordId && generated.visualAids && generated.visualAids.length > 0) {

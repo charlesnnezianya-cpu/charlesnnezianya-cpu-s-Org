@@ -93,8 +93,11 @@ export interface EducationalDiagramSpec {
 export interface UserProfile {
   id: string;
   email: string;
+  phone?: string | null;
   display_name: string;
   theme_preference?: ThemeMode;
+  welcome_email_status?: string | null;
+  welcome_email_sent_at?: string | null;
   created_at?: string;
   updated_at?: string;
 }

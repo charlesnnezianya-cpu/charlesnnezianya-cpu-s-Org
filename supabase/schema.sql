@@ -7,12 +7,34 @@ create extension if not exists "pgcrypto";
 -- 1. User Profiles
 create table if not exists public.profiles (
   id uuid primary key references auth.users (id) on delete cascade,
-  email text not null,
+  email text not null default '',
+  phone text,
   display_name text not null,
   theme_preference text not null default 'system' check (theme_preference in ('light', 'dark', 'system')),
+  welcome_email_status text check (welcome_email_status in ('sending', 'sent', 'failed', 'not_configured', 'skipped_no_email', 'skipped_existing_account')),
+  welcome_email_sent_at timestamptz,
+  welcome_email_provider text,
+  welcome_email_message_id text,
+  welcome_email_error text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+do $$
+begin
+  alter table public.profiles add column if not exists phone text;
+  alter table public.profiles add column if not exists welcome_email_status text;
+  alter table public.profiles add column if not exists welcome_email_sent_at timestamptz;
+  alter table public.profiles add column if not exists welcome_email_provider text;
+  alter table public.profiles add column if not exists welcome_email_message_id text;
+  alter table public.profiles add column if not exists welcome_email_error text;
+  alter table public.profiles drop constraint if exists profiles_welcome_email_status_check;
+  alter table public.profiles
+    add constraint profiles_welcome_email_status_check
+    check (welcome_email_status is null or welcome_email_status in ('sending', 'sent', 'failed', 'not_configured', 'skipped_no_email', 'skipped_existing_account'));
+exception
+  when undefined_table then null;
+end $$;
 
 alter table public.profiles enable row level security;
 
@@ -32,20 +54,53 @@ create policy "Users can update their own profile"
   using (auth.uid() = id)
   with check (auth.uid() = id);
 
+-- 1B. Welcome Email Delivery Logs (audit & troubleshooting history per account)
+create table if not exists public.welcome_email_logs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  recipient_email text,
+  auth_provider text not null default 'email',
+  email_provider text not null default 'none',
+  status text not null check (status in ('sent', 'failed', 'not_configured', 'skipped_no_email', 'skipped_existing_account')),
+  provider_message_id text,
+  error_message text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists welcome_email_logs_user_id_idx
+  on public.welcome_email_logs (user_id, created_at desc);
+
+alter table public.welcome_email_logs enable row level security;
+
+drop policy if exists "Users can view their own welcome email logs" on public.welcome_email_logs;
+create policy "Users can view their own welcome email logs"
+  on public.welcome_email_logs for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert their own welcome email logs" on public.welcome_email_logs;
+create policy "Users can insert their own welcome email logs"
+  on public.welcome_email_logs for insert
+  with check (auth.uid() = user_id);
+
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
 security definer set search_path = public
 as $$
 begin
-  insert into public.profiles (id, email, display_name)
+  insert into public.profiles (id, email, phone, display_name)
   values (
     new.id,
     coalesce(new.email, ''),
+    nullif(coalesce(new.phone, ''), ''),
     coalesce(
-      new.raw_user_meta_data ->> 'display_name',
-      new.raw_user_meta_data ->> 'full_name',
-      split_part(coalesce(new.email, 'Student'), '@', 1)
+      nullif(new.raw_user_meta_data ->> 'display_name', ''),
+      nullif(new.raw_user_meta_data ->> 'full_name', ''),
+      nullif(new.raw_user_meta_data ->> 'name', ''),
+      case
+        when coalesce(new.email, '') <> '' then split_part(new.email, '@', 1)
+        else 'Learner'
+      end
     )
   )
   on conflict (id) do nothing;

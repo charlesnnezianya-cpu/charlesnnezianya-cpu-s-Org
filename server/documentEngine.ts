@@ -162,6 +162,15 @@ export interface ExtractedSectionRelationship {
   connectionNote: string;
 }
 
+export interface CrossSectionConceptCluster {
+  conceptLabel: string;
+  coreTokens: string[];
+  sectionHeadings: string[];
+  pageNumbers: number[];
+  unitIndices: number[];
+  salience: number;
+}
+
 export interface ExtractedDifficultConcept {
   concept: string;
   sourceContext: string;
@@ -184,11 +193,13 @@ export interface DocumentIntelligenceProfile {
   contentHash: string;
   title: string;
   subjectArea: string;
+  centralThesis: string;
   normalizedText: string;
   chunks: DocumentChunk[];
   units: AnalyzedUnit[];
   sections: DocumentSectionCluster[];
   sectionRelationships: ExtractedSectionRelationship[];
+  conceptClusters: CrossSectionConceptCluster[];
   difficultConcepts: ExtractedDifficultConcept[];
   definitions: ExtractedDefinition[];
   formulas: ExtractedFormula[];
@@ -227,6 +238,16 @@ export const ACADEMIC_STOP_WORDS = new Set([
   'however', 'therefore', 'moreover', 'furthermore', 'additionally', 'example',
   'study', 'notes', 'chapter', 'section', 'lecture', 'important', 'overview',
   'summary', 'introduction', 'conclusion', 'following',
+  'across', 'despite', 'prior', 'order', 'unlike', 'without', 'within', 'since',
+  'along', 'among', 'toward', 'towards', 'whether', 'though', 'although',
+  'whereas', 'until', 'unless', 'before', 'after', 'during', 'under', 'above',
+  'below', 'separate', 'recently', 'generally', 'widely', 'instead', 'rather',
+  'due', 'several', 'various', 'modern', 'other', 'another', 'often', 'always',
+  'usually', 'typically', 'sometimes', 'swiftly', 'directly', 'passively',
+  'automatically', 'unpredictably', 'predominantly', 'mainly', 'actually',
+  'primarily', 'largely', 'mostly', 'high', 'higher', 'low', 'lower', 'most',
+  'more', 'less', 'new', 'old', 'first', 'second', 'third', 'last', 'next',
+  'early', 'late', 'able', 'can', 'play', 'plays', 'role',
 ]);
 
 export const SUBJECT_LEXICONS: Array<{ subject: string; terms: string[]; peerTerms: string[] }> = [
@@ -611,7 +632,7 @@ export function normalizeText(text: string): string {
     // Strip remaining unsupported inline Private Use Area, empty-box tofu, replacement & zero-width glyphs
     .replace(/[\uE000-\uF8FF\uFFFD\u25A0-\u25FF\u2700-\u27BF]/g, ' ')
     .replace(/[\u200B-\u200F\uFEFF\u2028\u2029]/g, '')
-    .replace(/([a-z]{2,})-\n([a-z]{2,})/g, '$1$2')
+    .replace(/([A-Za-z]{2,})-[ \t]*\n[ \t]*([a-z]{2,})/g, '$1$2')
     .replace(/[\u0000-\u0008\u000B-\u000C\u000E-\u001F\u007F-\u009F]/g, '')
     .replace(/[ \t]+/g, ' ')
     .replace(/\n[ \t]+/g, '\n')
@@ -1231,6 +1252,7 @@ export function isMetaFillerSentence(text: string): boolean {
   ) {
     return true;
   }
+  if (/^[a-z]{2,5}\s+\d{2,4}\b.*(?:—|–|-|\|)\s*page\s+\d+/i.test(lower)) return true;
   if (/^https?:\/\/\S+$/i.test(lower)) return true;
   return false;
 }
@@ -1260,7 +1282,7 @@ export function isCodeOrSyntaxLine(line: string): boolean {
 export function detectHeadingInfo(
   line: string,
   nextLine?: string
-): { title: string; level: 1 | 2 } | null {
+): { title: string; level: 1 | 2; mdDepth?: number } | null {
   const trimmed = line.trim();
   if (!trimmed || trimmed.length > 90) return null;
   if (isCodeOrSyntaxLine(trimmed)) return null;
@@ -1270,6 +1292,7 @@ export function detectHeadingInfo(
     return {
       title: mdMatch[2].replace(/:$/, '').trim(),
       level: mdMatch[1].length >= 2 ? 2 : 1,
+      mdDepth: mdMatch[1].length,
     };
   }
 
@@ -1404,36 +1427,101 @@ function splitPagesPreservingMarkers(normalized: string): ParsedPageSegment[] {
   return pages;
 }
 
+function normalizeChromePattern(line: string): string {
+  return line
+    .trim()
+    .toLowerCase()
+    .replace(/\bpages?\s+\d+(?:\s*(?:of|\/)\s*\d+)?\b/gi, 'page #')
+    .replace(/\d+/g, '#')
+    .replace(/\s+/g, ' ');
+}
+
+function isStandalonePageNumberOrTocLine(line: string): boolean {
+  const t = line.trim();
+  if (!t) return false;
+  // Standalone Arabic / Roman page footer numbers: "12", "- 12 -", "Page 4 of 12", "iv"
+  if (
+    /^(?:[-–—|•]?\s*\d{1,4}\s*[-–—|•]?|pages?\s+\d+(?:\s*(?:of|\/)\s*\d+)?|slide\s+\d+(?:\s*(?:of|\/)\s*\d+)?|[ivxlcdm]{1,6})$/i.test(
+      t
+    )
+  ) {
+    // Preserve uppercase single Roman numerals only if NOT isolated lowercase page numbers when followed by dot/heading
+    if (/^[IVXLCDM]+$/.test(t) && t.length <= 2) return false;
+    return true;
+  }
+  if (/^(?:table of contents|contents)\s*$/i.test(t)) {
+    return true;
+  }
+  // Course/header banner ending with Page N (e.g., "CS 402 Distributed Systems — Page 1")
+  if (/^[A-Za-z0-9\s,&:/()-]{4,75}(?:—|–|-|\|)\s*(?:Page|Slide)\s+\d+\s*$/i.test(t)) {
+    return true;
+  }
+  // Table-of-contents dot-leader entries: "1.2 Cell Membranes ........... 14"
+  if (/\.{3,}\s*(?:\d{1,4}|[ivxlcdm]{1,6})\s*$/i.test(t) && t.length <= 120) {
+    return true;
+  }
+  return false;
+}
+
 function stripRepeatingPageChrome(pages: ParsedPageSegment[]): ParsedPageSegment[] {
-  if (pages.length < 3) return pages;
+  const cleanedPerLine = pages.map((page) => ({
+    pageNumber: page.pageNumber,
+    lines: page.text
+      .split('\n')
+      .filter((l) => !isStandalonePageNumberOrTocLine(l)),
+  }));
+
+  if (cleanedPerLine.length < 3) {
+    return cleanedPerLine.map((p) => ({
+      pageNumber: p.pageNumber,
+      text: p.lines.join('\n').trim(),
+    }));
+  }
 
   const lineFreq = new Map<string, number>();
-  for (const page of pages) {
-    const uniqueLines = new Set(
-      page.text
-        .split('\n')
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0 && l.length <= 80)
-    );
+  const edgePatternFreq = new Map<string, number>();
+
+  for (const page of cleanedPerLine) {
+    const nonEmpty = page.lines.map((l) => l.trim()).filter(Boolean);
+    const uniqueLines = new Set(nonEmpty.filter((l) => l.length > 0 && l.length <= 90));
     for (const l of uniqueLines) {
       lineFreq.set(l, (lineFreq.get(l) || 0) + 1);
     }
-  }
 
-  const repeatedChrome = new Set<string>();
-  for (const [line, count] of lineFreq.entries()) {
-    if (count >= Math.max(3, Math.ceil(pages.length * 0.6))) {
-      repeatedChrome.add(line);
+    // Track top 2 and bottom 2 lines normalized for changing page numbers ("Bio Notes | Page 4")
+    const edgeLines = [...nonEmpty.slice(0, 2), ...nonEmpty.slice(-2)].filter(
+      (l) => l.length >= 4 && l.length <= 90
+    );
+    const uniquePatterns = new Set(edgeLines.map(normalizeChromePattern));
+    for (const pat of uniquePatterns) {
+      edgePatternFreq.set(pat, (edgePatternFreq.get(pat) || 0) + 1);
     }
   }
 
-  if (repeatedChrome.size === 0) return pages;
+  const threshold = Math.max(3, Math.ceil(cleanedPerLine.length * 0.55));
+  const repeatedChrome = new Set<string>();
+  for (const [line, count] of lineFreq.entries()) {
+    if (count >= threshold) repeatedChrome.add(line);
+  }
 
-  return pages.map((page) => ({
+  const repeatedEdgePatterns = new Set<string>();
+  for (const [pat, count] of edgePatternFreq.entries()) {
+    if (count >= threshold) repeatedEdgePatterns.add(pat);
+  }
+
+  return cleanedPerLine.map((page) => ({
     pageNumber: page.pageNumber,
-    text: page.text
-      .split('\n')
-      .filter((l) => !repeatedChrome.has(l.trim()))
+    text: page.lines
+      .filter((rawLine, idx, arr) => {
+        const trimmed = rawLine.trim();
+        if (!trimmed) return true;
+        if (repeatedChrome.has(trimmed)) return false;
+        const isEdge = idx < 3 || idx >= arr.length - 3;
+        if (isEdge && repeatedEdgePatterns.has(normalizeChromePattern(trimmed))) {
+          return false;
+        }
+        return true;
+      })
       .join('\n')
       .trim(),
   }));
@@ -1640,7 +1728,10 @@ function extractDefinitionFromUnit(unit: AnalyzedUnit): ExtractedDefinition | nu
     const rawDef = dashMatch[2].trim();
     if (
       rawTerm.split(/\s+/).length <= 5 &&
-      !/^(?:note|example|step\s*\d+|page\s*\d+|figure\s*\d+|warning|summary|recap)/i.test(rawTerm)
+      !/^(?:note|example|step\s*\d+|page\s*\d+|figure\s*\d+|warning|summary|recap)/i.test(rawTerm) &&
+      !/^[A-Z]{2,5}\s+\d{2,4}\b/i.test(rawTerm) &&
+      !/table of contents/i.test(rawTerm) &&
+      !/^(?:page\s+\d+|table\s+of\s+contents|slide\s+\d+|chapter\s+\d+)/i.test(rawDef)
     ) {
       return {
         term: rawTerm,
@@ -1778,7 +1869,7 @@ function isProcessOrMechanismUnit(unit: AnalyzedUnit): boolean {
 
   if (
     unit.isStep ||
-    /\b(process|mechanism|pathway|cycle|stages?|phases?|steps?|cascade|synthesis|glycolysis|phosphorylation|replication|transcription|translation)\b/i.test(
+    /\b(process|mechanism|pathway|cycle|stages?|phases?|steps?|cascade|synthesis|glycolysis|phosphorylation|dna\s+replication|transcription|translation)\b/i.test(
       heading
     )
   ) {
@@ -2036,21 +2127,34 @@ function buildDetailedClassifications(
 
         const subLower = (u.subheading || '').toLowerCase();
         if (subLower) {
-          if (subLower.includes(memberNorm) || memberNorm.includes(subLower)) {
+          const subRegex = new RegExp(`\\b${escapeRegExp(memberNorm)}\\b`, 'i');
+          if (subRegex.test(subLower)) {
             return true;
           }
-          // If unit belongs explicitly to another type's subheading, do not steal it
-          if (normalizedOtherMembers.some((om) => subLower.includes(om) || om.includes(subLower))) {
+          if (
+            normalizedOtherMembers.some((om) => new RegExp(`\\b${escapeRegExp(om)}\\b`, 'i').test(subLower))
+          ) {
             return false;
           }
         }
 
         const txtLower = u.formattedText.toLowerCase();
-        if (txtLower.includes(memberNorm) || (shortAlias.length >= 5 && txtLower.includes(shortAlias))) {
-          return true;
+        const memberWordRegex = new RegExp(`\\b${escapeRegExp(memberNorm)}\\b`, 'i');
+        if (memberWordRegex.test(txtLower)) {
+          // Avoid stealing a sentence whose subject clearly belongs to another type
+          const startsWithOther = normalizedOtherMembers.some((om) =>
+            new RegExp(`^(?:the\\s+)?${escapeRegExp(om)}\\b`, 'i').test(txtLower)
+          );
+          if (!startsWithOther) return true;
+        }
+        if (shortAlias.length >= 5 && new RegExp(`\\b${escapeRegExp(shortAlias)}\\b`, 'i').test(txtLower)) {
+          const startsWithOther = normalizedOtherMembers.some((om) =>
+            new RegExp(`^(?:the\\s+)?${escapeRegExp(om)}\\b`, 'i').test(txtLower)
+          );
+          if (!startsWithOther) return true;
         }
         if (memberCoreWords.length >= 2) {
-          return memberCoreWords.every((w) => txtLower.includes(w));
+          return memberCoreWords.every((w) => new RegExp(`\\b${escapeRegExp(w)}\\b`, 'i').test(txtLower));
         }
         return false;
       };
@@ -2221,10 +2325,14 @@ function extractKeyPhrases(normalizedText: string, maxPhrases = 12): string[] {
     let currentPhrase: string[] = [];
 
     const flushPhrase = () => {
-      if (currentPhrase.length >= 2 && currentPhrase.length <= 4) {
+      if (currentPhrase.length >= 2 && currentPhrase.length <= 3) {
         const cleanToks = currentPhrase.map((t) => t.replace(/^'+|'+$/g, ''));
         const lowerKey = cleanToks.map((t) => t.toLowerCase()).join(' ');
-        if (lowerKey.length >= 5 && !/^\d[\d\s]*$/.test(lowerKey)) {
+        const hasVerbClauseNoise =
+          /\b(?:allow|allows|achieve|achieves|occur|occurs|occurred|reconcile|reconciles|guarantees|guarantee|waiting|wait|rely|relies|serve|serves|become|becomes|prevent|prevents|enable|enables|require|requires|contains|contain|increase|increases|decrease|decreases|step|designed|manages|approves|validate|trigger|recover|request|divides|converge|persists|coexisting|prioritizes|acknowledging|apply|divided|consumes|unpredictably|automatically|passively|directly|widely|predominantly)\b/i.test(
+            lowerKey
+          );
+        if (lowerKey.length >= 5 && !/^\d[\d\s]*$/.test(lowerKey) && !hasVerbClauseNoise) {
           candidateCounts.set(lowerKey, (candidateCounts.get(lowerKey) || 0) + 1);
           if (!candidateTokensMap.has(lowerKey)) {
             candidateTokensMap.set(lowerKey, cleanToks);
@@ -2385,14 +2493,36 @@ export function buildStudentFriendlyClarification(
   const clean = stripBoilerplatePrefix(text).trim();
   if (!clean) return '';
 
-  // Clarify overly dense formal connectors into natural student-friendly academic prose
-  const simplified = clean
+  // Clarify overly dense formal connectors and academic phrasing into student-friendly prose
+  let simplified = clean
+    .replace(/\bdue to the fact that\b/gi, 'because')
+    .replace(/\bin order to\b/gi, 'to')
+    .replace(/\bprior to\b/gi, 'before')
+    .replace(/\bplays? a (?:key|crucial|vital|major|important|central) role in\b/gi, 'drives')
     .replace(/\bconsequently,\s*/gi, 'As a result, ')
     .replace(/\bnevertheless,\s*/gi, 'Even so, ')
+    .replace(/\bnonetheless,\s*/gi, 'Even so, ')
     .replace(/\bsubsequently,\s*/gi, 'Next, ')
+    .replace(/\bpredominantly\b/gi, 'mainly')
+    .replace(/\basynchronously\b/gi, 'independently over time')
+    .replace(/\bpersists?\b/gi, (m) => (m.toLowerCase().endsWith('s') ? 'saves' : 'save'))
+    .replace(/\bdurable storage\b/gi, 'permanent disk storage')
+    .replace(/\backnowledging completion\b/gi, 'confirming success')
+    .replace(/\bquorum acknowledgment\b/gi, 'majority node approval')
     .replace(/\bthereby\s+([a-z]+ing)\b/gi, 'which $1')
-    .replace(/\butilized?\b/gi, 'used')
-    .replace(/\bfacilitates?\b/gi, 'helps enable');
+    .replace(/\butilize(?:s|d)?\b/gi, (m) => (m.endsWith('s') ? 'uses' : m.endsWith('d') ? 'used' : 'use'))
+    .replace(/\bfacilitates?\b/gi, (m) => (m.endsWith('s') ? 'helps enable' : 'help enable'))
+    .replace(/\bdemonstrates?\b/gi, (m) => (m.endsWith('s') ? 'shows' : 'show'))
+    .replace(/\bnecessitates?\b/gi, (m) => (m.endsWith('s') ? 'requires' : 'require'))
+    .replace(/\bdiminishes?\b/gi, (m) => (m.endsWith('s') ? 'reduces' : 'reduce'))
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  // Split dense contrast/cause clauses into crisp two-step student reading flow
+  const whereasSplit = simplified.match(/^(.{15,120}?),\s+whereas\s+(.{15,120}?)[.?!]?$/i);
+  if (whereasSplit) {
+    simplified = `${whereasSplit[1].trim()}. By contrast, ${whereasSplit[2].trim()}.`;
+  }
 
   // Pair specialized terms with their document definition when genuinely informative
   for (const def of definitions.slice(0, 12)) {
@@ -2400,11 +2530,12 @@ export function buildStudentFriendlyClarification(
     if (
       termLower.length >= 4 &&
       simplified.toLowerCase().includes(termLower) &&
-      !simplified.toLowerCase().includes(def.rawDefinition.slice(0, 24).toLowerCase())
+      !simplified.toLowerCase().includes(def.rawDefinition.slice(0, 22).toLowerCase())
     ) {
       const shortMeaning = def.rawDefinition.split(/[.;]/)[0].trim();
       if (shortMeaning.length >= 14 && shortMeaning.length <= 105) {
-        return `Here, ${def.term} refers to ${shortMeaning.charAt(0).toLowerCase() + shortMeaning.slice(1)}.`;
+        const baseOut = simplified !== clean ? `${simplified} ` : '';
+        return `${baseOut}Here, ${def.term} refers to ${shortMeaning.charAt(0).toLowerCase() + shortMeaning.slice(1)}.`.trim();
       }
     }
   }
@@ -2413,49 +2544,215 @@ export function buildStudentFriendlyClarification(
 }
 
 function detectSectionRelationships(
-  sections: DocumentSectionCluster[]
+  sections: DocumentSectionCluster[],
+  globalTermFreq?: Map<string, number>
 ): ExtractedSectionRelationship[] {
   if (sections.length < 2) return [];
-  const relationships: ExtractedSectionRelationship[] = [];
+  const candidates: Array<ExtractedSectionRelationship & { weight: number }> = [];
 
   const sectionTerms = sections.map((sec) => {
-    const freq = new Map<string, number>();
+    const freq = new Map<string, { display: string; count: number }>();
+    const addTok = (tok: string, boost: number) => {
+      if (tok.length < 4) return;
+      const canonical = lightStem(tok);
+      const prev = freq.get(canonical);
+      if (prev) {
+        prev.count += boost;
+        if (tok.length < prev.display.length) prev.display = tok;
+      } else {
+        freq.set(canonical, { display: tok, count: boost });
+      }
+    };
     for (const u of sec.units) {
       for (const tok of u.tokens) {
-        if (tok.length >= 5) {
-          freq.set(tok, (freq.get(tok) || 0) + 1);
+        addTok(tok, 1);
+      }
+    }
+    if (sec.heading) {
+      for (const hTok of contentTokens(sec.heading)) {
+        addTok(hTok, 2);
+      }
+    }
+    const top = Array.from(freq.entries())
+      .sort((a, b) => b[1].count - a[1].count)
+      .slice(0, 24);
+    return new Map(top.map(([canon, info]) => [canon, info.display]));
+  });
+
+  for (let i = 0; i < sections.length; i++) {
+    for (let j = i + 1; j < sections.length; j++) {
+      if (sections[i].heading === sections[j].heading) continue;
+      if (/^Page \d+$/i.test(sections[i].heading) && /^Page \d+$/i.test(sections[j].heading)) {
+        continue;
+      }
+
+      const shared: Array<{ term: string; weight: number }> = [];
+      for (const [canon, displayA] of sectionTerms[i].entries()) {
+        const displayB = sectionTerms[j].get(canon);
+        if (displayB) {
+          const displayTerm = displayA.length <= displayB.length ? displayA : displayB;
+          const docFreq = globalTermFreq?.get(displayTerm) || globalTermFreq?.get(canon) || 2;
+          // Higher weight to substantive domain terms (longer & selective)
+          const termWeight = (displayTerm.length >= 6 ? 1.3 : 1.0) / Math.log(2 + docFreq * 0.25);
+          shared.push({
+            term: displayTerm.charAt(0).toUpperCase() + displayTerm.slice(1),
+            weight: termWeight,
+          });
+        }
+      }
+
+      if (shared.length >= 2) {
+        shared.sort((a, b) => b.weight - a.weight);
+        const totalWeight = shared.reduce((s, item) => s + item.weight, 0);
+        if (shared.length >= 2 || totalWeight >= 1.05) {
+          const topShared = shared.slice(0, 3).map((s) => s.term);
+          const isNonAdjacent = j - i >= 2;
+          candidates.push({
+            fromSection: sections[i].heading,
+            toSection: sections[j].heading,
+            sharedConcepts: topShared,
+            connectionNote: `Both ${sections[i].heading} and ${sections[j].heading} connect through ${topShared.join(', ')}.`,
+            weight: isNonAdjacent ? (totalWeight + 0.8) * 1.65 : totalWeight,
+          });
         }
       }
     }
-    return new Set(
-      Array.from(freq.entries())
-        .filter(([, count]) => count >= 1)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 12)
-        .map(([w]) => w)
-    );
-  });
+  }
 
-  for (let i = 0; i < sections.length - 1; i++) {
-    const j = i + 1; // Only adjacent sections with strong substantive concept overlap
-    if (sections[i].heading === sections[j].heading) continue;
-    const shared: string[] = [];
-    for (const term of sectionTerms[i]) {
-      if (sectionTerms[j].has(term)) {
-        shared.push(term.charAt(0).toUpperCase() + term.slice(1));
-      }
-    }
-    if (shared.length >= 3) {
-      const topShared = shared.slice(0, 3);
-      relationships.push({
-        fromSection: sections[i].heading,
-        toSection: sections[j].heading,
-        sharedConcepts: topShared,
-        connectionNote: `Both ${sections[i].heading} and ${sections[j].heading} examine ${topShared.join(', ')}.`,
+  candidates.sort((a, b) => b.weight - a.weight);
+  const picked: ExtractedSectionRelationship[] = [];
+  const usedPairs = new Set<string>();
+  for (const c of candidates) {
+    if (picked.length >= 6) break;
+    const key = `${c.fromSection}|${c.toSection}`;
+    if (usedPairs.has(key)) continue;
+    usedPairs.add(key);
+    picked.push({
+      fromSection: c.fromSection,
+      toSection: c.toSection,
+      sharedConcepts: c.sharedConcepts,
+      connectionNote: c.connectionNote,
+    });
+  }
+  return picked;
+}
+
+function buildCrossSectionConceptClusters(
+  units: AnalyzedUnit[],
+  definitions: ExtractedDefinition[],
+  keyPhrases: string[]
+): CrossSectionConceptCluster[] {
+  if (units.length < 3) return [];
+
+  const candidateConcepts: Array<{ label: string; tokens: string[] }> = [];
+  const seenLabels = new Set<string>();
+
+  for (const d of definitions.slice(0, 14)) {
+    const label = d.term.trim();
+    const key = label.toLowerCase();
+    if (label.length >= 4 && !seenLabels.has(key)) {
+      seenLabels.add(key);
+      candidateConcepts.push({
+        label,
+        tokens: Array.from(contentTokens(label)),
       });
     }
   }
-  return relationships.slice(0, 5);
+
+  for (const kp of keyPhrases.slice(0, 12)) {
+    const key = kp.toLowerCase();
+    if (kp.length >= 5 && !seenLabels.has(key)) {
+      seenLabels.add(key);
+      candidateConcepts.push({
+        label: kp,
+        tokens: Array.from(contentTokens(kp)),
+      });
+    }
+  }
+
+  const clusters: CrossSectionConceptCluster[] = [];
+  for (const cand of candidateConcepts) {
+    if (cand.tokens.length === 0) continue;
+    const matchedUnits = units.filter((u) => {
+      const lower = u.formattedText.toLowerCase();
+      if (lower.includes(cand.label.toLowerCase())) return true;
+      return cand.tokens.length >= 2 && cand.tokens.every((t) => u.tokens.has(t));
+    });
+
+    if (matchedUnits.length < 2) continue;
+
+    const sectionHeadings = Array.from(
+      new Set(
+        matchedUnits
+          .map((u) => u.sectionHeading)
+          .filter((h): h is string => Boolean(h))
+      )
+    );
+    const pageNumbers = Array.from(
+      new Set(
+        matchedUnits
+          .map((u) => u.pageNumber)
+          .filter((p): p is number => p !== null)
+      )
+    ).sort((a, b) => a - b);
+
+    const avgSalience =
+      matchedUnits.reduce((sum, u) => sum + u.score, 0) / matchedUnits.length;
+
+    clusters.push({
+      conceptLabel: cand.label,
+      coreTokens: cand.tokens,
+      sectionHeadings,
+      pageNumbers,
+      unitIndices: matchedUnits.map((u) => u.orderIndex),
+      salience: Number((avgSalience * (1 + Math.min(0.6, (sectionHeadings.length - 1) * 0.25))).toFixed(4)),
+    });
+  }
+
+  return clusters.sort((a, b) => b.salience - a.salience).slice(0, 8);
+}
+
+function inferCentralThesis(
+  units: AnalyzedUnit[],
+  sections: DocumentSectionCluster[],
+  title: string
+): string {
+  if (units.length === 0) return '';
+  const titleToks = contentTokens(title);
+  const scored = [...units]
+    .filter(
+      (u) =>
+        !/^\s*[A-Za-zΔ]+\s*[=∝]/.test(u.formattedText) &&
+        !u.isStep &&
+        u.formattedText.length >= 28 &&
+        u.formattedText.length <= 260
+    )
+    .map((u) => {
+      let titleBoost = 1.0;
+      for (const t of u.tokens) {
+        if (titleToks.has(t)) titleBoost += 0.22;
+      }
+      const posBoost = u.orderIndex <= 3 ? 1.25 : u.orderIndex >= units.length - 3 ? 1.08 : 1.0;
+      const defBoost = /\b(is defined as|is a|refers to|describes|explains|governs|determines|converts|obey)\b/i.test(
+        u.formattedText
+      )
+        ? 1.18
+        : 1.0;
+      const metaFillerPenalty = /\b(?:experimental studies|studies (?:show|emphasize|indicate)|researchers note|remain essential for)\b/i.test(
+        u.formattedText
+      )
+        ? 0.4
+        : 1.0;
+      return {
+        unit: u,
+        thesisScore: u.score * Math.min(1.8, titleBoost) * posBoost * defBoost * metaFillerPenalty,
+      };
+    })
+    .sort((a, b) => b.thesisScore - a.thesisScore);
+
+  const best = scored[0]?.unit || units[0];
+  if (best) return best.formattedText;
+  return sections[0]?.units[0]?.formattedText || '';
 }
 
 function extractDifficultConcepts(
@@ -2490,7 +2787,7 @@ function extractDifficultConcepts(
     .filter((item) => item.density >= 3)
     .sort((a, b) => b.density * b.unit.score - a.density * a.unit.score);
 
-  for (const { unit } of denseCandidates.slice(0, 4)) {
+  for (const { unit } of denseCandidates.slice(0, 6)) {
     const clarified = buildStudentFriendlyClarification(unit.formattedText, definitions);
     if (!clarified) continue;
     const leadConcept =
@@ -2620,72 +2917,102 @@ export function analyzeDocumentIntelligence(
     return Number(score.toFixed(4));
   };
 
+  // Maintain heading context & incomplete-sentence carry-over across PDF page breaks
+  let currentHeading: string | null = null;
+  let currentSubheading: string | null = null;
+  let baseMdDepth: number | null = null;
+  let paragraphBuf: string[] = [];
+  let paragraphPageNumber: number | null = null;
+
+  const flushParagraph = (activePageNumber: number | null) => {
+    if (paragraphBuf.length === 0) return;
+    const paraText = paragraphBuf.join(' ').replace(/\s+/g, ' ').trim();
+    const attrPage = paragraphPageNumber ?? activePageNumber;
+    paragraphBuf = [];
+    paragraphPageNumber = null;
+    if (paraText.length < 12 || isCodeOrSyntaxLine(paraText)) return;
+
+    const splitSentences = smartSentenceSplit(paraText);
+    const candidates = splitSentences.length > 0 ? splitSentences : [paraText];
+
+    for (const rawSent of candidates) {
+      const cleaned = rawSent.replace(/\s+/g, ' ').trim();
+      if (isCodeOrSyntaxLine(cleaned)) continue;
+      const isFormulaLine =
+        /[→⇌]|(?:^|\s)[A-Za-zΔαβγλμθπρσωΩ][A-Za-z0-9_₀-₉⁰-⁹']*\s*[=≈∝]\s*\S/.test(cleaned);
+      if (cleaned.length < (isFormulaLine ? 5 : 14) || isMetaFillerSentence(cleaned)) continue;
+
+      const fp = normalizedFingerprint(cleaned);
+      if (!fp || seenExactFp.has(fp)) continue;
+      seenExactFp.add(fp);
+
+      const formattedText = formatScientificText(cleaned);
+      const tokens = contentTokens(formattedText);
+      if (tokens.size < 2 && !isFormulaLine && !/[=→⇌]/.test(formattedText)) continue;
+
+      const score = scoreSentenceTfIdf(formattedText, tokens, orderCounter, currentHeading);
+
+      units.push({
+        text: cleaned,
+        formattedText,
+        pageNumber: attrPage,
+        sectionHeading: currentHeading,
+        subheading: currentSubheading,
+        orderIndex: orderCounter++,
+        isBullet: false,
+        isStep: /^step\s*\d+/i.test(cleaned),
+        score,
+        tokens,
+        quantitiesUnits: extractQuantitiesAndUnits(formattedText),
+        fingerprint: fp,
+      });
+    }
+  };
+
   for (const page of rawPages) {
     const lines = page.text.split('\n');
-    let currentHeading: string | null = null;
-    let currentSubheading: string | null = null;
-    let paragraphBuf: string[] = [];
+    const firstNonEmptyLine = lines.find((l) => l.trim().length > 0)?.trim() || '';
 
-    const flushParagraph = () => {
-      if (paragraphBuf.length === 0) return;
-      const paraText = paragraphBuf.join(' ').replace(/\s+/g, ' ').trim();
-      paragraphBuf = [];
-      if (paraText.length < 12 || isCodeOrSyntaxLine(paraText)) return;
+    // Carry mid-sentence continuation across PDF page boundaries unless next page starts with heading/bullet
+    if (paragraphBuf.length > 0) {
+      const joinedSoFar = paragraphBuf.join(' ').trim();
+      const endedSentence = /[.!?:"')\]]$/.test(joinedSoFar);
+      const nextLooksLikeHeadingOrList =
+        Boolean(detectHeadingInfo(firstNonEmptyLine)) ||
+        /^(?:[-*•▪◦]|\d+[.)]|Step\s+\d+[:.)]?)\s+/i.test(firstNonEmptyLine);
+      const nextStartsContinuation = /^[a-z(,;—–-]/.test(firstNonEmptyLine);
 
-      const splitSentences = smartSentenceSplit(paraText);
-      const candidates = splitSentences.length > 0 ? splitSentences : [paraText];
-
-      for (const rawSent of candidates) {
-        const cleaned = rawSent.replace(/\s+/g, ' ').trim();
-        if (isCodeOrSyntaxLine(cleaned)) continue;
-        const isFormulaLine =
-          /[→⇌]|(?:^|\s)[A-Za-zΔαβγλμθπρσωΩ][A-Za-z0-9_₀-₉⁰-⁹']*\s*[=≈∝]\s*\S/.test(cleaned);
-        if (cleaned.length < (isFormulaLine ? 5 : 14) || isMetaFillerSentence(cleaned)) continue;
-
-        const fp = normalizedFingerprint(cleaned);
-        if (!fp || seenExactFp.has(fp)) continue;
-        seenExactFp.add(fp);
-
-        const formattedText = formatScientificText(cleaned);
-        const tokens = contentTokens(formattedText);
-        if (tokens.size < 2 && !isFormulaLine && !/[=→⇌]/.test(formattedText)) continue;
-
-        const score = scoreSentenceTfIdf(formattedText, tokens, orderCounter, currentHeading);
-
-        units.push({
-          text: cleaned,
-          formattedText,
-          pageNumber: page.pageNumber,
-          sectionHeading: currentHeading,
-          subheading: currentSubheading,
-          orderIndex: orderCounter++,
-          isBullet: false,
-          isStep: /^step\s*\d+/i.test(cleaned),
-          score,
-          tokens,
-          quantitiesUnits: extractQuantitiesAndUnits(formattedText),
-          fingerprint: fp,
-        });
+      if (endedSentence || nextLooksLikeHeadingOrList || !nextStartsContinuation) {
+        flushParagraph(page.pageNumber);
       }
-    };
+    }
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) {
-        flushParagraph();
+        flushParagraph(page.pageNumber);
         continue;
       }
 
       if (isCodeOrSyntaxLine(line)) {
-        flushParagraph();
+        flushParagraph(page.pageNumber);
         continue;
       }
 
       const headingInfo = detectHeadingInfo(line, lines[i + 1]);
       if (headingInfo) {
-        flushParagraph();
+        flushParagraph(page.pageNumber);
         const formattedHeading = formatScientificText(headingInfo.title);
-        if (headingInfo.level === 2 && currentHeading) {
+        let resolvedLevel = headingInfo.level;
+        if (typeof headingInfo.mdDepth === 'number') {
+          if (baseMdDepth === null || headingInfo.mdDepth <= baseMdDepth) {
+            baseMdDepth = headingInfo.mdDepth;
+            resolvedLevel = 1;
+          } else {
+            resolvedLevel = 2;
+          }
+        }
+        if (resolvedLevel === 2 && currentHeading) {
           currentSubheading = formattedHeading;
         } else {
           currentHeading = formattedHeading;
@@ -2697,7 +3024,7 @@ export function analyzeDocumentIntelligence(
 
       const bulletMatch = line.match(/^(?:[-*•▪◦]|\d+[.)]|Step\s+\d+[:.)]?)\s+(.+)$/i);
       if (bulletMatch) {
-        flushParagraph();
+        flushParagraph(page.pageNumber);
         const itemBody = bulletMatch[1].trim();
         const isStep = /^(?:\d+[.)]|Step\s+\d+)/i.test(line);
         if (itemBody.length >= 14 && !isMetaFillerSentence(itemBody) && !isCodeOrSyntaxLine(itemBody)) {
@@ -2736,17 +3063,21 @@ export function analyzeDocumentIntelligence(
             line
           ));
       if (looksLikeStandaloneEquation) {
-        flushParagraph();
+        flushParagraph(page.pageNumber);
+        paragraphPageNumber = page.pageNumber;
         paragraphBuf.push(line);
-        flushParagraph();
+        flushParagraph(page.pageNumber);
         continue;
       }
 
+      if (paragraphBuf.length === 0) {
+        paragraphPageNumber = page.pageNumber;
+      }
       paragraphBuf.push(line);
     }
-
-    flushParagraph();
   }
+
+  flushParagraph(rawPages[rawPages.length - 1]?.pageNumber ?? null);
 
   // Fast sliding-window + token-indexed deduplication (O(N) even on 300-page PDFs)
   const dedupedUnits: AnalyzedUnit[] = [];
@@ -2882,12 +3213,18 @@ export function analyzeDocumentIntelligence(
     })
   );
 
-  const sectionRelationships = detectSectionRelationships(sections);
+  const sectionRelationships = detectSectionRelationships(sections, globalTermFreq);
   const difficultConcepts = extractDifficultConcepts(dedupedUnits, definitions, formulas);
 
   // Key terminology & phrases computed strictly from non-code prose units
   const cleanProseForTerms = dedupedUnits.map((u) => u.formattedText).join(' ');
   const extractedKeyPhrases = extractKeyPhrases(cleanProseForTerms || normalized, 14);
+  const conceptClusters = buildCrossSectionConceptClusters(
+    dedupedUnits,
+    definitions,
+    extractedKeyPhrases
+  );
+  const centralThesis = inferCentralThesis(dedupedUnits, sections, title);
   const termCandidates = new Set<string>();
   for (const d of definitions) {
     if (d.term.length >= 2 && d.term.length <= 36) termCandidates.add(d.term);
@@ -2942,11 +3279,13 @@ export function analyzeDocumentIntelligence(
     contentHash,
     title,
     subjectArea: resolvedSubject,
+    centralThesis,
     normalizedText: normalized,
     chunks,
     units: dedupedUnits,
     sections,
     sectionRelationships,
+    conceptClusters,
     difficultConcepts,
     definitions,
     formulas,
@@ -2958,7 +3297,7 @@ export function analyzeDocumentIntelligence(
     structureFunctions,
     examples,
     keyTerminology: Array.from(termCandidates).slice(0, 20),
-    keyPhrases: extractKeyPhrases(cleanProseForTerms || normalized, 14),
+    keyPhrases: extractedKeyPhrases,
     quality: {
       wordCount,
       alphaWordCount,

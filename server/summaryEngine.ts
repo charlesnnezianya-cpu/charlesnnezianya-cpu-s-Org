@@ -9,7 +9,18 @@ import {
   tokenSimilarity,
   type AnalyzedUnit,
   type DocumentIntelligenceProfile,
+  type ExtractedDefinition,
 } from './documentEngine.ts';
+import {
+  buildPlainLanguageExplanation,
+  composeDocumentOverview,
+  composeFinalRecap,
+  computeRenderedSummaryWordCount,
+  condenseAcademicSentence,
+  fuseRelatedUnits,
+  selectDistributedSections,
+  simplifyAcademicLanguage,
+} from './condensationEngine.ts';
 import { formatScientificText, stripUnsupportedDisplaySymbols } from '../src/lib/scientificFormatter.ts';
 import {
   sanitizeStructuredSummary,
@@ -162,7 +173,16 @@ export function buildDocumentSummaryMarkdown(
   if (summary.formulasOrFrameworks.length > 0) {
     lines.push('## Formulas & Equations');
     for (const f of summary.formulasOrFrameworks) {
-      lines.push(`- **${f.name}:** ${f.expressionOrStructure} — ${f.usage}`);
+      const sameAsHeader =
+        !f.usage ||
+        normalizedFingerprint(f.usage) === normalizedFingerprint(`${f.name} ${f.expressionOrStructure}`) ||
+        normalizedFingerprint(f.usage) === normalizedFingerprint(f.name) ||
+        normalizedFingerprint(f.usage) === normalizedFingerprint(f.expressionOrStructure);
+      lines.push(
+        sameAsHeader
+          ? `- **${f.name}:** ${f.expressionOrStructure}`
+          : `- **${f.name}:** ${f.expressionOrStructure} — ${f.usage}`
+      );
       if (f.variables && f.variables.length > 0) {
         lines.push(
           `  - Variables: ${f.variables.map((v) => `${v.symbol} = ${v.meaning}`).join('; ')}`
@@ -361,7 +381,8 @@ function buildDeterministicComparisonTables(
       });
     }
 
-    if (rows.length > 0) {
+    // Only emit a classification comparison table when it adds multi-attribute comparison beyond repeating Core Description
+    if (rows.length >= 2) {
       tables.push({
         title: cleanCell(`Comparison of ${cls.topic}`),
         headers: cls.types.map((t) => cleanCell(t.name)),
@@ -374,7 +395,12 @@ function buildDeterministicComparisonTables(
 }
 
 function buildSectionPointsAndSubsections(
-  selectedUnits: AnalyzedUnit[]
+  selectedUnits: AnalyzedUnit[],
+  summaryLevel: SummaryLevel,
+  definitions: ExtractedDefinition[],
+  maxPoints: number,
+  sanitizeProseFn: (s: string) => string,
+  sanitizeLabelFn: (s: string) => string
 ): {
   sourcePoints: string[];
   subsections: Array<{ heading: string; points: string[] }>;
@@ -383,34 +409,53 @@ function buildSectionPointsAndSubsections(
   const hasSubheadings = ordered.some((u) => Boolean(u.subheading));
 
   if (!hasSubheadings) {
+    const fused = fuseRelatedUnits(ordered, summaryLevel, {
+      maxItems: maxPoints,
+      definitions,
+    })
+      .map(sanitizeProseFn)
+      .filter(Boolean);
     return {
-      sourcePoints: ordered
-        .map((u) => sanitizeSummaryText(stripBoilerplatePrefix(u.formattedText)))
-        .filter(Boolean),
+      sourcePoints: fused,
       subsections: [],
     };
   }
 
-  const topPoints: string[] = [];
-  const subMap = new Map<string, string[]>();
+  const topUnits: AnalyzedUnit[] = [];
+  const subMap = new Map<string, AnalyzedUnit[]>();
   for (const u of ordered) {
-    const clean = sanitizeSummaryText(stripBoilerplatePrefix(u.formattedText));
-    if (!clean) continue;
     if (u.subheading) {
       const arr = subMap.get(u.subheading) || [];
-      arr.push(clean);
+      arr.push(u);
       subMap.set(u.subheading, arr);
     } else {
-      topPoints.push(clean);
+      topUnits.push(u);
     }
   }
 
+  const topPoints = fuseRelatedUnits(topUnits, summaryLevel, {
+    maxItems: Math.max(1, maxPoints),
+    definitions,
+  })
+    .map(sanitizeProseFn)
+    .filter(Boolean);
+
+  const subLimitPerGroup = summaryLevel === 'short' ? 1 : summaryLevel === 'detailed' ? 2 : 3;
+  const subsections = Array.from(subMap.entries())
+    .map(([heading, units]) => ({
+      heading: sanitizeLabelFn(heading),
+      points: fuseRelatedUnits(units, summaryLevel, {
+        maxItems: subLimitPerGroup,
+        definitions,
+      })
+        .map(sanitizeProseFn)
+        .filter(Boolean),
+    }))
+    .filter((sub) => sub.heading && sub.points.length > 0);
+
   return {
     sourcePoints: topPoints,
-    subsections: Array.from(subMap.entries()).map(([heading, points]) => ({
-      heading,
-      points,
-    })),
+    subsections,
   };
 }
 
@@ -473,99 +518,92 @@ export function generateExtractiveSummary(
   });
 
   const dedupedUnits = profile.units;
-  const wordCount = profile.quality.wordCount;
 
-  const simplifyForSimpleStyle = (text: string): string => {
-    if (summaryLevel !== 'short') return text;
-    let out = text
-      .replace(/\bis characterized by the fact that\b/gi, 'works because')
-      .replace(/\bhas the capacity to\b/gi, 'can')
-      .replace(/\bexhibits a tendency to\b/gi, 'tends to')
-      .replace(/\bfacilitates the process of\b/gi, 'helps')
-      .replace(/\butilize(?:s|d)?\b/gi, (m) => (m.endsWith('s') ? 'uses' : m.endsWith('d') ? 'used' : 'use'))
-      .replace(/\bsubsequently\b/gi, 'then')
-      .replace(/\bpredominantly\b/gi, 'mainly')
-      .replace(/\bfundamentally\b/gi, 'at its core')
-      .replace(/\bin conjunction with\b/gi, 'together with')
-      .replace(/\bin the event that\b/gi, 'if')
-      .replace(/\bprior to\b/gi, 'before')
-      .replace(/\bwith respect to\b/gi, 'regarding');
-    out = out.replace(/\s{2,}/g, ' ').trim();
-    return out.length > 0 ? out.charAt(0).toUpperCase() + out.slice(1) : out;
+  const sanitizeLabel = (text: string) =>
+    formatScientificText(sanitizeSummaryText(text)).replace(/[.]+$/, '').trim();
+
+  const sanitizeOut = (text: string) => {
+    const base = formatScientificText(sanitizeSummaryText(text));
+    return summaryLevel === 'short'
+      ? simplifyAcademicLanguage(base, profile.definitions)
+      : base;
   };
 
-  const sanitizeOut = (text: string) =>
-    simplifyForSimpleStyle(formatScientificText(sanitizeSummaryText(text)));
+  const condenseAndSanitize = (
+    text: string,
+    opts?: { preserveContrast?: boolean; preserveFormula?: boolean }
+  ) => sanitizeOut(condenseAcademicSentence(text, summaryLevel, opts));
 
   const totalSections = Math.max(1, profile.sections.length);
+  const isLargeDoc = profile.units.length >= 25;
   const limits =
     summaryLevel === 'short'
       ? {
           overview: 2,
-          concepts: Math.max(5, Math.min(8, totalSections)),
-          pointsPerConcept: 2,
-          defs: 5,
-          clsGroups: 3,
-          charsPerType: 1,
-          exPerType: 1,
-          charTopics: 2,
-          charPoints: 2,
-          procGroups: 2,
-          procSteps: 4,
+          concepts: Math.max(3, Math.min(4, totalSections)),
+          pointsPerConcept: totalSections >= 4 ? 1 : 2,
+          defs: 3,
+          clsGroups: 2,
+          charsPerType: 0,
+          exPerType: 0,
+          charTopics: 0,
+          charPoints: 0,
+          procGroups: 1,
+          procSteps: 3,
           formulas: 3,
-          facts: 3,
-          examples: 2,
-          distinctions: 2,
-          terms: 8,
+          facts: 0,
+          examples: 0,
+          distinctions: 1,
+          terms: 5,
           difficult: 0,
           tables: 0,
           revision: 0,
-          takeaways: 4,
+          takeaways: 3,
         }
       : summaryLevel === 'comprehensive'
         ? {
             overview: 3,
-            concepts: Math.max(24, totalSections + 4),
-            pointsPerConcept: 7,
-            defs: 16,
-            clsGroups: 10,
-            charsPerType: 5,
-            exPerType: 3,
-            charTopics: 10,
-            charPoints: 5,
-            procGroups: 8,
-            procSteps: 10,
-            formulas: 12,
-            facts: 10,
-            examples: 10,
-            distinctions: 10,
-            terms: 24,
-            difficult: 5,
-            tables: 4,
-            revision: 8,
-            takeaways: 8,
-          }
-        : {
-            overview: 2,
-            concepts: Math.max(12, Math.min(18, totalSections + 2)),
-            pointsPerConcept: 4,
-            defs: 9,
-            clsGroups: 6,
+            concepts: Math.max(18, totalSections + 4),
+            pointsPerConcept: 3,
+            defs: 10,
+            clsGroups: 8,
             charsPerType: 3,
             exPerType: 2,
             charTopics: 6,
-            charPoints: 4,
+            charPoints: 3,
             procGroups: 5,
-            procSteps: 6,
-            formulas: 7,
-            facts: 6,
-            examples: 6,
+            procSteps: 8,
+            formulas: 10,
+            facts: isLargeDoc ? 4 : 0,
+            examples: isLargeDoc ? 4 : 1,
             distinctions: 6,
-            terms: 16,
-            difficult: 3,
+            terms: isLargeDoc ? 10 : 6,
+            difficult: isLargeDoc ? 3 : 1,
+            tables: 3,
+            revision: isLargeDoc ? 4 : 2,
+            takeaways: isLargeDoc ? 4 : 2,
+          }
+        : {
+            overview: 2,
+            concepts: Math.max(5, Math.min(8, totalSections)),
+            pointsPerConcept: 2,
+            defs: 6,
+            clsGroups: 4,
+            charsPerType: 2,
+            exPerType: 1,
+            charTopics: 4,
+            charPoints: 2,
+            procGroups: 3,
+            procSteps: 5,
+            formulas: 6,
+            facts: isLargeDoc ? 3 : 1,
+            examples: isLargeDoc ? 2 : 1,
+            distinctions: 3,
+            terms: isLargeDoc ? 8 : 5,
+            difficult: isLargeDoc ? 2 : 1,
             tables: 2,
-            revision: 0,
-            takeaways: 6,
+            revision: isLargeDoc ? 3 : 1,
+            takeaways: isLargeDoc ? 3 : 2,
           };
 
   const usedPool: Array<{ fp: string; tokens: Set<string> }> = [];
@@ -593,18 +631,20 @@ export function generateExtractiveSummary(
 
       const trimmedChars = t.characteristics
         .slice(0, limits.charsPerType)
-        .map((c) => sanitizeOut(c));
+        .map((c) => condenseAndSanitize(c));
       trimmedChars.forEach((c) => markUsed(c));
 
       const trimmedExamples = t.examples
         .slice(0, limits.exPerType)
-        .map((ex) => sanitizeOut(ex));
+        .map((ex) => condenseAndSanitize(ex));
       trimmedExamples.forEach((ex) => markUsed(ex));
 
       return {
-        name: sanitizeOut(t.name),
+        name: sanitizeLabel(t.name),
         explanation:
-          rawExpl === MISSING_TYPE_EXPLANATION ? rawExpl : sanitizeOut(rawExpl),
+          rawExpl === MISSING_TYPE_EXPLANATION
+            ? rawExpl
+            : condenseAndSanitize(rawExpl),
         ...(trimmedChars.length > 0 ? { characteristics: trimmedChars } : {}),
         ...(trimmedExamples.length > 0 ? { examples: trimmedExamples } : {}),
       };
@@ -616,13 +656,17 @@ export function generateExtractiveSummary(
     }
 
     classificationsAndTypes.push({
-      topic: sanitizeOut(
+      topic: sanitizeLabel(
         cls.category.charAt(0).toUpperCase() + cls.category.slice(1)
       ),
-      overviewStatement: sanitizeOut(cls.overviewStatement),
+      overviewStatement: condenseAndSanitize(cls.overviewStatement),
       types: entries,
       ...(summaryLevel !== 'short' && cls.comparisonNote
-        ? { comparisonNote: sanitizeOut(cls.comparisonNote) }
+        ? {
+            comparisonNote: condenseAndSanitize(cls.comparisonNote, {
+              preserveContrast: true,
+            }),
+          }
         : {}),
     });
   }
@@ -633,7 +677,6 @@ export function generateExtractiveSummary(
   const importantDefinitions: DefinitionTerm[] = [];
   for (const d of profile.definitions) {
     if (importantDefinitions.length >= limits.defs) break;
-    // Skip if already verbatim covered as a named type explanation in Classifications
     if (
       isRedundantAgainstPool(
         d.sourceText,
@@ -646,20 +689,43 @@ export function generateExtractiveSummary(
       continue;
     }
     importantDefinitions.push({
-      term: sanitizeOut(d.term),
-      definition: sanitizeOut(d.definition),
+      term: sanitizeLabel(d.term),
+      definition: condenseAndSanitize(d.definition),
       origin: d.origin,
     });
     markUsed(d.sourceText);
     markUsed(`${d.term} ${d.rawDefinition}`);
   }
 
+  // Reserve formulas before Processes & Main Concepts so equations/reactions appear cleanly in Formulas & Equations
+  const formulasOrFrameworks: FormulaOrFramework[] = profile.formulas
+    .slice(0, limits.formulas)
+    .map((f) => {
+      markUsed(f.sourceText);
+      markUsed(`${f.name} ${f.expressionOrStructure}`);
+      return {
+        name: sanitizeLabel(f.name),
+        expressionOrStructure: sanitizeLabel(f.expressionOrStructure),
+        usage: condenseAndSanitize(f.usage, { preserveFormula: true }),
+        ...(f.variables.length > 0
+          ? {
+              variables: f.variables.map((v) => ({
+                symbol: sanitizeLabel(v.symbol),
+                meaning: sanitizeLabel(v.meaning),
+              })),
+            }
+          : {}),
+      };
+    });
+
   // Reserve ordered process steps before Main Concepts so multi-step pathways stay intact
   const processesAndMechanisms: ProcessMechanismGroup[] = [];
   for (const proc of profile.processes) {
     if (processesAndMechanisms.length >= limits.procGroups) break;
     const nonRedundantSteps = proc.steps.filter(
-      (s) => !isRedundantAgainstPool(s.rawText, contentTokens(s.rawText), usedPool, 0.68, 0.85)
+      (s) =>
+        !/[→⇌]/.test(s.rawText) &&
+        !isRedundantAgainstPool(s.rawText, contentTokens(s.rawText), usedPool, 0.68, 0.85)
     );
     if (
       nonRedundantSteps.length >= 2 ||
@@ -667,8 +733,8 @@ export function generateExtractiveSummary(
     ) {
       const chosen = nonRedundantSteps.slice(0, limits.procSteps);
       processesAndMechanisms.push({
-        heading: sanitizeOut(proc.heading),
-        steps: chosen.map((s) => sanitizeOut(s.text)),
+        heading: sanitizeLabel(proc.heading),
+        steps: chosen.map((s) => condenseAndSanitize(s.text, { preserveFormula: true })),
       });
       for (const s of chosen) markUsed(s.rawText);
     }
@@ -707,16 +773,15 @@ export function generateExtractiveSummary(
       continue;
     }
     importantDistinctions.push({
-      pairTitle: sanitizeOut(dist.pairTitle),
-      comparison: sanitizeOut(dist.comparison),
+      pairTitle: sanitizeLabel(dist.pairTitle),
+      comparison: condenseAndSanitize(dist.comparison, { preserveContrast: true }),
     });
     markUsed(dist.sourceText, distTokens);
   }
 
   // --------------------------------------------------------------------------
-  // A. Topic Overview (Synthesizes central subject & TextRank prose cleanly)
+  // A. Topic Overview (Document-wide synthesis built AFTER full-document comprehension)
   // --------------------------------------------------------------------------
-  const distinctionTexts = new Set(profile.distinctions.map((d) => d.sourceText));
   const classificationFingerprints = new Set<string>();
   for (const cls of profile.classifications) {
     for (const fp of cls.sourceFingerprints) {
@@ -724,86 +789,23 @@ export function generateExtractiveSummary(
     }
   }
 
-  const firstSectionHeading = profile.sections[0]?.heading || null;
   const rankedByScore = [...dedupedUnits].sort((a, b) => b.score - a.score);
-  const overviewCandidates = [...dedupedUnits]
-    .filter(
-      (u) =>
-        !/^\s*[A-Za-zΔ]+\s*[=∝]/.test(u.formattedText) &&
-        !u.isStep &&
-        !classificationFingerprints.has(u.fingerprint) &&
-        !/^(?:first|initially|second|third|next|then|subsequently|finally)\b/i.test(
-          u.formattedText
-        ) &&
-        !distinctionTexts.has(u.formattedText)
-    )
-    .sort((a, b) => {
-      const aLead =
-        (a.orderIndex <= 4 ? 1.45 : 1) *
-        (firstSectionHeading && a.sectionHeading === firstSectionHeading ? 1.3 : 1);
-      const bLead =
-        (b.orderIndex <= 4 ? 1.45 : 1) *
-        (firstSectionHeading && b.sectionHeading === firstSectionHeading ? 1.3 : 1);
-      return b.score * bLead - a.score * aLead;
-    });
+  const { overview: topicOverview, usedFingerprints: overviewFingerprints } =
+    composeDocumentOverview(profile, summaryLevel, sanitizeOut);
 
-  // For multi-section docs, keep Topic Overview concise from opening/central prose so later sections remain rich in Main Concepts
-  const overviewTarget =
-    dedupedUnits.length <= 6
-      ? 1
-      : profile.sections.length >= 2
-        ? Math.min(2, limits.overview)
-        : limits.overview;
-  const selectedOverviewUnits: AnalyzedUnit[] = [];
-  for (const cand of overviewCandidates) {
-    if (selectedOverviewUnits.length >= overviewTarget) break;
-    if (
-      profile.sections.length >= 2 &&
-      firstSectionHeading &&
-      cand.sectionHeading &&
-      cand.sectionHeading !== firstSectionHeading &&
-      selectedOverviewUnits.length >= 1
-    ) {
-      continue;
+  for (const fp of overviewFingerprints) {
+    const matched = dedupedUnits.find((u) => u.fingerprint === fp);
+    if (matched) {
+      markUsed(matched.formattedText, matched.tokens);
     }
-    if (isRedundantAgainstPool(cand.formattedText, cand.tokens, usedPool, 0.54, 0.74)) {
-      continue;
-    }
-    selectedOverviewUnits.push(cand);
-    markUsed(cand.formattedText, cand.tokens);
   }
-  if (selectedOverviewUnits.length === 0 && dedupedUnits[0]) {
-    // Allow brief intro from lead unit if overviewCandidates were already placed in Definitions/Classifications
-    const leadAlt =
-      dedupedUnits.find(
-        (u) =>
-          !classificationFingerprints.has(u.fingerprint) &&
-          !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.78, 0.9)
-      ) || dedupedUnits[0];
-    selectedOverviewUnits.push(leadAlt);
-    markUsed(leadAlt.formattedText, leadAlt.tokens);
-  }
-
-  selectedOverviewUnits.sort((a, b) => a.orderIndex - b.orderIndex);
-  const overviewCore = selectedOverviewUnits
-    .map((u) => sanitizeOut(stripBoilerplatePrefix(u.formattedText)))
-    .join(' ');
-
-  const namedSectionHeadings = profile.sections
-    .map((s) => s.heading)
-    .filter((h) => !/^Page \d+$/i.test(h))
-    .slice(0, 4);
-  const themeLead =
-    summaryLevel !== 'short' && namedSectionHeadings.length >= 2
-      ? `Key areas covered include ${namedSectionHeadings.join(', ')}. `
-      : '';
-  const topicOverview = sanitizeOut(`${overviewCore} ${themeLead}`.trim());
 
   // --------------------------------------------------------------------------
-  // B. Main Concepts (strict document order + attached examples + subsections)
+  // B. Main Concepts (Distributed across whole document + fused/condensed + cross-page synthesis)
   // --------------------------------------------------------------------------
   const mainConcepts: MainConceptSection[] = [];
   const attachedExampleIndices = new Set<number>();
+  const alreadyCoveredHeadings = new Set<string>();
 
   const attachExamplesToHeading = (
     heading: string,
@@ -827,7 +829,7 @@ export function generateExtractiveSummary(
         (sameSection || containment >= 0.38) &&
         !isRedundantAgainstPool(ex.example, exTokens, usedPool, 0.65, 0.82)
       ) {
-        attached.push(sanitizeOut(ex.example));
+        attached.push(condenseAndSanitize(ex.example));
         attachedExampleIndices.add(idx);
         markUsed(ex.example, exTokens);
       }
@@ -836,101 +838,135 @@ export function generateExtractiveSummary(
   };
 
   if (profile.quality.hasStructuredHeadings && profile.sections.length > 0) {
-    for (const sec of profile.sections) {
-      if (mainConcepts.length >= limits.concepts) break;
-
-      // Skip sections whose entire prose belongs exclusively inside ClassificationsAndTypes
+    const processHeadingsSet = new Set(
+      processesAndMechanisms.map((p) => p.heading.toLowerCase())
+    );
+    const substantiveSections = profile.sections.filter((sec) => {
+      const lowerHeading = sec.heading.toLowerCase();
       const isClassificationSection = classificationsAndTypes.some(
         (c) =>
-          c.topic.toLowerCase() === sec.heading.toLowerCase() ||
-          `types of ${c.topic.toLowerCase()}` === sec.heading.toLowerCase() ||
-          `categories of ${c.topic.toLowerCase()}` === sec.heading.toLowerCase()
+          c.topic.toLowerCase() === lowerHeading ||
+          `types of ${c.topic.toLowerCase()}` === lowerHeading ||
+          `categories of ${c.topic.toLowerCase()}` === lowerHeading
       );
+      if (isClassificationSection || processHeadingsSet.has(lowerHeading)) {
+        alreadyCoveredHeadings.add(lowerHeading);
+      }
+      const nonRedundant = sec.units.filter(
+        (u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.56, 0.76)
+      );
+      if (nonRedundant.length > 0) return true;
 
+      // Preserve explicit document headings when their sentences went to Definitions (avoid omitting small sections),
+      // as long as the section is not purely a Classification/Process/Overview block
+      const nonOverviewUnits = sec.units.filter(
+        (u) => !overviewFingerprints.includes(u.fingerprint) && !classificationFingerprints.has(u.fingerprint)
+      );
+      if (!isClassificationSection && !processHeadingsSet.has(lowerHeading) && nonOverviewUnits.length > 0) {
+        return true;
+      }
+      alreadyCoveredHeadings.add(lowerHeading);
+      return false;
+    });
+
+    // Stratified selection ensures beginning, middle, AND ending chapters are represented
+    const chosenSections = selectDistributedSections(substantiveSections, limits.concepts);
+
+    for (const sec of chosenSections) {
       const nonRedundantUnits = sec.units.filter(
         (u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.56, 0.76)
       );
-
-      if (isClassificationSection && nonRedundantUnits.length === 0) {
-        continue;
-      }
-
-      const fallbackUnits = sec.units.filter(
-        (u) =>
-          !selectedOverviewUnits.includes(u) &&
-          !classificationFingerprints.has(u.fingerprint) &&
-          !importantDefinitions.some(
-            (d) => normalizedFingerprint(`${d.term} ${d.definition}`) === u.fingerprint
-          )
-      );
-
-      const pool =
+      const fallbackTopUnits =
         nonRedundantUnits.length > 0
           ? nonRedundantUnits
-          : !isClassificationSection && fallbackUnits.length > 0
-            ? fallbackUnits
-            : [];
+          : sec.units
+              .filter(
+                (u) =>
+                  !overviewFingerprints.includes(u.fingerprint) &&
+                  !classificationFingerprints.has(u.fingerprint)
+              )
+              .slice(0, 1);
+      if (fallbackTopUnits.length === 0) continue;
 
-      if (pool.length === 0) continue;
-
-      const selectedGroup = [...pool]
+      // Pick top-scored candidate pool (slightly broader than pointsPerConcept so fusion can merge related ones)
+      const candidateGroup = [...fallbackTopUnits]
         .sort((a, b) => b.score - a.score)
-        .slice(0, limits.pointsPerConcept);
+        .slice(0, nonRedundantUnits.length > 0 ? limits.pointsPerConcept + 2 : 1)
+        .sort((a, b) => a.orderIndex - b.orderIndex);
+
+      // Enrich with closely related cross-page units from conceptClusters when helpful in Detailed/Comprehensive
+      if (summaryLevel !== 'short' && profile.conceptClusters.length > 0) {
+        const secToks = contentTokens(sec.heading);
+        for (const cluster of profile.conceptClusters) {
+          if (cluster.sectionHeadings.length < 2) continue;
+          const touchesSection = cluster.sectionHeadings.some(
+            (h) => h.toLowerCase() === sec.heading.toLowerCase()
+          );
+          const matchesHeading = cluster.coreTokens.some((t) => secToks.has(t));
+          if (touchesSection || matchesHeading) {
+            const foreignUnit = dedupedUnits.find(
+              (u) =>
+                cluster.unitIndices.includes(u.orderIndex) &&
+                u.sectionHeading !== sec.heading &&
+                !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.55, 0.74) &&
+                !candidateGroup.includes(u)
+            );
+            if (foreignUnit && candidateGroup.length < limits.pointsPerConcept + 3) {
+              candidateGroup.push(foreignUnit);
+              break;
+            }
+          }
+        }
+      }
 
       const { sourcePoints, subsections } = buildSectionPointsAndSubsections(
-        selectedGroup
+        candidateGroup,
+        summaryLevel,
+        profile.definitions,
+        limits.pointsPerConcept,
+        sanitizeOut,
+        sanitizeLabel
       );
       if (sourcePoints.length === 0 && subsections.length === 0) continue;
 
-      for (const u of selectedGroup) {
+      for (const u of candidateGroup) {
         markUsed(u.formattedText, u.tokens);
       }
+      sourcePoints.forEach((pt) => markUsed(pt));
 
       const attachedExamples =
-        summaryLevel !== 'short' ? attachExamplesToHeading(sec.heading, selectedGroup) : [];
+        summaryLevel !== 'short' ? attachExamplesToHeading(sec.heading, candidateGroup) : [];
 
       mainConcepts.push({
-        heading: sanitizeOut(sec.heading),
-        sourcePoints: sourcePoints.map(sanitizeOut),
+        heading: sanitizeLabel(sec.heading),
+        sourcePoints,
         aiClarification: '',
         ...(subsections.length > 0
           ? {
-              subsections: subsections.map((sub) => ({
-                heading: sanitizeOut(sub.heading),
-                points: sub.points.map(sanitizeOut),
-              })),
+              subsections,
             }
           : {}),
         ...(attachedExamples.length > 0 ? { examples: attachedExamples } : {}),
       });
     }
   } else {
-    // Unheaded document: cluster remaining substantive units cleanly in document order
+    // Unheaded multi-page document: cluster semantically across ALL pages so related concepts unite
     const remainingUnits = dedupedUnits.filter(
       (u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.55, 0.75)
     );
     const pool =
       remainingUnits.length >= 2 || dedupedUnits.length < 4
         ? remainingUnits
-        : dedupedUnits.filter((u) => !selectedOverviewUnits.includes(u));
+        : dedupedUnits.filter((u) => !overviewFingerprints.includes(u.fingerprint));
 
     const clusters: AnalyzedUnit[][] = [];
     for (const unit of pool) {
-      if (clusters.length >= limits.concepts) {
-        const bestCluster = clusters.find((c) => {
-          if (c.length >= limits.pointsPerConcept) return false;
-          return tokenSimilarity(unit.tokens, c[0].tokens).jaccard >= 0.16;
-        });
-        if (bestCluster) bestCluster.push(unit);
-        continue;
-      }
-
       let bestCluster: AnalyzedUnit[] | null = null;
       let bestSim = 0;
       for (const cluster of clusters) {
-        if (cluster.length >= limits.pointsPerConcept) continue;
+        if (cluster.length >= limits.pointsPerConcept + 2) continue;
         const sim = tokenSimilarity(unit.tokens, cluster[0].tokens).jaccard;
-        if (sim > bestSim && sim >= 0.16) {
+        if (sim > bestSim && sim >= 0.15) {
           bestSim = sim;
           bestCluster = cluster;
         }
@@ -942,27 +978,36 @@ export function generateExtractiveSummary(
       }
     }
 
-    // Order clusters by earliest appearance in the document
     clusters.sort(
       (a, b) =>
         Math.min(...a.map((u) => u.orderIndex)) - Math.min(...b.map((u) => u.orderIndex))
     );
 
-    clusters.forEach((cluster, idx) => {
+    const distributedClusters = selectDistributedSections(clusters, limits.concepts);
+
+    distributedClusters.forEach((cluster, idx) => {
       const topInCluster = [...cluster]
         .sort((a, b) => b.score - a.score)
-        .slice(0, limits.pointsPerConcept)
+        .slice(0, limits.pointsPerConcept + 2)
         .sort((a, b) => a.orderIndex - b.orderIndex);
       const heading = buildSectionClusterHeading(topInCluster, idx);
+      const fusedPoints = fuseRelatedUnits(topInCluster, summaryLevel, {
+        maxItems: limits.pointsPerConcept,
+        definitions: profile.definitions,
+      })
+        .map(sanitizeOut)
+        .filter(Boolean);
+
+      if (fusedPoints.length === 0) return;
       for (const u of topInCluster) markUsed(u.formattedText, u.tokens);
+      fusedPoints.forEach((pt) => markUsed(pt));
+
       const attachedExamples =
         summaryLevel !== 'short' ? attachExamplesToHeading(heading, topInCluster) : [];
 
       mainConcepts.push({
-        heading: sanitizeOut(heading),
-        sourcePoints: topInCluster.map((u) =>
-          sanitizeOut(stripBoilerplatePrefix(u.formattedText))
-        ),
+        heading: sanitizeLabel(heading),
+        sourcePoints: fusedPoints,
         aiClarification: '',
         ...(attachedExamples.length > 0 ? { examples: attachedExamples } : {}),
       });
@@ -982,7 +1027,9 @@ export function generateExtractiveSummary(
 
     const list = characteristicsByTopic.get(ch.topic) || [];
     if (list.length >= limits.charPoints) continue;
-    list.push(sanitizeOut(ch.statement));
+    const condensed = condenseAndSanitize(ch.statement);
+    if (!condensed) continue;
+    list.push(condensed);
     characteristicsByTopic.set(ch.topic, list);
     markUsed(ch.sourceText, chTokens);
   }
@@ -990,28 +1037,9 @@ export function generateExtractiveSummary(
   const characteristicsAndExplanations: StructuredCharacteristicItem[] = Array.from(
     characteristicsByTopic.entries()
   ).map(([topic, points]) => ({
-    topic: sanitizeOut(topic),
+    topic: sanitizeLabel(topic),
     points,
   }));
-
-  const formulasOrFrameworks: FormulaOrFramework[] = profile.formulas
-    .slice(0, limits.formulas)
-    .map((f) => {
-      markUsed(f.sourceText);
-      return {
-        name: sanitizeOut(f.name),
-        expressionOrStructure: sanitizeOut(f.expressionOrStructure),
-        usage: sanitizeOut(f.usage),
-        ...(f.variables.length > 0
-          ? {
-              variables: f.variables.map((v) => ({
-                symbol: sanitizeOut(v.symbol),
-                meaning: sanitizeOut(v.meaning),
-              })),
-            }
-          : {}),
-      };
-    });
 
   // Remaining distinct quantitative or causal facts not covered above
   const importantFacts: string[] = [];
@@ -1033,9 +1061,9 @@ export function generateExtractiveSummary(
 
   for (const cand of factCandidates) {
     if (importantFacts.length >= limits.facts) break;
-    importantFacts.push(
-      sanitizeOut(stripBoilerplatePrefix(cand.formattedText))
-    );
+    const condensed = condenseAndSanitize(cand.formattedText);
+    if (!condensed) continue;
+    importantFacts.push(condensed);
     markUsed(cand.formattedText, cand.tokens);
   }
 
@@ -1048,8 +1076,8 @@ export function generateExtractiveSummary(
     const exTokens = contentTokens(ex.example);
     if (isRedundantAgainstPool(ex.example, exTokens, usedPool, 0.56, 0.76)) return;
     relevantExamples.push({
-      title: sanitizeOut(ex.title),
-      example: sanitizeOut(ex.example),
+      title: sanitizeLabel(ex.title),
+      example: condenseAndSanitize(ex.example),
       origin: ex.origin,
     });
     markUsed(ex.example, exTokens);
@@ -1057,38 +1085,54 @@ export function generateExtractiveSummary(
 
   // Key terminology (prose-only tokens + RAKE academic phrases)
   const keyTerminology = Array.from(
-    new Set([...profile.keyTerminology, ...profile.keyPhrases].map(sanitizeOut))
+    new Set([...profile.keyTerminology, ...profile.keyPhrases].map(sanitizeLabel))
   )
     .filter(Boolean)
     .slice(0, limits.terms);
 
-  // Concept clarifications (formula variables & genuinely non-redundant dense concepts)
+  // Concept clarifications (formula variables & plain-language breakdowns of dense concepts)
   const difficultConceptExplanations: DifficultConceptExplanation[] = [];
   if (limits.difficult > 0) {
     for (const d of profile.difficultConcepts) {
       if (difficultConceptExplanations.length >= limits.difficult) break;
       const isFormulaVarNote = /^Variables:/i.test(d.plainExplanation);
       if (
-        !isFormulaVarNote &&
-        isRedundantAgainstPool(
-          d.sourceContext,
-          contentTokens(d.sourceContext),
-          usedPool,
-          0.68,
-          0.84
+        isFormulaVarNote &&
+        formulasOrFrameworks.some(
+          (f) => f.name.toLowerCase() === d.concept.toLowerCase() && (f.variables?.length ?? 0) > 0
         )
       ) {
         continue;
       }
+      const renderedContextRaw = sanitizeOut(condenseAcademicSentence(d.sourceContext, 'short'));
+      const contextWords = renderedContextRaw.split(/\s+/).filter(Boolean);
+      const renderedContext =
+        contextWords.length > 11 ? `${contextWords.slice(0, 10).join(' ')}...` : renderedContextRaw;
+      const builtPlain = isFormulaVarNote
+        ? sanitizeOut(d.plainExplanation)
+        : sanitizeOut(buildPlainLanguageExplanation(d.sourceContext, profile.definitions));
+      const fallbackPlain =
+        !isFormulaVarNote && normalizedFingerprint(d.plainExplanation) !== normalizedFingerprint(renderedContextRaw)
+          ? sanitizeOut(d.plainExplanation)
+          : '';
+      const simplifiedPlain = builtPlain || fallbackPlain;
+      if (!simplifiedPlain) continue;
+      if (
+        !isFormulaVarNote &&
+        normalizedFingerprint(simplifiedPlain) === normalizedFingerprint(renderedContextRaw)
+      ) {
+        continue;
+      }
+
       difficultConceptExplanations.push({
-        concept: sanitizeOut(d.concept),
-        sourceContext: sanitizeOut(d.sourceContext),
-        plainExplanation: sanitizeOut(d.plainExplanation),
+        concept: sanitizeLabel(d.concept),
+        sourceContext: renderedContext,
+        plainExplanation: simplifiedPlain,
       });
     }
   }
 
-  // Detailed & Comprehensive concept relationships & formula study checks
+  // Detailed & Comprehensive concept relationships, cause-effect links & formula checks
   const revisionNotes: string[] = [];
   if (limits.revision > 0) {
     for (const rel of profile.sectionRelationships) {
@@ -1100,30 +1144,34 @@ export function generateExtractiveSummary(
     }
     for (const ce of profile.causeEffects) {
       if (revisionNotes.length >= limits.revision) break;
-      const line = sanitizeOut(`Cause & Effect: ${ce.cause} → ${ce.effect}.`);
+      const condensedCause = condenseAcademicSentence(ce.cause, summaryLevel).replace(/\.$/, '');
+      const condensedEffect = condenseAcademicSentence(ce.effect, summaryLevel).replace(/\.$/, '');
+      const line = sanitizeOut(`Cause & Effect: ${condensedCause} → ${condensedEffect}.`);
       if (!isRedundantAgainstPool(line, contentTokens(line), usedPool, 0.65, 0.82)) {
         revisionNotes.push(line);
         markUsed(line);
       }
     }
-    for (const f of formulasOrFrameworks) {
-      if (revisionNotes.length >= limits.revision) break;
-      const line = sanitizeOut(
-        `Equation check — ${f.name}: ${f.expressionOrStructure}`
-      );
-      if (!revisionNotes.includes(line)) revisionNotes.push(line);
+    if (summaryLevel === 'comprehensive') {
+      for (const f of formulasOrFrameworks) {
+        if (revisionNotes.length >= limits.revision) break;
+        const line = sanitizeOut(
+          `Equation check — ${f.name}: ${f.expressionOrStructure}`
+        );
+        if (!revisionNotes.includes(line)) revisionNotes.push(line);
+      }
     }
   }
 
   // --------------------------------------------------------------------------
-  // H. Key Takeaways (concise exam-ready synthesis without verbatim duplication)
+  // H. Key Takeaways (concise exam-ready anchor rules)
   // --------------------------------------------------------------------------
   const keyTakeaways: string[] = [];
   if (classificationsAndTypes.length > 0 && keyTakeaways.length < limits.takeaways) {
     const firstCls = classificationsAndTypes[0];
     keyTakeaways.push(
       sanitizeOut(
-        `${firstCls.topic} encompasses ${firstCls.types.length} named ${
+        `${firstCls.topic} divides into ${firstCls.types.length} key ${
           firstCls.types.length === 1 ? 'category' : 'categories'
         }: ${firstCls.types.map((t) => t.name).join(', ')}.`
       )
@@ -1132,7 +1180,7 @@ export function generateExtractiveSummary(
   if (importantDefinitions.length > 0 && keyTakeaways.length < limits.takeaways) {
     keyTakeaways.push(
       sanitizeOut(
-        `Foundational terms to retain: ${importantDefinitions
+        `Core terms to master: ${importantDefinitions
           .slice(0, 4)
           .map((d) => d.term)
           .join(', ')}.`
@@ -1142,7 +1190,7 @@ export function generateExtractiveSummary(
   if (formulasOrFrameworks.length > 0 && keyTakeaways.length < limits.takeaways) {
     keyTakeaways.push(
       sanitizeOut(
-        `Essential equations/expressions: ${formulasOrFrameworks
+        `Key equations: ${formulasOrFrameworks
           .slice(0, 3)
           .map((f) => `${f.name} (${f.expressionOrStructure})`)
           .join('; ')}.`
@@ -1152,7 +1200,7 @@ export function generateExtractiveSummary(
   if (importantDistinctions.length > 0 && keyTakeaways.length < limits.takeaways) {
     keyTakeaways.push(
       sanitizeOut(
-        `Key contrasts to distinguish: ${importantDistinctions
+        `Important contrasts: ${importantDistinctions
           .slice(0, 2)
           .map((d) => d.pairTitle)
           .join(', ')}.`
@@ -1161,30 +1209,37 @@ export function generateExtractiveSummary(
   }
   for (const ce of profile.causeEffects) {
     if (keyTakeaways.length >= limits.takeaways) break;
-    const summaryLine = sanitizeOut(`${ce.cause} → ${ce.effect}.`);
-    if (!keyTakeaways.some((kt) => normalizedFingerprint(kt) === normalizedFingerprint(summaryLine))) {
+    const summaryLine = condenseAndSanitize(`${ce.cause} → ${ce.effect}.`);
+    if (
+      summaryLine &&
+      !isRedundantAgainstPool(summaryLine, contentTokens(summaryLine), usedPool, 0.56, 0.72) &&
+      !keyTakeaways.some((kt) => normalizedFingerprint(kt) === normalizedFingerprint(summaryLine))
+    ) {
       keyTakeaways.push(summaryLine);
     }
   }
-  // Fallback synthesis only if keyTakeaways is still short on concise docs
   for (const unit of rankedByScore) {
     if (keyTakeaways.length >= Math.min(2, limits.takeaways)) break;
-    const candidate = sanitizeOut(stripBoilerplatePrefix(unit.formattedText));
-    if (!isRedundantAgainstPool(candidate, unit.tokens, usedPool, 0.72, 0.85)) {
+    const candidate = condenseAndSanitize(unit.formattedText);
+    if (candidate && !isRedundantAgainstPool(candidate, unit.tokens, usedPool, 0.72, 0.85)) {
       keyTakeaways.push(candidate);
     }
   }
 
-  const finalRecap: string[] = [];
-  const recapTarget = summaryLevel === 'comprehensive' ? 5 : summaryLevel === 'detailed' ? 4 : 2;
-  for (const kt of keyTakeaways.slice(0, recapTarget)) {
-    finalRecap.push(sanitizeOut(`Mastery Synthesis: ${kt}`));
-  }
-  if (profile.causeEffects.length > 0 && finalRecap.length < recapTarget) {
-    for (const ce of profile.causeEffects.slice(0, 2)) {
-      finalRecap.push(sanitizeOut(`Core Mechanism: ${ce.cause} results in ${ce.effect}.`));
-    }
-  }
+  // Holistic Final Recap — completely distinct from keyTakeaways, revisionNotes & already-rendered concepts
+  const finalRecap = composeFinalRecap(
+    profile,
+    keyTakeaways,
+    summaryLevel,
+    sanitizeOut,
+    [
+      topicOverview,
+      ...revisionNotes,
+      ...importantDistinctions.map((d) => d.comparison),
+      ...mainConcepts.flatMap((c) => c.sourcePoints),
+      ...processesAndMechanisms.flatMap((p) => p.steps),
+    ]
+  );
 
   // --------------------------------------------------------------------------
   // QUALITY CONTROL VALIDATION STAGE
@@ -1192,6 +1247,7 @@ export function generateExtractiveSummary(
   // --------------------------------------------------------------------------
   const validationNotes: string[] = [];
   const coveredSectionTitles = new Set<string>([
+    ...Array.from(alreadyCoveredHeadings),
     ...mainConcepts.map((c) => c.heading.toLowerCase()),
     ...classificationsAndTypes.map((c) => c.topic.toLowerCase()),
     ...processesAndMechanisms.map((p) => p.heading.toLowerCase()),
@@ -1222,18 +1278,22 @@ export function generateExtractiveSummary(
 
       if (isCovered) {
         coveredSectionTitles.add(lowerHeading);
-      } else {
-        // Recover missed substantive document section so no major section is omitted
+      } else if (summaryLevel === 'comprehensive' || mainConcepts.length < limits.concepts) {
+        // Recover missed substantive section in condensed form
         const topRecover = [...sec.units]
-          .filter((u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.74, 0.88))
+          .filter((u) => !isRedundantAgainstPool(u.formattedText, u.tokens, usedPool, 0.7, 0.85))
           .slice(0, Math.max(1, Math.min(2, limits.pointsPerConcept)));
+        const fusedRecover = fuseRelatedUnits(topRecover, summaryLevel, {
+          maxItems: 2,
+          definitions: profile.definitions,
+        })
+          .map(sanitizeOut)
+          .filter(Boolean);
 
-        if (topRecover.length > 0) {
+        if (fusedRecover.length > 0) {
           mainConcepts.push({
-            heading: sanitizeOut(sec.heading),
-            sourcePoints: topRecover.map((u) =>
-              sanitizeOut(stripBoilerplatePrefix(u.formattedText))
-            ),
+            heading: sanitizeLabel(sec.heading),
+            sourcePoints: fusedRecover,
             aiClarification: '',
           });
           coveredSectionTitles.add(lowerHeading);
@@ -1282,7 +1342,7 @@ export function generateExtractiveSummary(
     notes: validationNotes,
   };
 
-  const baseSummary: Omit<StructuredSummary, 'markdown'> = {
+  const basePreCount: Omit<StructuredSummary, 'markdown' | 'wordCount'> = {
     title: resolvedTitle,
     subjectArea: profile.subjectArea,
     summaryLevel,
@@ -1306,10 +1366,16 @@ export function generateExtractiveSummary(
     revisionNotes,
     keyTakeaways,
     validationReport,
-    wordCount,
     chunkCount: profile.chunks.length,
     generatedAt: new Date().toISOString(),
     generationMode: 'extractive',
+  };
+
+  const condensedWordCount = computeRenderedSummaryWordCount(basePreCount);
+
+  const baseSummary: Omit<StructuredSummary, 'markdown'> = {
+    ...basePreCount,
+    wordCount: condensedWordCount,
   };
 
   const { visualAids, visualDiagrams } = evaluateVisualLearningNeeds(baseSummary);

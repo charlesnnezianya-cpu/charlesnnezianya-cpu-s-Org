@@ -30,14 +30,19 @@ export function ProfileSettingsView() {
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     setFeedback(null);
+    const trimmedName = displayName.trim();
+    if (trimmedName.length < 2) {
+      setFeedback({ type: 'error', text: 'Display name must be at least 2 characters long.' });
+      return;
+    }
     setSavingName(true);
     try {
-      await updateDisplayName(displayName);
+      await updateDisplayName(trimmedName);
       if (user) {
         await upsertUserProfile({
           id: user.id,
-          email: user.email || '',
-          display_name: displayName.trim(),
+          email: user.email || profile?.email || '',
+          display_name: trimmedName,
           theme_preference: theme,
         });
       }
@@ -137,10 +142,29 @@ export function ProfileSettingsView() {
               id="settings-email"
               type="email"
               disabled
-              value={user?.email || ''}
+              value={user?.email || profile?.email || ''}
+              placeholder="No email linked to this account"
               className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-100 px-3.5 py-2.5 text-sm text-slate-500 sm:min-h-10 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-400"
             />
           </div>
+
+          {(user?.phone || profile?.phone) && (
+            <div>
+              <label
+                htmlFor="settings-phone"
+                className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
+              >
+                Account Phone
+              </label>
+              <input
+                id="settings-phone"
+                type="tel"
+                disabled
+                value={user?.phone || profile?.phone || ''}
+                className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-100 px-3.5 py-2.5 text-sm text-slate-500 sm:min-h-10 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-400"
+              />
+            </div>
+          )}
 
           <div className="flex flex-col justify-between gap-3 pt-2 sm:flex-row sm:items-center">
             <div>

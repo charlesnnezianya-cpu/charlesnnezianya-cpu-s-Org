@@ -279,8 +279,18 @@ export const EducationalDiagramRenderer = React.memo(function EducationalDiagram
             <g
               key={node.id}
               transform={`translate(${pos.x}, ${pos.y})`}
+              role="button"
+              tabIndex={0}
+              aria-label={node.detail || node.sublabel ? `${node.label}: inspect note` : node.label}
+              aria-pressed={isSelected}
               onClick={() => setSelectedNodeId(isSelected ? null : node.id)}
-              className="cursor-pointer transition-opacity hover:opacity-90"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setSelectedNodeId(isSelected ? null : node.id);
+                }
+              }}
+              className="cursor-pointer transition-opacity hover:opacity-90 focus:outline-none focus-visible:opacity-90"
             >
               <rect
                 width={boxW}
@@ -436,8 +446,18 @@ export const EducationalDiagramRenderer = React.memo(function EducationalDiagram
             <g
               key={node.id}
               transform={`translate(${pt.cx - boxW / 2}, ${pt.cy - boxH / 2})`}
+              role="button"
+              tabIndex={0}
+              aria-label={node.detail || node.sublabel ? `${node.label}: inspect note` : node.label}
+              aria-pressed={isSelected}
               onClick={() => setSelectedNodeId(isSelected ? null : node.id)}
-              className="cursor-pointer"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setSelectedNodeId(isSelected ? null : node.id);
+                }
+              }}
+              className="cursor-pointer focus:outline-none focus-visible:opacity-90"
             >
               <rect
                 width={boxW}

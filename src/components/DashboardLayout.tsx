@@ -179,6 +179,17 @@ export function DashboardLayout({
     loadWorkspaceData();
   }, [loadWorkspaceData]);
 
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setMobileNavOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [mobileNavOpen]);
+
   const navigateTo = useCallback(
     (section: DashboardSection) => {
       if (activeExamInProgress && activeSection === 'quizzes' && section !== 'quizzes') {
@@ -345,7 +356,7 @@ export function DashboardLayout({
             {displayName}
           </p>
           <p className="truncate text-xs text-slate-500 dark:text-slate-400">
-            {user?.email}
+            {user?.email || user?.phone || ''}
           </p>
         </div>
         <button

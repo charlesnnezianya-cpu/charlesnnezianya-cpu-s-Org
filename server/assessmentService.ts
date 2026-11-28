@@ -87,6 +87,9 @@ const PLACEHOLDER_SECRETS = new Set([
   'default',
 ]);
 
+let ephemeralSealKey: Buffer | null = null;
+let warnedEphemeralSealKey = false;
+
 export function getAssessmentSealKey(): Buffer {
   const configured = (process.env.ASSESSMENT_KEY_SECRET || '').trim();
   if (
@@ -96,8 +99,16 @@ export function getAssessmentSealKey(): Buffer {
     configured.toLowerCase().startsWith('your-') ||
     configured.toLowerCase().startsWith('replace-')
   ) {
-    // Fall back to a robust stable hash if assessment secret is unconfigured
-    return crypto.createHash('sha256').update('brainstine-default-assessment-seal-salt-2026-secure', 'utf8').digest();
+    if (!ephemeralSealKey) {
+      ephemeralSealKey = crypto.randomBytes(32);
+    }
+    if (process.env.NODE_ENV === 'production' && !warnedEphemeralSealKey) {
+      warnedEphemeralSealKey = true;
+      console.warn(
+        '[Assessment Seal] ASSESSMENT_KEY_SECRET is missing or weak; using an ephemeral CSPRNG process key.'
+      );
+    }
+    return ephemeralSealKey;
   }
   return crypto.createHash('sha256').update(configured, 'utf8').digest();
 }

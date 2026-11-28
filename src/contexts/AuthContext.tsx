@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
 import {
   fetchUserProfile,
@@ -9,6 +9,14 @@ import {
 } from '../lib/supabase';
 import { sanitizeUserErrorMessage } from '../lib/apiClient';
 import type { UserProfile } from '../types/brainstine';
+
+type WelcomeAuthEvent =
+  | 'signup'
+  | 'oauth_callback'
+  | 'email_verified'
+  | 'phone_verified'
+  | 'email_linked_after_phone_signup'
+  | 'session_check';
 
 interface AuthContextValue {
   user: User | null;
@@ -28,6 +36,17 @@ interface AuthContextValue {
     displayName: string;
   }) => Promise<{ needsEmailVerification: boolean }>;
   signInWithEmail: (params: { email: string; password: string }) => Promise<void>;
+  requestPhoneOtp: (params: {
+    phone: string;
+    displayName?: string;
+    mode: 'signin' | 'signup';
+  }) => Promise<void>;
+  verifyPhoneOtp: (params: {
+    phone: string;
+    token: string;
+    displayName?: string;
+    linkEmail?: string;
+  }) => Promise<{ emailVerificationPending: boolean }>;
   signInWithGoogle: () => Promise<void>;
   requestPasswordReset: (email: string) => Promise<void>;
   updatePassword: (newPassword: string) => Promise<void>;
@@ -45,13 +64,22 @@ function formatFriendlyAuthError(rawMessage: string, fallback: string): string {
     return 'Please verify your email address from your inbox before signing in.';
   }
   if (lower.includes('already registered') || lower.includes('already exists')) {
-    return 'An account with this email already exists. Please sign in instead.';
+    return 'An account with these details already exists. Please sign in instead.';
+  }
+  if (lower.includes('phone') && lower.includes('provider') && lower.includes('not enabled')) {
+    return 'Phone sign-in is temporarily unavailable. Please sign in with email or Google.';
+  }
+  if (lower.includes('invalid phone number') || lower.includes('unable to validate phone')) {
+    return 'Please enter a valid phone number including country code (e.g. +14155552671).';
+  }
+  if (lower.includes('token has expired') || lower.includes('otp_expired') || lower.includes('invalid token')) {
+    return 'That verification code is invalid or has expired. Please request a new code.';
   }
   if (lower.includes('password') && lower.includes('at least')) {
     return rawMessage;
   }
   if (lower.includes('rate limit') || lower.includes('too many requests')) {
-    return 'Too many sign-in attempts. Please wait a moment and try again.';
+    return 'Too many attempts. Please wait a moment and try again.';
   }
   const safe = sanitizeUserErrorMessage(rawMessage, 'sign in');
   return safe === 'Something went wrong. Please try again.' ? fallback : safe;
@@ -124,6 +152,35 @@ function consumeUrlOAuthError(): string | null {
   }
 }
 
+function normalizePhoneE164(raw: string): string {
+  const trimmed = raw.trim();
+  const digitsAndPlus = trimmed.replace(/[^\d+]/g, '');
+  if (digitsAndPlus.startsWith('+')) {
+    return digitsAndPlus;
+  }
+  return `+${digitsAndPlus}`;
+}
+
+function isCandidateForWelcomeCheck(user: User, authEvent: WelcomeAuthEvent): boolean {
+  if (!user.email || !user.email.includes('@')) {
+    return false;
+  }
+  const nowMs = Date.now();
+  const createdMs = user.created_at ? Date.parse(user.created_at) : NaN;
+  const confirmedMs = Date.parse(user.email_confirmed_at || user.confirmed_at || '');
+  const phoneConfirmedMs = user.phone_confirmed_at ? Date.parse(user.phone_confirmed_at) : NaN;
+
+  if (Number.isFinite(createdMs) && nowMs - createdMs <= 30 * 60 * 1000) return true;
+  if (Number.isFinite(confirmedMs) && nowMs - confirmedMs <= 30 * 60 * 1000) return true;
+  if (authEvent === 'phone_verified' && Number.isFinite(phoneConfirmedMs) && nowMs - phoneConfirmedMs <= 30 * 60 * 1000) {
+    return true;
+  }
+  if (authEvent === 'email_linked_after_phone_signup' && Number.isFinite(createdMs) && nowMs - createdMs <= 24 * 60 * 60 * 1000) {
+    return true;
+  }
+  return false;
+}
+
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -134,8 +191,46 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isPasswordRecovery, setIsPasswordRecovery] = useState<boolean>(false);
   const [oauthError, setOauthError] = useState<string | null>(() => consumeUrlOAuthError());
   const [pendingOauthUrl, setPendingOauthUrl] = useState<string | null>(null);
+  const welcomeAttemptedKeysRef = useRef<Set<string>>(new Set());
 
-  const loadOrCreateProfile = async (authUser: User) => {
+  const triggerWelcomeEmailNonBlocking = (
+    activeSession: Session | null | undefined,
+    authEvent: WelcomeAuthEvent
+  ) => {
+    const authUser = activeSession?.user;
+    const accessToken = activeSession?.access_token;
+    if (!authUser || !accessToken) return;
+    if (!isCandidateForWelcomeCheck(authUser, authEvent)) return;
+
+    const dedupeKey = `${authUser.id}:${(authUser.email || '').trim().toLowerCase()}`;
+    if (welcomeAttemptedKeysRef.current.has(dedupeKey)) {
+      return;
+    }
+    welcomeAttemptedKeysRef.current.add(dedupeKey);
+
+    // Fire-and-forget asynchronous call so signup / sign-in flows never block or fail
+    fetch('/api/auth/welcome-email', {
+      method: 'POST',
+      keepalive: true,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ authEvent }),
+    }).catch(() => {
+      // Do not surface background welcome email network errors to the user
+    });
+  };
+
+  const loadOrCreateProfile = async (
+    authUser: User,
+    activeSession?: Session | null,
+    authEvent: WelcomeAuthEvent = 'session_check'
+  ) => {
+    if (activeSession) {
+      triggerWelcomeEmailNonBlocking(activeSession, authEvent);
+    }
+
     try {
       const existing = await fetchUserProfile(authUser.id);
       if (existing) {
@@ -147,7 +242,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         (authUser.user_metadata?.full_name as string | undefined) ||
         (authUser.user_metadata?.name as string | undefined) ||
         authUser.email?.split('@')[0] ||
-        'Student';
+        'Learner';
 
       const created = await upsertUserProfile({
         id: authUser.id,
@@ -162,10 +257,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         (authUser.user_metadata?.full_name as string | undefined) ||
         (authUser.user_metadata?.name as string | undefined) ||
         authUser.email?.split('@')[0] ||
-        'Student';
+        'Learner';
       setProfile({
         id: authUser.id,
         email: authUser.email || '',
+        phone: authUser.phone || null,
         display_name: fallbackName,
       });
     }
@@ -193,7 +289,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (data.session?.user) {
           setPendingOauthUrl(null);
           setOauthError(null);
-          loadOrCreateProfile(data.session.user).finally(() => {
+          const provider = data.session.user.app_metadata?.provider;
+          const initialEvent: WelcomeAuthEvent =
+            provider === 'google' ? 'oauth_callback' : 'session_check';
+          loadOrCreateProfile(data.session.user, data.session, initialEvent).finally(() => {
             if (mounted) {
               clearTimeout(safetyTimer);
               setLoading(false);
@@ -223,7 +322,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (nextSession?.user) {
         setPendingOauthUrl(null);
         setOauthError(null);
-        loadOrCreateProfile(nextSession.user);
+        const provider = nextSession.user.app_metadata?.provider;
+        const welcomeEvent: WelcomeAuthEvent =
+          event === 'USER_UPDATED' && nextSession.user.phone && nextSession.user.email
+            ? 'email_linked_after_phone_signup'
+            : provider === 'google'
+              ? 'oauth_callback'
+              : event === 'SIGNED_IN'
+                ? 'email_verified'
+                : 'session_check';
+        loadOrCreateProfile(nextSession.user, nextSession, welcomeEvent);
       } else {
         setProfile(null);
       }
@@ -270,7 +378,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (data.session?.user) {
-      await loadOrCreateProfile(data.session.user);
+      await loadOrCreateProfile(data.session.user, data.session, 'signup');
       return { needsEmailVerification: false };
     }
 
@@ -295,8 +403,115 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       );
     }
     if (data.user) {
-      await loadOrCreateProfile(data.user);
+      await loadOrCreateProfile(data.user, data.session, 'session_check');
     }
+  };
+
+  const requestPhoneOtp = async ({
+    phone,
+    displayName,
+    mode,
+  }: {
+    phone: string;
+    displayName?: string;
+    mode: 'signin' | 'signup';
+  }) => {
+    const client = requireSupabase();
+    const normalizedPhone = normalizePhoneE164(phone);
+    if (normalizedPhone.length < 8) {
+      throw new Error('Please enter a valid phone number including country code (e.g. +14155552671).');
+    }
+
+    const { error } = await client.auth.signInWithOtp({
+      phone: normalizedPhone,
+      options: {
+        shouldCreateUser: mode === 'signup',
+        ...(mode === 'signup' && displayName?.trim()
+          ? { data: { display_name: displayName.trim() } }
+          : {}),
+      },
+    });
+
+    if (error) {
+      throw new Error(
+        formatFriendlyAuthError(
+          error.message,
+          'We could not send a verification code to this phone number right now.'
+        )
+      );
+    }
+  };
+
+  const verifyPhoneOtp = async ({
+    phone,
+    token,
+    displayName,
+    linkEmail,
+  }: {
+    phone: string;
+    token: string;
+    displayName?: string;
+    linkEmail?: string;
+  }) => {
+    const client = requireSupabase();
+    const normalizedPhone = normalizePhoneE164(phone);
+    const { data, error } = await client.auth.verifyOtp({
+      phone: normalizedPhone,
+      token: token.trim(),
+      type: 'sms',
+    });
+
+    if (error) {
+      throw new Error(
+        formatFriendlyAuthError(
+          error.message,
+          'We could not verify that SMS code. Please check the digits and try again.'
+        )
+      );
+    }
+
+    let emailVerificationPending = false;
+    let activeSession = data.session;
+    let activeUser = data.user || data.session?.user || null;
+
+    if (activeUser && displayName?.trim() && !activeUser.user_metadata?.display_name) {
+      await client.auth
+        .updateUser({ data: { display_name: displayName.trim() } })
+        .catch(() => {});
+    }
+
+    // If user explicitly provided a real email address during phone registration, link it cleanly
+    const cleanEmail = linkEmail?.trim().toLowerCase() || '';
+    if (
+      activeUser &&
+      cleanEmail &&
+      /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) &&
+      !activeUser.email
+    ) {
+      try {
+        const { data: updatedData, error: linkErr } = await client.auth.updateUser({
+          email: cleanEmail,
+        });
+        if (!linkErr && updatedData.user) {
+          activeUser = updatedData.user;
+          if (!activeUser.email && updatedData.user.new_email) {
+            emailVerificationPending = true;
+          }
+          const refreshed = await client.auth.getSession();
+          if (refreshed.data.session) {
+            activeSession = refreshed.data.session;
+          }
+        }
+      } catch {
+        // Non-blocking: phone registration still succeeds even if linking email needs confirmation later
+      }
+    }
+
+    if (activeUser) {
+      await loadOrCreateProfile(activeUser, activeSession, 'phone_verified');
+    }
+
+    return { emailVerificationPending };
   };
 
   const signInWithGoogle = async () => {
@@ -443,7 +658,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const refreshProfile = async () => {
     if (user) {
-      await loadOrCreateProfile(user);
+      await loadOrCreateProfile(user, session, 'session_check');
     }
   };
 
@@ -463,6 +678,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         clearPendingOauthUrl: () => setPendingOauthUrl(null),
         signUpWithEmail,
         signInWithEmail,
+        requestPhoneOtp,
+        verifyPhoneOtp,
         signInWithGoogle,
         requestPasswordReset,
         updatePassword,

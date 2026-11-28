@@ -55,6 +55,7 @@ import {
   SnapTriggerButtons,
 } from './SnapPhotoControl';
 import { SubjectVisualBanner } from './SubjectVisualBanner';
+import tutorHeroImage from '../assets/images/ai_tutor_university_teacher_1795861207634.jpg';
 
 interface AiTutorWorkspaceProps {
   materials: StudyMaterialRecord[];
@@ -173,6 +174,7 @@ export function AiTutorWorkspace({
     ragMeta?: TutorRagMeta;
   } | null>(null);
   const [expandedSourceKey, setExpandedSourceKey] = useState<string | null>(null);
+  const [heroImageError, setHeroImageError] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const inFlightRef = useRef(false);
@@ -846,6 +848,7 @@ export function AiTutorWorkspace({
                     tabIndex={0}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
                         handleSelectSession(session);
                       }
                     }}
@@ -906,7 +909,15 @@ export function AiTutorWorkspace({
 
             <div className="flex flex-wrap items-center gap-2">
               {/* Attach Reference Material/Summary */}
-              <div className="relative">
+              <div
+                className="relative"
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape' && contextPickerOpen) {
+                    e.stopPropagation();
+                    setContextPickerOpen(false);
+                  }
+                }}
+              >
                 <button
                   type="button"
                   onClick={() => setContextPickerOpen((prev) => !prev)}
@@ -1061,14 +1072,32 @@ export function AiTutorWorkspace({
               <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
             </div>
           ) : messages.length === 0 ? (
-            <div className="mx-auto flex max-w-xl flex-col items-center justify-center py-20 text-center">
-              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-100 text-blue-700 shadow-xs dark:bg-blue-950/60 dark:text-cyan-400">
-                <GraduationCap className="h-7 w-7" aria-hidden="true" />
-              </div>
-              <h3 className="mt-4 text-base font-bold text-slate-900 dark:text-white">
+            <div className="mx-auto flex w-full max-w-2xl flex-col items-center justify-center py-4 text-center sm:py-6">
+              <figure className="w-full overflow-hidden rounded-2xl border border-slate-200/90 bg-slate-100 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+                {!heroImageError ? (
+                  <img
+                    src={tutorHeroImage}
+                    alt="University professor teaching beside a classroom chalkboard filled with academic equations"
+                    loading="eager"
+                    decoding="async"
+                    fetchPriority="high"
+                    referrerPolicy="no-referrer"
+                    onError={() => setHeroImageError(true)}
+                    className="aspect-video max-h-60 w-full object-cover object-[center_22%] sm:max-h-72 lg:max-h-80"
+                  />
+                ) : (
+                  <div className="flex aspect-video max-h-60 w-full flex-col items-center justify-center bg-gradient-to-br from-[#0F1E3D] via-[#1B3363] to-[#0B1730] p-6 text-white sm:max-h-72 lg:max-h-80">
+                    <GraduationCap className="h-9 w-9 text-sky-300" aria-hidden="true" />
+                    <p className="mt-2 font-display text-sm font-semibold text-white">
+                      Personal AI Tutor
+                    </p>
+                  </div>
+                )}
+              </figure>
+              <h3 className="mt-5 font-display text-lg font-bold tracking-tight text-slate-900 sm:text-xl dark:text-white">
                 Personal AI Tutor
               </h3>
-              <p className="mt-1.5 text-xs leading-relaxed text-slate-600 dark:text-slate-400">
+              <p className="mt-1.5 max-w-xl text-xs leading-relaxed text-slate-600 sm:text-sm dark:text-slate-400">
                 Type any topic, concept, or question below. Your AI tutor will guide you step-by-step through clear explanations and structured lessons.
               </p>
             </div>

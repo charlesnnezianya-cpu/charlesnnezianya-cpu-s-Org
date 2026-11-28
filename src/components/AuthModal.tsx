@@ -8,6 +8,8 @@ import {
   KeyRound,
   Lock,
   Mail,
+  Phone,
+  ShieldCheck,
   User,
   X,
 } from 'lucide-react';
@@ -16,6 +18,7 @@ import { sanitizeUserErrorMessage } from '../lib/apiClient';
 import { BrandLogo } from './BrandLogo';
 
 export type AuthModalMode = 'signin' | 'signup' | 'forgot' | 'recovery';
+type CredentialChannel = 'email' | 'phone';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -30,6 +33,8 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
     pendingOauthUrl,
     signInWithEmail,
     signUpWithEmail,
+    requestPhoneOtp,
+    verifyPhoneOtp,
     signInWithGoogle,
     requestPasswordReset,
     updatePassword,
@@ -39,8 +44,13 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
   } = useAuth();
 
   const [mode, setMode] = useState<AuthModalMode>(initialMode);
+  const [channel, setChannel] = useState<CredentialChannel>('email');
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
+  const [optionalLinkEmail, setOptionalLinkEmail] = useState('');
+  const [phoneOtpCode, setPhoneOtpCode] = useState('');
+  const [phoneOtpSent, setPhoneOtpSent] = useState(false);
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -52,21 +62,50 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
 
   React.useEffect(() => {
     setMode(initialMode);
+    setChannel('email');
+    setPhoneOtpSent(false);
+    setPhoneOtpCode('');
     setErrorMsg(null);
     setVerificationSentTo(null);
     setResetSentTo(null);
     setRecoveryComplete(false);
   }, [initialMode, isOpen]);
 
+  React.useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (mode === 'recovery') {
+          clearPasswordRecovery();
+        }
+        clearOauthError();
+        clearPendingOauthUrl();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen, mode, clearPasswordRecovery, clearOauthError, clearPendingOauthUrl, onClose]);
+
   if (!isOpen) return null;
 
   const switchMode = (next: AuthModalMode) => {
     setMode(next);
+    setPhoneOtpSent(false);
+    setPhoneOtpCode('');
     setErrorMsg(null);
     clearOauthError();
     clearPendingOauthUrl();
     setVerificationSentTo(null);
     setResetSentTo(null);
+  };
+
+  const switchChannel = (next: CredentialChannel) => {
+    setChannel(next);
+    setPhoneOtpSent(false);
+    setPhoneOtpCode('');
+    setErrorMsg(null);
+    clearOauthError();
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -77,6 +116,47 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
       setErrorMsg(
         'Account sign-in is temporarily unavailable. Please try again shortly.'
       );
+      return;
+    }
+
+    if ((mode === 'signin' || mode === 'signup') && channel === 'phone') {
+      if (mode === 'signup' && (!displayName.trim() || displayName.trim().length < 2)) {
+        setErrorMsg('Please enter your display name (at least 2 characters).');
+        return;
+      }
+
+      setSubmitting(true);
+      try {
+        if (!phoneOtpSent) {
+          await requestPhoneOtp({
+            phone,
+            displayName: mode === 'signup' ? displayName : undefined,
+            mode,
+          });
+          setPhoneOtpSent(true);
+        } else {
+          if (phoneOtpCode.trim().length < 4) {
+            setErrorMsg('Please enter the verification code sent to your phone.');
+            setSubmitting(false);
+            return;
+          }
+          const result = await verifyPhoneOtp({
+            phone,
+            token: phoneOtpCode,
+            displayName: mode === 'signup' ? displayName : undefined,
+            linkEmail: mode === 'signup' ? optionalLinkEmail : undefined,
+          });
+          if (result.emailVerificationPending && optionalLinkEmail.trim()) {
+            setVerificationSentTo(optionalLinkEmail.trim());
+          } else {
+            onClose();
+          }
+        }
+      } catch (err: unknown) {
+        setErrorMsg(sanitizeUserErrorMessage(err, 'sign in'));
+      } finally {
+        setSubmitting(false);
+      }
       return;
     }
 
@@ -343,9 +423,44 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
                 <div className="my-5 flex items-center gap-3 select-none">
                   <div className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />
                   <span className="text-xs font-medium text-slate-400 dark:text-slate-500">
-                    or continue with email
+                    or continue with
                   </span>
                   <div className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />
+                </div>
+
+                <div
+                  role="tablist"
+                  aria-label="Sign-in method"
+                  className="mb-4 grid grid-cols-2 gap-1 rounded-xl border border-slate-200 bg-slate-50 p-1 select-none dark:border-slate-800 dark:bg-slate-900"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={channel === 'email'}
+                    onClick={() => switchChannel('email')}
+                    className={`flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-semibold transition-colors ${
+                      channel === 'email'
+                        ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
+                        : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    <Mail className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Email</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={channel === 'phone'}
+                    onClick={() => switchChannel('phone')}
+                    className={`flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-semibold transition-colors ${
+                      channel === 'phone'
+                        ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-800 dark:text-white'
+                        : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    <Phone className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Phone</span>
+                  </button>
                 </div>
               </>
             )}
@@ -368,139 +483,257 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
                       id="auth-display-name"
                       type="text"
                       required
+                      disabled={channel === 'phone' && phoneOtpSent}
                       value={displayName}
                       onChange={(e) => setDisplayName(e.target.value)}
                       placeholder="e.g. Jordan Alvarez"
-                      className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
+                      className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
                     />
                   </div>
                 </div>
               )}
 
-              {mode !== 'recovery' && (
-                <div>
-                  <label
-                    htmlFor="auth-email"
-                    className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
-                  >
-                    Academic or personal email
-                  </label>
-                  <div className="relative">
-                    <Mail
-                      className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
-                      aria-hidden="true"
-                    />
-                    <input
-                      id="auth-email"
-                      type="email"
-                      required
-                      autoComplete="email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="student@university.edu"
-                      className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
-                    />
-                  </div>
-                </div>
-              )}
-
-              {mode !== 'forgot' && (
-                <div>
-                  <div className="mb-1.5 flex items-center justify-between">
+              {(mode === 'signin' || mode === 'signup') && channel === 'phone' ? (
+                <>
+                  <div>
                     <label
-                      htmlFor="auth-password"
-                      className="block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
+                      htmlFor="auth-phone"
+                      className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
                     >
-                      {mode === 'recovery' ? 'New password' : 'Password'}
+                      Phone number (with country code)
                     </label>
-                    {mode === 'signin' && (
-                      <button
-                        type="button"
-                        onClick={() => switchMode('forgot')}
-                        className="text-xs font-medium text-blue-600 hover:text-blue-700 select-none dark:text-blue-400 dark:hover:text-blue-300"
+                    <div className="relative">
+                      <Phone
+                        className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
+                        aria-hidden="true"
+                      />
+                      <input
+                        id="auth-phone"
+                        type="tel"
+                        required
+                        disabled={phoneOtpSent}
+                        autoComplete="tel"
+                        value={phone}
+                        onChange={(e) => setPhone(e.target.value)}
+                        placeholder="+1 415 555 2671"
+                        className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
+                      />
+                    </div>
+                  </div>
+
+                  {mode === 'signup' && !phoneOtpSent && (
+                    <div>
+                      <label
+                        htmlFor="auth-phone-email"
+                        className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
                       >
-                        Forgot password?
-                      </button>
-                    )}
-                  </div>
-                  <div className="relative">
-                    <Lock
-                      className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
-                      aria-hidden="true"
-                    />
-                    <input
-                      id="auth-password"
-                      type={showPassword ? 'text' : 'password'}
-                      required
-                      minLength={mode === 'signin' ? 6 : 8}
-                      autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder={mode === 'signin' ? 'Enter your password' : 'At least 8 characters'}
-                      className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-10 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword((prev) => !prev)}
-                      aria-label={showPassword ? 'Hide password' : 'Show password'}
-                      className="absolute top-1/2 right-1.5 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-md text-slate-400 hover:text-slate-600 select-none dark:hover:text-slate-200"
-                    >
-                      {showPassword ? (
-                        <EyeOff className="h-4 w-4" aria-hidden="true" />
-                      ) : (
-                        <Eye className="h-4 w-4" aria-hidden="true" />
-                      )}
-                    </button>
-                  </div>
-                </div>
-              )}
+                        Email address{' '}
+                        <span className="font-normal text-slate-400">(optional)</span>
+                      </label>
+                      <div className="relative">
+                        <Mail
+                          className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
+                          aria-hidden="true"
+                        />
+                        <input
+                          id="auth-phone-email"
+                          type="email"
+                          autoComplete="email"
+                          value={optionalLinkEmail}
+                          onChange={(e) => setOptionalLinkEmail(e.target.value)}
+                          placeholder="student@university.edu"
+                          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
+                        />
+                      </div>
+                    </div>
+                  )}
 
-              {(mode === 'signup' || mode === 'recovery') && (
-                <div>
-                  <label
-                    htmlFor="auth-confirm-password"
-                    className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
+                  {phoneOtpSent && (
+                    <div>
+                      <div className="mb-1.5 flex items-center justify-between">
+                        <label
+                          htmlFor="auth-phone-otp"
+                          className="block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
+                        >
+                          SMS verification code
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPhoneOtpSent(false);
+                            setPhoneOtpCode('');
+                            setErrorMsg(null);
+                          }}
+                          className="text-xs font-medium text-blue-600 hover:underline select-none dark:text-blue-400"
+                        >
+                          Change number
+                        </button>
+                      </div>
+                      <div className="relative">
+                        <ShieldCheck
+                          className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
+                          aria-hidden="true"
+                        />
+                        <input
+                          id="auth-phone-otp"
+                          type="text"
+                          inputMode="numeric"
+                          required
+                          autoComplete="one-time-code"
+                          value={phoneOtpCode}
+                          onChange={(e) => setPhoneOtpCode(e.target.value)}
+                          placeholder="Enter 6-digit code"
+                          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm tracking-wider text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="mt-2 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-60 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
                   >
-                    Confirm password
-                  </label>
-                  <div className="relative">
-                    <KeyRound
-                      className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
-                      aria-hidden="true"
-                    />
-                    <input
-                      id="auth-confirm-password"
-                      type={showPassword ? 'text' : 'password'}
-                      required
-                      minLength={8}
-                      autoComplete="new-password"
-                      value={confirmPassword}
-                      onChange={(e) => setConfirmPassword(e.target.value)}
-                      placeholder="Re-enter your password"
-                      className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
-                    />
-                  </div>
-                </div>
-              )}
+                    <span>
+                      {submitting
+                        ? 'Processing...'
+                        : !phoneOtpSent
+                          ? 'Send Verification Code'
+                          : mode === 'signup'
+                            ? 'Verify & Create Account'
+                            : 'Verify & Sign In'}
+                    </span>
+                    {!submitting && <ArrowRight className="h-4 w-4" aria-hidden="true" />}
+                  </button>
+                </>
+              ) : (
+                <>
+                  {mode !== 'recovery' && (
+                    <div>
+                      <label
+                        htmlFor="auth-email"
+                        className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
+                      >
+                        Academic or personal email
+                      </label>
+                      <div className="relative">
+                        <Mail
+                          className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
+                          aria-hidden="true"
+                        />
+                        <input
+                          id="auth-email"
+                          type="email"
+                          required
+                          autoComplete="email"
+                          value={email}
+                          onChange={(e) => setEmail(e.target.value)}
+                          placeholder="student@university.edu"
+                          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
+                        />
+                      </div>
+                    </div>
+                  )}
 
-              <button
-                type="submit"
-                disabled={submitting}
-                className="mt-2 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-60 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
-              >
-                <span>
-                  {submitting
-                    ? 'Processing...'
-                    : mode === 'signin'
-                      ? 'Sign In'
-                      : mode === 'signup'
-                        ? 'Create Account'
-                        : mode === 'forgot'
-                          ? 'Send Reset Link'
-                          : 'Update Password'}
-                </span>
-                {!submitting && <ArrowRight className="h-4 w-4" aria-hidden="true" />}
-              </button>
+                  {mode !== 'forgot' && (
+                    <div>
+                      <div className="mb-1.5 flex items-center justify-between">
+                        <label
+                          htmlFor="auth-password"
+                          className="block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
+                        >
+                          {mode === 'recovery' ? 'New password' : 'Password'}
+                        </label>
+                        {mode === 'signin' && (
+                          <button
+                            type="button"
+                            onClick={() => switchMode('forgot')}
+                            className="text-xs font-medium text-blue-600 hover:text-blue-700 select-none dark:text-blue-400 dark:hover:text-blue-300"
+                          >
+                            Forgot password?
+                          </button>
+                        )}
+                      </div>
+                      <div className="relative">
+                        <Lock
+                          className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
+                          aria-hidden="true"
+                        />
+                        <input
+                          id="auth-password"
+                          type={showPassword ? 'text' : 'password'}
+                          required
+                          minLength={mode === 'signin' ? 6 : 8}
+                          autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
+                          value={password}
+                          onChange={(e) => setPassword(e.target.value)}
+                          placeholder={mode === 'signin' ? 'Enter your password' : 'At least 8 characters'}
+                          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-10 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPassword((prev) => !prev)}
+                          aria-label={showPassword ? 'Hide password' : 'Show password'}
+                          className="absolute top-1/2 right-1.5 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-md text-slate-400 hover:text-slate-600 select-none dark:hover:text-slate-200"
+                        >
+                          {showPassword ? (
+                            <EyeOff className="h-4 w-4" aria-hidden="true" />
+                          ) : (
+                            <Eye className="h-4 w-4" aria-hidden="true" />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {(mode === 'signup' || mode === 'recovery') && (
+                    <div>
+                      <label
+                        htmlFor="auth-confirm-password"
+                        className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
+                      >
+                        Confirm password
+                      </label>
+                      <div className="relative">
+                        <KeyRound
+                          className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
+                          aria-hidden="true"
+                        />
+                        <input
+                          id="auth-confirm-password"
+                          type={showPassword ? 'text' : 'password'}
+                          required
+                          minLength={8}
+                          autoComplete="new-password"
+                          value={confirmPassword}
+                          onChange={(e) => setConfirmPassword(e.target.value)}
+                          placeholder="Re-enter your password"
+                          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="mt-2 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#0F1E3D] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#192F5D] disabled:opacity-60 select-none dark:bg-blue-600 dark:hover:bg-blue-500"
+                  >
+                    <span>
+                      {submitting
+                        ? 'Processing...'
+                        : mode === 'signin'
+                          ? 'Sign In'
+                          : mode === 'signup'
+                            ? 'Create Account'
+                            : mode === 'forgot'
+                              ? 'Send Reset Link'
+                              : 'Update Password'}
+                    </span>
+                    {!submitting && <ArrowRight className="h-4 w-4" aria-hidden="true" />}
+                  </button>
+                </>
+              )}
             </form>
 
             <div className="mt-5 border-t border-slate-100 pt-4 text-center text-sm text-slate-600 select-none dark:border-slate-800 dark:text-slate-400">

@@ -56,7 +56,9 @@ export function MaterialsLibraryView({
       anchor.rel = 'noopener noreferrer';
       document.body.appendChild(anchor);
       anchor.click();
-      anchor.remove();
+      window.setTimeout(() => {
+        anchor.remove();
+      }, 250);
     } catch (err: unknown) {
       setErrorMsg(sanitizeUserErrorMessage(err, 'downloading your file'));
     } finally {

@@ -1886,7 +1886,7 @@ export function QuizExamSystem({
                 Quiz Mode · Immediate Feedback · {activeQuiz.difficulty.toUpperCase()}
               </p>
               <h2 className="mt-0.5 truncate font-display text-base font-bold text-slate-900 select-none sm:text-lg dark:text-white">
-                {activeQuiz.title}
+                {stripSourceFilenameFromTitle(activeQuiz.title)}
               </h2>
             </div>
 

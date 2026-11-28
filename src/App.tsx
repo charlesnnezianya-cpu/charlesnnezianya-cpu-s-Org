@@ -77,7 +77,7 @@ function hasOAuthCallbackParams(): boolean {
 
 function BrainstineRoot() {
   const { user, profile, loading, isPasswordRecovery, oauthError } = useAuth();
-  const { setTheme } = useTheme();
+  const { theme, setTheme } = useTheme();
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authMode, setAuthMode] = useState<AuthModalMode>('signin');
   const [pendingSection, setPendingSection] = useState<DashboardSection | null>(() =>
@@ -207,11 +207,13 @@ function BrainstineRoot() {
         />
       )}
 
-      <AuthModal
-        isOpen={authModalOpen}
-        initialMode={authMode}
-        onClose={() => setAuthModalOpen(false)}
-      />
+      <div className={!user && !isPasswordRecovery && theme !== 'light' ? 'dark' : undefined}>
+        <AuthModal
+          isOpen={authModalOpen}
+          initialMode={authMode}
+          onClose={() => setAuthModalOpen(false)}
+        />
+      </div>
     </>
   );
 }

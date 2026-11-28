@@ -278,6 +278,243 @@ In Forex trading, the base currency is the first currency quoted in a pair while
   );
   console.log('Test 10 [Simple vs Comprehensive Depth Differentiation]: PASS');
 
+  // 11. Realistic Multi-Page Bloated PDF: True Condensation, Whole-Document Coverage, TOC/Footer Stripping & Cross-Page Synthesis
+  const multiPageBloatedPdf = `[Page 1]
+CS 402 Distributed Systems — Page 1
+Table of Contents
+1. Consensus Protocols ........................... 2
+2. Replication & Consistency ..................... 4
+3. Fault Tolerance & Closing Principles .......... 6
+
+## Consensus Protocols
+It is widely acknowledged in modern distributed computing that consensus protocols play a crucial role in order to allow independent server nodes to agree on a shared state despite network delays (see Fig. 1.1).
+Consensus protocols require a quorum of nodes to ratify state updates before any commitment becomes permanent across the cluster.
+Consensus protocols use leader election timers so that replica groups can recover swiftly due to the fact that hardware failures occur unpredictably.
+Soft hyphenated electro-\nmechanical clock skew and distri-\nbution latency can trigger split-brain elections when heartbeat packets arrive late across
+[Page 2]
+CS 402 Distributed Systems — Page 2
+partitioned data centers without synchronized leases.
+In this section we will discuss how Paxos and Raft coordinate cluster agreement.
+
+## Raft State Machine
+Raft is defined as a consensus algorithm designed for understandable replicated log management across server clusters.
+In Raft, a leader node manages all client write requests, whereas follower nodes passively replicate log entries and validate heartbeat signals.
+Step 1: When a follower stops receiving leader heartbeats, it increments its election term and transitions into a candidate state.
+Step 2: Candidates request votes from peer nodes and become the new leader once a majority quorum approves the election.
+
+[Page 3]
+CS 402 Distributed Systems — Page 3
+## Replication & Consistency
+It should be noted that synchronous replication facilitates strong consistency by waiting for quorum acknowledgment prior to confirming a write operation to the client (as discussed earlier).
+Strong consistency guarantees that every subsequent read operation observes the most recently committed write value across all replicas.
+Eventual consistency allows replicas to converge asynchronously in order to achieve lower write latency and higher availability during network partitions.
+
+[Page 4]
+CS 402 Distributed Systems — Page 4
+## CAP Tradeoffs
+Unlike strong consistency, eventual consistency prioritizes high availability over immediate read freshness when network partitions divide replicas.
+High replication factor increases read throughput across geographically distributed regions because nearby replicas serve local user queries directly.
+Wait-free quorum reads utilize version vectors to detect stale replica responses.
+
+[Page 5]
+CS 402 Distributed Systems — Page 5
+## Partition Recovery & Closing Principles
+It is important to note that Raft relies predominantly on majority quorums during partition recovery to prevent conflicting commits from coexisting in separate network halves.
+During partition healing, stale leaders with lower election terms step down automatically and reconcile uncommitted log entries from the authoritative majority leader.
+Write-ahead logging persists committed state transitions to durable storage before acknowledging completion, thereby ensuring crash recovery without data loss.
+For example, banking ledgers apply write-ahead logging together with Raft consensus to guarantee zero lost financial transactions after power failures.`;
+
+  const srcWordCount = multiPageBloatedPdf.split(/\s+/).filter(Boolean).length;
+  const distSimple = generateExtractiveSummary('Distributed_Systems_Notes.pdf', 'General Studies', multiPageBloatedPdf, 'short');
+  const distDetailed = generateExtractiveSummary('Distributed_Systems_Notes.pdf', 'General Studies', multiPageBloatedPdf, 'detailed');
+  const distComprehensive = generateExtractiveSummary('Distributed_Systems_Notes.pdf', 'General Studies', multiPageBloatedPdf, 'comprehensive');
+
+  assert.equal(distDetailed.subjectArea, 'Computer Science', 'Should infer Computer Science across full PDF');
+  assert.ok(distSimple.wordCount < srcWordCount * 0.5, `Simple summary (${distSimple.wordCount}w) must meaningfully condense source (${srcWordCount}w)`);
+  assert.ok(distDetailed.wordCount < srcWordCount * 0.78, `Detailed summary (${distDetailed.wordCount}w) must condense bloated source (${srcWordCount}w)`);
+  assert.ok(distComprehensive.wordCount < srcWordCount * 0.9, `Comprehensive summary (${distComprehensive.wordCount}w) must still be shorter than raw source (${srcWordCount}w)`);
+  assert.ok(distSimple.wordCount < distDetailed.wordCount, 'Simple must be more concise than Detailed');
+  assert.ok(distDetailed.wordCount <= distComprehensive.wordCount, 'Detailed must not exceed Comprehensive');
+
+  const distSimpleDump = JSON.stringify(distSimple);
+  const distDetailedDump = JSON.stringify(distDetailed);
+  const distCompDump = JSON.stringify(distComprehensive);
+
+  // Verify chrome, TOC dot-leaders, meta-filler, and bloated phrases are removed & hyphenations healed
+  assert.ok(!distCompDump.includes('CS 402 Distributed Systems —'), 'Normalized page header chrome must be stripped');
+  assert.ok(!distCompDump.includes('...........................'), 'TOC dot-leader lines must be stripped');
+  assert.ok(!distCompDump.includes('In this section we will discuss'), 'Meta-filler must be stripped');
+  assert.ok(!distSimpleDump.includes('due to the fact that'), 'Verbose phrasing must be condensed');
+  assert.ok(!distSimpleDump.includes('It is widely acknowledged'), 'Rhetorical openers must be stripped');
+  assert.ok(!distCompDump.includes('electro- mechanical') && !distCompDump.includes('distri- bution'), 'Soft hyphenated words must rejoin');
+  assert.ok(
+    distCompDump.includes('electromechanical') || distCompDump.includes('distribution'),
+    'Rejoined hyphenated technical words should remain intact when used'
+  );
+
+  // Verify whole-document reach: closing chapter on Page 5 must appear in ALL levels including Simple & Detailed
+  assert.ok(
+    distSimple.mainConcepts.some((c) => /Partition Recovery|Closing/i.test(c.heading)) ||
+      distSimpleDump.includes('Write-ahead logging') ||
+      distSimpleDump.includes('partition'),
+    'Simple summary must still incorporate closing pages of the document'
+  );
+  assert.ok(
+    distDetailed.mainConcepts.some((c) => /Partition Recovery|Closing/i.test(c.heading)),
+    'Detailed summary must cover closing chapter on Page 5'
+  );
+
+  // Verify cross-page sentence carry-over ("...when heartbeat packets arrive late across" + "partitioned data centers...")
+  assert.ok(
+    distCompDump.includes('partitioned data centers') || distDetailedDump.includes('partitioned data centers'),
+    'Cross-page split sentence must remain intact rather than broken into meaningless fragments'
+  );
+
+  // Verify Final Recap does NOT duplicate Key Takeaways verbatim with "Mastery Synthesis:"
+  assert.ok(
+    !(distDetailed.finalRecap || []).some((r) => r.startsWith('Mastery Synthesis:')),
+    'Final Recap must synthesize holistically instead of prefix-copying Key Takeaways'
+  );
+  if ((distDetailed.finalRecap?.length ?? 0) > 0 && distDetailed.keyTakeaways.length > 0) {
+    const overlap = distDetailed.finalRecap!.some((r) => distDetailed.keyTakeaways.includes(r));
+    assert.equal(overlap, false, 'Final Recap must not duplicate Key Takeaways');
+  }
+
+  // Verify plain-language clarification in Detailed/Comprehensive
+  assert.ok(
+    distDetailed.difficultConceptExplanations.length >= 1,
+    'Detailed summary should simplify dense technical concepts for students'
+  );
+
+  // Verify Simple uses everyday plain language simplifications
+  assert.ok(
+    !distSimpleDump.includes('utilizes') && !distSimpleDump.includes('facilitates'),
+    'Simple mode must replace dense academic words like utilizes/facilitates with clear student-friendly equivalents'
+  );
+  console.log(
+    `Test 11 [Multi-Page Condensation & Whole-Doc Synthesis]: PASS (src=${srcWordCount}w -> Simple=${distSimple.wordCount}w, Detailed=${distDetailed.wordCount}w, Comprehensive=${distComprehensive.wordCount}w)`
+  );
+
+  // 12. Cross-Section Relationship Detection Across Non-Adjacent Chapters
+  assert.ok(
+    distComprehensive.revisionNotes.some((n) => /Consensus|Raft/i.test(n) && /Partition|Replication/i.test(n)),
+    'Comprehensive summary should connect related concepts across non-adjacent sections (e.g. Raft/Consensus <-> Partition Recovery/Replication)'
+  );
+  console.log('Test 12 [Non-Adjacent Cross-Section Connections]: PASS');
+
+  // 13. Long Multi-Page Academic Textbook (1,200+ words): Strong Condensation Ratios & Multi-Concept Synthesis
+  const longTextbookPages: string[] = [];
+  const chapters = [
+    {
+      page: 1,
+      heading: 'Thermodynamics & Biological Energy',
+      paragraphs: [
+        'It is widely acknowledged in cellular biochemistry that living organisms obey the laws of thermodynamics while continuously exchanging energy and matter with their surrounding environment.',
+        'Gibbs free energy is defined as the portion of a thermodynamic system energy available to perform useful cellular work at constant temperature and pressure.',
+        'Gibbs Free Energy Equation: ΔG = ΔH - TΔS, where ΔG is free energy change, ΔH is enthalpy change, T is absolute temperature in Kelvin, and ΔS is entropy change.',
+        'Unlike endergonic reactions that require net energy input, exergonic reactions release free energy spontaneously with a negative ΔG value.',
+        'Metabolic pathways pair exergonic ATP hydrolysis with unfavorable biosynthetic reactions in order to drive cellular assembly forward reliably.',
+      ],
+    },
+    {
+      page: 2,
+      heading: 'Enzyme Kinetics & Catalysis',
+      paragraphs: [
+        'Enzymes are biological protein catalysts that accelerate biochemical reaction rates by lowering activation energy without being consumed in the overall chemical transformation.',
+        'There are two main types of enzyme inhibition: competitive inhibition and noncompetitive inhibition.',
+        'Competitive inhibition occurs when an inhibitor molecule closely resembles the natural substrate and binds directly to the active site.',
+        'Noncompetitive inhibition occurs when a regulatory molecule binds to an allosteric site away from the active site, altering enzyme conformation and reducing catalytic turnover.',
+        'For example, feedback inhibition regulates amino acid biosynthesis when the final pathway product binds allosterically to the first committed enzyme.',
+      ],
+    },
+    {
+      page: 3,
+      heading: 'Cellular Respiration Stages',
+      paragraphs: [
+        'In eukaryotic cells, aerobic cellular respiration systematically harvests chemical bond energy from glucose molecules across sequential metabolic compartments.',
+        'Step 1: Glycolysis splits one six-carbon glucose molecule into two three-carbon pyruvate molecules inside the cytosol while generating net ATP and NADH.',
+        'Step 2: Pyruvate oxidation and the citric acid cycle completely oxidize acetyl-CoA inside the mitochondrial matrix, releasing CO2 and loading electron carriers NADH and FADH2.',
+        'Step 3: Oxidative phosphorylation uses the mitochondrial electron transport chain to pump protons across the inner membrane and synthesize abundant ATP via ATP synthase.',
+        'Cellular Respiration Equation: C6H12O6 + 6O2 -> 6CO2 + 6H2O',
+      ],
+    },
+    {
+      page: 4,
+      heading: 'Membrane Transport & Electrochemical Gradients',
+      paragraphs: [
+        'Biological membranes consist of selectively permeable phospholipid bilayers embedded with transport proteins that regulate solute movement between compartments.',
+        'Passive diffusion moves nonpolar molecules down their concentration gradient without requiring metabolic ATP hydrolysis.',
+        'Active transport utilizes membrane ATPases or coupled ion gradients to pump solutes against an electrochemical gradient across the bilayer.',
+        'Whereas simple diffusion proceeds linearly with concentration difference, facilitated diffusion relies on carrier proteins that saturate at high solute concentrations.',
+        'Proton gradients generated during oxidative phosphorylation exemplify how membrane transport directly powers ATP synthesis in mitochondria.',
+      ],
+    },
+    {
+      page: 5,
+      heading: 'Metabolic Integration & Homeostasis',
+      paragraphs: [
+        'Cells coordinate catabolic breakdown and anabolic biosynthesis dynamically through allosteric feedback loops and energy-charge sensing.',
+        'High cellular ATP levels inhibit phosphofructokinase during glycolysis to prevent wasteful glucose consumption when energy reserves are already sufficient.',
+        'Conversely, elevated AMP signals low cellular energy and stimulates glycolytic enzymes as well as mitochondrial ATP synthase activity.',
+        'In addition, glycogen storage buffers blood glucose fluctuations across tissues by releasing glucose-1-phosphate during fasting intervals.',
+        'Together, enzyme regulation, Gibbs free energy coupling, and membrane proton gradients preserve metabolic homeostasis under changing physiological demands.',
+      ],
+    },
+    {
+      page: 6,
+      heading: 'Photosynthetic Coupling & Carbon Assimilation',
+      paragraphs: [
+        'Autotrophic organisms complement cellular respiration by capturing solar photons in thylakoid membranes to reduce atmospheric carbon dioxide into carbohydrates.',
+        'Chlorophyll pigments absorb red and blue wavelengths to excite photosystem electrons and split water molecules into molecular oxygen and protons.',
+        'Calvin cycle enzymes utilize ATP and NADPH generated by the light reactions to fix CO2 onto ribulose bisphosphate and assemble triose phosphates.',
+        'For example, agricultural crop productivity depends on balancing light-reaction electron flow with Calvin cycle carbon fixation efficiency under varying temperatures.',
+        'Ultimately, photosynthesis and cellular respiration form a global bioenergetic cycle linking solar radiation, oxygen exchange, and ATP turnover across ecosystems.',
+      ],
+    },
+  ];
+  for (const ch of chapters) {
+    longTextbookPages.push(`[Page ${ch.page}]`);
+    longTextbookPages.push('BIO 310 Molecular Bioenergetics — Page ' + ch.page);
+    longTextbookPages.push(`## ${ch.heading}`);
+    for (const p of ch.paragraphs) {
+      longTextbookPages.push(p);
+      // Add realistic textbook elaboration lines to exceed 1,200 words naturally
+      longTextbookPages.push(
+        `In addition, experimental studies in ${ch.heading.toLowerCase()} emphasize that quantitative measurements and molecular regulation remain essential for predicting cellular adaptation under variable environmental stress.`
+      );
+    }
+  }
+  const longTextbookRaw = longTextbookPages.join('\n');
+  const longSrcWords = longTextbookRaw.split(/\s+/).filter(Boolean).length;
+  assert.ok(longSrcWords >= 1000, `Test 13 source (${longSrcWords}w) must represent a dense 1,000+ word textbook`);
+
+  const longSimple = generateExtractiveSummary('Molecular_Bioenergetics_Text.pdf', 'General Studies', longTextbookRaw, 'short');
+  const longDetailed = generateExtractiveSummary('Molecular_Bioenergetics_Text.pdf', 'General Studies', longTextbookRaw, 'detailed');
+  const longComp = generateExtractiveSummary('Molecular_Bioenergetics_Text.pdf', 'General Studies', longTextbookRaw, 'comprehensive');
+
+  assert.equal(longDetailed.subjectArea, 'Biology');
+  assert.ok(longSimple.wordCount < longSrcWords * 0.32, `Long Simple (${longSimple.wordCount}w) must condense ${longSrcWords}w below 32%`);
+  assert.ok(longDetailed.wordCount < longSrcWords * 0.52, `Long Detailed (${longDetailed.wordCount}w) must condense ${longSrcWords}w below 52%`);
+  assert.ok(longComp.wordCount < longSrcWords * 0.72, `Long Comprehensive (${longComp.wordCount}w) must condense ${longSrcWords}w below 72%`);
+  assert.ok(longSimple.wordCount < longDetailed.wordCount && longDetailed.wordCount <= longComp.wordCount);
+  assert.ok(
+    longComp.formulasOrFrameworks.some((f) => f.expressionOrStructure.includes('ΔG = ΔH - TΔS')),
+    'Must preserve Gibbs free energy equation in long textbook'
+  );
+  assert.ok(
+    longDetailed.classificationsAndTypes && longDetailed.classificationsAndTypes.length >= 1,
+    'Must preserve enzyme inhibition classification'
+  );
+  assert.ok(
+    longSimple.mainConcepts.some((c) => /Photosynthetic|Homeostasis/i.test(c.heading)) ||
+      JSON.stringify(longSimple).includes('Calvin') ||
+      JSON.stringify(longSimple).includes('photosynthesis'),
+    'Simple summary of long textbook must still synthesize closing chapters'
+  );
+  console.log(
+    `Test 13 [1,000+ Word Textbook Condensation]: PASS (src=${longSrcWords}w -> Simple=${longSimple.wordCount}w, Detailed=${longDetailed.wordCount}w, Comprehensive=${longComp.wordCount}w)`
+  );
+
   console.log('[SummaryEngine Test Suite] Overall Status: ALL TESTS PASSED SUCCESSFULLY');
 }
 
