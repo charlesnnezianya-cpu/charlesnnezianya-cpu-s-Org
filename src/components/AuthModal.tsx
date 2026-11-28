@@ -1,21 +1,23 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   AlertCircle,
   ArrowRight,
   CheckCircle2,
+  ChevronDown,
   Eye,
   EyeOff,
   KeyRound,
   Lock,
   Mail,
   Phone,
-  ShieldCheck,
+  Search,
   User,
   X,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { sanitizeUserErrorMessage } from '../lib/apiClient';
 import { BrandLogo } from './BrandLogo';
+import { getAllCountries, validateAndFormatInternationalPhone, type CountryOption } from '../lib/phoneUtils';
 
 export type AuthModalMode = 'signin' | 'signup' | 'forgot' | 'recovery';
 type CredentialChannel = 'email' | 'phone';
@@ -33,8 +35,7 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
     pendingOauthUrl,
     signInWithEmail,
     signUpWithEmail,
-    requestPhoneOtp,
-    verifyPhoneOtp,
+    signUpWithPhone,
     signInWithGoogle,
     requestPasswordReset,
     updatePassword,
@@ -43,14 +44,19 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
     clearPendingOauthUrl,
   } = useAuth();
 
+  const countries = getAllCountries();
+  const [selectedCountry, setSelectedCountry] = useState<CountryOption>(
+    countries.find((c) => c.code === 'US') || countries[0]
+  );
+  const [countrySearchQuery, setCountrySearchQuery] = useState('');
+  const [showCountryDropdown, setShowCountryDropdown] = useState(false);
+  const countryDropdownRef = useRef<HTMLDivElement>(null);
+
   const [mode, setMode] = useState<AuthModalMode>(initialMode);
   const [channel, setChannel] = useState<CredentialChannel>('email');
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
-  const [phone, setPhone] = useState('');
-  const [optionalLinkEmail, setOptionalLinkEmail] = useState('');
-  const [phoneOtpCode, setPhoneOtpCode] = useState('');
-  const [phoneOtpSent, setPhoneOtpSent] = useState(false);
+  const [nationalPhone, setNationalPhone] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -60,18 +66,21 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
   const [resetSentTo, setResetSentTo] = useState<string | null>(null);
   const [recoveryComplete, setRecoveryComplete] = useState(false);
 
-  React.useEffect(() => {
+  useEffect(() => {
     setMode(initialMode);
     setChannel('email');
-    setPhoneOtpSent(false);
-    setPhoneOtpCode('');
     setErrorMsg(null);
     setVerificationSentTo(null);
     setResetSentTo(null);
     setRecoveryComplete(false);
+    setNationalPhone('');
+    setEmail('');
+    setDisplayName('');
+    setPassword('');
+    setConfirmPassword('');
   }, [initialMode, isOpen]);
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (!isOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -87,12 +96,20 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isOpen, mode, clearPasswordRecovery, clearOauthError, clearPendingOauthUrl, onClose]);
 
+  useEffect(() => {
+    const onClickOutside = (e: MouseEvent) => {
+      if (countryDropdownRef.current && !countryDropdownRef.current.contains(e.target as Node)) {
+        setShowCountryDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
+  }, []);
+
   if (!isOpen) return null;
 
   const switchMode = (next: AuthModalMode) => {
     setMode(next);
-    setPhoneOtpSent(false);
-    setPhoneOtpCode('');
     setErrorMsg(null);
     clearOauthError();
     clearPendingOauthUrl();
@@ -102,8 +119,6 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
 
   const switchChannel = (next: CredentialChannel) => {
     setChannel(next);
-    setPhoneOtpSent(false);
-    setPhoneOtpCode('');
     setErrorMsg(null);
     clearOauthError();
   };
@@ -119,38 +134,41 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
       return;
     }
 
-    if ((mode === 'signin' || mode === 'signup') && channel === 'phone') {
-      if (mode === 'signup' && (!displayName.trim() || displayName.trim().length < 2)) {
+    if (mode === 'signup' && channel === 'phone') {
+      if (!displayName.trim() || displayName.trim().length < 2) {
         setErrorMsg('Please enter your display name (at least 2 characters).');
+        return;
+      }
+      if (!email.trim() || !email.includes('@')) {
+        setErrorMsg('Please enter a valid email address for account verification.');
+        return;
+      }
+      const phoneValidation = validateAndFormatInternationalPhone(nationalPhone, selectedCountry.code);
+      if (!phoneValidation.isValid || !phoneValidation.e164) {
+        setErrorMsg(phoneValidation.error || 'Please enter a valid phone number.');
+        return;
+      }
+      if (password.length < 8) {
+        setErrorMsg('Password must be at least 8 characters long.');
+        return;
+      }
+      if (password !== confirmPassword) {
+        setErrorMsg('Passwords do not match. Please verify both fields.');
         return;
       }
 
       setSubmitting(true);
       try {
-        if (!phoneOtpSent) {
-          await requestPhoneOtp({
-            phone,
-            displayName: mode === 'signup' ? displayName : undefined,
-            mode,
-          });
-          setPhoneOtpSent(true);
+        const result = await signUpWithPhone({
+          email: email.trim(),
+          phone: phoneValidation.e164,
+          password,
+          displayName: displayName.trim(),
+        });
+        if (result.needsEmailVerification) {
+          setVerificationSentTo(email.trim());
         } else {
-          if (phoneOtpCode.trim().length < 4) {
-            setErrorMsg('Please enter the verification code sent to your phone.');
-            setSubmitting(false);
-            return;
-          }
-          const result = await verifyPhoneOtp({
-            phone,
-            token: phoneOtpCode,
-            displayName: mode === 'signup' ? displayName : undefined,
-            linkEmail: mode === 'signup' ? optionalLinkEmail : undefined,
-          });
-          if (result.emailVerificationPending && optionalLinkEmail.trim()) {
-            setVerificationSentTo(optionalLinkEmail.trim());
-          } else {
-            onClose();
-          }
+          onClose();
         }
       } catch (err: unknown) {
         setErrorMsg(sanitizeUserErrorMessage(err, 'sign in'));
@@ -160,9 +178,46 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
       return;
     }
 
+    if (mode === 'signin' && channel === 'phone') {
+      const phoneValidation = validateAndFormatInternationalPhone(nationalPhone, selectedCountry.code);
+      if (!phoneValidation.isValid || !phoneValidation.e164) {
+        setErrorMsg(phoneValidation.error || 'Please enter a valid phone number.');
+        return;
+      }
+      if (!password) {
+        setErrorMsg('Please enter your password.');
+        return;
+      }
+
+      setSubmitting(true);
+      try {
+        // Sign in with phone credential or email if stored
+        await signInWithEmail({ email: phoneValidation.e164, password });
+        onClose();
+      } catch (phoneErr: unknown) {
+        try {
+          if (email.trim() && email.includes('@')) {
+            await signInWithEmail({ email: email.trim(), password });
+            onClose();
+            return;
+          }
+          throw phoneErr;
+        } catch (err: unknown) {
+          setErrorMsg(sanitizeUserErrorMessage(err, 'sign in'));
+        }
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
+
     if (mode === 'signup') {
       if (!displayName.trim() || displayName.trim().length < 2) {
         setErrorMsg('Please enter your display name (at least 2 characters).');
+        return;
+      }
+      if (!email.trim() || !email.includes('@')) {
+        setErrorMsg('Please enter a valid email address.');
         return;
       }
       if (password.length < 8) {
@@ -241,6 +296,13 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
     clearPendingOauthUrl();
     onClose();
   };
+
+  const filteredCountries = countries.filter(
+    (c) =>
+      c.name.toLowerCase().includes(countrySearchQuery.toLowerCase()) ||
+      c.dialCode.includes(countrySearchQuery) ||
+      c.code.toLowerCase().includes(countrySearchQuery.toLowerCase())
+  );
 
   return (
     <div
@@ -466,7 +528,7 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
             )}
 
             <form onSubmit={handleSubmit} className="space-y-4">
-              {mode === 'signup' && (
+              {mode === 'signup' && channel === 'email' && (
                 <div>
                   <label
                     htmlFor="auth-display-name"
@@ -483,52 +545,135 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
                       id="auth-display-name"
                       type="text"
                       required
-                      disabled={channel === 'phone' && phoneOtpSent}
                       value={displayName}
                       onChange={(e) => setDisplayName(e.target.value)}
                       placeholder="e.g. Jordan Alvarez"
-                      className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
+                      className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
                     />
                   </div>
                 </div>
               )}
 
-              {(mode === 'signin' || mode === 'signup') && channel === 'phone' ? (
+              {mode === 'signup' && channel === 'phone' && (
+                <div>
+                  <label
+                    htmlFor="auth-phone-display-name"
+                    className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
+                  >
+                    Display name
+                  </label>
+                  <div className="relative">
+                    <User
+                      className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
+                      aria-hidden="true"
+                    />
+                    <input
+                      id="auth-phone-display-name"
+                      type="text"
+                      required
+                      value={displayName}
+                      onChange={(e) => setDisplayName(e.target.value)}
+                      placeholder="e.g. Jordan Alvarez"
+                      className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {channel === 'phone' ? (
                 <>
                   <div>
                     <label
-                      htmlFor="auth-phone"
+                      htmlFor="auth-national-phone"
                       className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
                     >
-                      Phone number (with country code)
+                      Phone number (worldwide)
                     </label>
-                    <div className="relative">
-                      <Phone
-                        className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
-                        aria-hidden="true"
-                      />
-                      <input
-                        id="auth-phone"
-                        type="tel"
-                        required
-                        disabled={phoneOtpSent}
-                        autoComplete="tel"
-                        value={phone}
-                        onChange={(e) => setPhone(e.target.value)}
-                        placeholder="+1 415 555 2671"
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
-                      />
+                    <div className="flex gap-2 relative">
+                      {/* Country Selector Dropdown */}
+                      <div className="relative" ref={countryDropdownRef}>
+                        <button
+                          type="button"
+                          onClick={() => setShowCountryDropdown((prev) => !prev)}
+                          className="flex h-11 items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 text-xs font-medium text-slate-800 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                        >
+                          <span className="text-base leading-none">{selectedCountry.flag}</span>
+                          <span>{selectedCountry.dialCode}</span>
+                          <ChevronDown className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                        </button>
+
+                        {showCountryDropdown && (
+                          <div className="absolute top-12 left-0 z-50 w-72 rounded-2xl border border-slate-200 bg-white p-2.5 shadow-xl dark:border-slate-700 dark:bg-[#0D162B]">
+                            <div className="relative mb-2">
+                              <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                              <input
+                                type="text"
+                                value={countrySearchQuery}
+                                onChange={(e) => setCountrySearchQuery(e.target.value)}
+                                placeholder="Search country or code..."
+                                className="w-full rounded-lg border border-slate-200 bg-slate-50 py-1.5 pr-3 pl-8 text-xs text-slate-900 focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                              />
+                            </div>
+                            <div className="max-h-56 overflow-y-auto space-y-0.5">
+                              {filteredCountries.map((c) => (
+                                <button
+                                  key={c.code}
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedCountry(c);
+                                    setShowCountryDropdown(false);
+                                    setCountrySearchQuery('');
+                                  }}
+                                  className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs text-left transition-colors ${
+                                    selectedCountry.code === c.code
+                                      ? 'bg-blue-50 font-semibold text-blue-700 dark:bg-blue-950/60 dark:text-blue-300'
+                                      : 'text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-2 truncate">
+                                    <span className="text-base">{c.flag}</span>
+                                    <span className="truncate">{c.name}</span>
+                                  </div>
+                                  <span className="font-mono text-slate-500 dark:text-slate-400">{c.dialCode}</span>
+                                </button>
+                              ))}
+                              {filteredCountries.length === 0 && (
+                                <p className="py-3 text-center text-xs text-slate-400">No countries found</p>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* National Phone Input */}
+                      <div className="relative flex-1">
+                        <Phone
+                          className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
+                          aria-hidden="true"
+                        />
+                        <input
+                          id="auth-national-phone"
+                          type="tel"
+                          required
+                          autoComplete="tel"
+                          value={nationalPhone}
+                          onChange={(e) => setNationalPhone(e.target.value)}
+                          placeholder="415 555 2671"
+                          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
+                        />
+                      </div>
                     </div>
                   </div>
 
-                  {mode === 'signup' && !phoneOtpSent && (
+                  {(mode === 'signup' || mode === 'signin') && (
                     <div>
                       <label
-                        htmlFor="auth-phone-email"
+                        htmlFor="auth-phone-linked-email"
                         className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
                       >
                         Email address{' '}
-                        <span className="font-normal text-slate-400">(optional)</span>
+                        {mode === 'signup' && <span className="text-red-500">*</span>}
+                        {mode === 'signin' && <span className="font-normal text-slate-400">(optional fallback)</span>}
                       </label>
                       <div className="relative">
                         <Mail
@@ -536,54 +681,85 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
                           aria-hidden="true"
                         />
                         <input
-                          id="auth-phone-email"
+                          id="auth-phone-linked-email"
                           type="email"
+                          required={mode === 'signup'}
                           autoComplete="email"
-                          value={optionalLinkEmail}
-                          onChange={(e) => setOptionalLinkEmail(e.target.value)}
+                          value={email}
+                          onChange={(e) => setEmail(e.target.value)}
                           placeholder="student@university.edu"
                           className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
                         />
                       </div>
+                      {mode === 'signup' && (
+                        <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                          We will send your account verification link to this email address.
+                        </p>
+                      )}
                     </div>
                   )}
 
-                  {phoneOtpSent && (
+                  <div>
+                    <label
+                      htmlFor="auth-phone-password"
+                      className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
+                    >
+                      Password
+                    </label>
+                    <div className="relative">
+                      <Lock
+                        className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
+                        aria-hidden="true"
+                      />
+                      <input
+                        id="auth-phone-password"
+                        type={showPassword ? 'text' : 'password'}
+                        required
+                        minLength={mode === 'signin' ? 6 : 8}
+                        autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder={mode === 'signin' ? 'Enter your password' : 'At least 8 characters'}
+                        className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-10 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword((prev) => !prev)}
+                        aria-label={showPassword ? 'Hide password' : 'Show password'}
+                        className="absolute top-1/2 right-1.5 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-md text-slate-400 hover:text-slate-600 select-none dark:hover:text-slate-200"
+                      >
+                        {showPassword ? (
+                          <EyeOff className="h-4 w-4" aria-hidden="true" />
+                        ) : (
+                          <Eye className="h-4 w-4" aria-hidden="true" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {mode === 'signup' && (
                     <div>
-                      <div className="mb-1.5 flex items-center justify-between">
-                        <label
-                          htmlFor="auth-phone-otp"
-                          className="block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
-                        >
-                          SMS verification code
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setPhoneOtpSent(false);
-                            setPhoneOtpCode('');
-                            setErrorMsg(null);
-                          }}
-                          className="text-xs font-medium text-blue-600 hover:underline select-none dark:text-blue-400"
-                        >
-                          Change number
-                        </button>
-                      </div>
+                      <label
+                        htmlFor="auth-phone-confirm-password"
+                        className="mb-1.5 block text-xs font-medium text-slate-700 select-none dark:text-slate-300"
+                      >
+                        Confirm password
+                      </label>
                       <div className="relative">
-                        <ShieldCheck
+                        <KeyRound
                           className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400"
                           aria-hidden="true"
                         />
                         <input
-                          id="auth-phone-otp"
-                          type="text"
-                          inputMode="numeric"
+                          id="auth-phone-confirm-password"
+                          type={showPassword ? 'text' : 'password'}
                           required
-                          autoComplete="one-time-code"
-                          value={phoneOtpCode}
-                          onChange={(e) => setPhoneOtpCode(e.target.value)}
-                          placeholder="Enter 6-digit code"
-                          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm tracking-wider text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
+                          minLength={8}
+                          autoComplete="new-password"
+                          value={confirmPassword}
+                          onChange={(e) => setConfirmPassword(e.target.value)}
+                          placeholder="Re-enter your password"
+                          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-3.5 pl-9.5 text-sm text-slate-900 select-text focus:border-blue-600 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-blue-500 dark:focus:bg-slate-900"
                         />
                       </div>
                     </div>
@@ -597,11 +773,9 @@ export function AuthModal({ isOpen, initialMode, onClose }: AuthModalProps) {
                     <span>
                       {submitting
                         ? 'Processing...'
-                        : !phoneOtpSent
-                          ? 'Send Verification Code'
-                          : mode === 'signup'
-                            ? 'Verify & Create Account'
-                            : 'Verify & Sign In'}
+                        : mode === 'signup'
+                          ? 'Create Account & Send Verification'
+                          : 'Sign In with Phone'}
                     </span>
                     {!submitting && <ArrowRight className="h-4 w-4" aria-hidden="true" />}
                   </button>

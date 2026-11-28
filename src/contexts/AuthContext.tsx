@@ -36,17 +36,12 @@ interface AuthContextValue {
     displayName: string;
   }) => Promise<{ needsEmailVerification: boolean }>;
   signInWithEmail: (params: { email: string; password: string }) => Promise<void>;
-  requestPhoneOtp: (params: {
+  signUpWithPhone: (params: {
+    email: string;
     phone: string;
-    displayName?: string;
-    mode: 'signin' | 'signup';
-  }) => Promise<void>;
-  verifyPhoneOtp: (params: {
-    phone: string;
-    token: string;
-    displayName?: string;
-    linkEmail?: string;
-  }) => Promise<{ emailVerificationPending: boolean }>;
+    password: string;
+    displayName: string;
+  }) => Promise<{ needsEmailVerification: boolean }>;
   signInWithGoogle: () => Promise<void>;
   requestPasswordReset: (email: string) => Promise<void>;
   updatePassword: (newPassword: string) => Promise<void>;
@@ -407,28 +402,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const requestPhoneOtp = async ({
+  const signUpWithPhone = async ({
+    email,
     phone,
+    password,
     displayName,
-    mode,
   }: {
+    email: string;
     phone: string;
-    displayName?: string;
-    mode: 'signin' | 'signup';
+    password: string;
+    displayName: string;
   }) => {
     const client = requireSupabase();
-    const normalizedPhone = normalizePhoneE164(phone);
-    if (normalizedPhone.length < 8) {
-      throw new Error('Please enter a valid phone number including country code (e.g. +14155552671).');
-    }
-
-    const { error } = await client.auth.signInWithOtp({
-      phone: normalizedPhone,
+    const redirectTo = window.location.origin;
+    const { data, error } = await client.auth.signUp({
+      email: email.trim(),
+      password,
       options: {
-        shouldCreateUser: mode === 'signup',
-        ...(mode === 'signup' && displayName?.trim()
-          ? { data: { display_name: displayName.trim() } }
-          : {}),
+        emailRedirectTo: redirectTo,
+        data: {
+          display_name: displayName.trim(),
+          phone: phone.trim(),
+        },
       },
     });
 
@@ -436,82 +431,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw new Error(
         formatFriendlyAuthError(
           error.message,
-          'We could not send a verification code to this phone number right now.'
-        )
-      );
-    }
-  };
-
-  const verifyPhoneOtp = async ({
-    phone,
-    token,
-    displayName,
-    linkEmail,
-  }: {
-    phone: string;
-    token: string;
-    displayName?: string;
-    linkEmail?: string;
-  }) => {
-    const client = requireSupabase();
-    const normalizedPhone = normalizePhoneE164(phone);
-    const { data, error } = await client.auth.verifyOtp({
-      phone: normalizedPhone,
-      token: token.trim(),
-      type: 'sms',
-    });
-
-    if (error) {
-      throw new Error(
-        formatFriendlyAuthError(
-          error.message,
-          'We could not verify that SMS code. Please check the digits and try again.'
+          'We could not create your account right now. Please try again.'
         )
       );
     }
 
-    let emailVerificationPending = false;
-    let activeSession = data.session;
-    let activeUser = data.user || data.session?.user || null;
-
-    if (activeUser && displayName?.trim() && !activeUser.user_metadata?.display_name) {
-      await client.auth
-        .updateUser({ data: { display_name: displayName.trim() } })
-        .catch(() => {});
+    if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+      throw new Error('An account with this email already exists. Please sign in instead.');
     }
 
-    // If user explicitly provided a real email address during phone registration, link it cleanly
-    const cleanEmail = linkEmail?.trim().toLowerCase() || '';
-    if (
-      activeUser &&
-      cleanEmail &&
-      /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) &&
-      !activeUser.email
-    ) {
-      try {
-        const { data: updatedData, error: linkErr } = await client.auth.updateUser({
-          email: cleanEmail,
-        });
-        if (!linkErr && updatedData.user) {
-          activeUser = updatedData.user;
-          if (!activeUser.email && updatedData.user.new_email) {
-            emailVerificationPending = true;
-          }
-          const refreshed = await client.auth.getSession();
-          if (refreshed.data.session) {
-            activeSession = refreshed.data.session;
-          }
-        }
-      } catch {
-        // Non-blocking: phone registration still succeeds even if linking email needs confirmation later
-      }
+    if (data.session?.user) {
+      await loadOrCreateProfile(data.session.user, data.session, 'signup');
+      return { needsEmailVerification: false };
     }
 
-    if (activeUser) {
-      await loadOrCreateProfile(activeUser, activeSession, 'phone_verified');
-    }
-
-    return { emailVerificationPending };
+    return { needsEmailVerification: true };
   };
 
   const signInWithGoogle = async () => {
@@ -678,8 +612,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         clearPendingOauthUrl: () => setPendingOauthUrl(null),
         signUpWithEmail,
         signInWithEmail,
-        requestPhoneOtp,
-        verifyPhoneOtp,
+        signUpWithPhone,
         signInWithGoogle,
         requestPasswordReset,
         updatePassword,
