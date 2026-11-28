@@ -49,6 +49,7 @@ import {
   resolveSubjectVisual,
 } from '../lib/educationalVisuals';
 import { AcademicContentRenderer } from './AcademicContentRenderer';
+import { notifyTutorReply } from '../lib/pushNotifications';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 import {
   SnapAttachmentPreview,
@@ -753,6 +754,10 @@ export function AiTutorWorkspace({
             [localId]: { sources: finalSources, ragMeta: finalRagMeta },
           }));
         }
+      }
+
+      if (replyText) {
+        notifyTutorReply(replyText, resolvedSessionId || undefined);
       }
     } catch (err: unknown) {
       if ((err as { name?: string })?.name === 'AbortError' && controller.signal.aborted) {

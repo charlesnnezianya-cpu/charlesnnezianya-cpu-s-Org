@@ -6,6 +6,7 @@ import { BrandLogo } from './components/BrandLogo';
 import { DashboardLayout } from './components/DashboardLayout';
 import { PrivacyPolicyPage } from './components/PrivacyPolicyPage';
 import { WelcomePage } from './components/WelcomePage';
+import { OfflineIndicator } from './components/OfflineIndicator';
 
 import type { DashboardSection } from './types/brainstine';
 
@@ -214,6 +215,8 @@ function BrainstineRoot() {
           onClose={() => setAuthModalOpen(false)}
         />
       </div>
+
+      <OfflineIndicator />
     </>
   );
 }

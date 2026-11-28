@@ -281,6 +281,10 @@ export function WelcomePage({ onOpenAuth, onNavigateToPrivacy }: WelcomePageProp
               )}
             </button>
 
+            <div className="hidden sm:inline-flex">
+              <PWAInstallButton compact />
+            </div>
+
             <button
               type="button"
               onClick={() => onOpenAuth('signin')}
@@ -368,6 +372,9 @@ export function WelcomePage({ onOpenAuth, onNavigateToPrivacy }: WelcomePageProp
                 >
                   Get Started
                 </button>
+              </div>
+              <div className="mt-2 pt-2">
+                <PWAInstallButton />
               </div>
             </nav>
           </div>

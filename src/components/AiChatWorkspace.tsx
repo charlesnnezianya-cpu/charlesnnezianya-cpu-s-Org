@@ -56,6 +56,7 @@ import type {
 } from '../types/brainstine';
 import { resolveSubjectVisual } from '../lib/educationalVisuals';
 import { stripUnsupportedDisplaySymbols } from '../lib/scientificFormatter';
+import { notifyChatbotReply } from '../lib/pushNotifications';
 import { AcademicContentRenderer } from './AcademicContentRenderer';
 import { ConfirmDeleteModal } from './ConfirmDeleteModal';
 import {
@@ -672,6 +673,10 @@ export function AiChatWorkspace({
             [localId]: { sources: finalSources, ragMeta: finalRagMeta },
           }));
         }
+      }
+
+      if (assistantReply) {
+        notifyChatbotReply(assistantReply, resolvedSessionId || undefined);
       }
     } catch (err: unknown) {
       if ((err as { name?: string })?.name === 'AbortError' && controller.signal.aborted) {

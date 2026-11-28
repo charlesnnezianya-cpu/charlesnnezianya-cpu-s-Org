@@ -421,7 +421,8 @@ export function DashboardLayout({
             </div>
           </div>
 
-          <div className="flex items-center gap-3 shrink-0">
+          <div className="flex items-center gap-2.5 shrink-0">
+            <PWAInstallButton compact />
             <ThemeSelector compact />
           </div>
         </header>

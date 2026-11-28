@@ -32,6 +32,7 @@ import {
   uploadMaterialFileToStorage,
 } from '../lib/supabase';
 import { stripSourceFilenameFromTitle } from '../lib/summarySanitizer';
+import { notifyDocumentSummaryCompleted } from '../lib/pushNotifications';
 import { evaluateVisualLearningNeeds } from '../lib/visualLearningEngine';
 import type {
   ExtractedDocumentSection,
@@ -886,6 +887,8 @@ export function StudySummarizer({
       if (user && isConfigured && savedRecordId && generated.visualAids && generated.visualAids.length > 0) {
         void updateStudySummaryVisuals(user.id, savedRecordId, generated.visualAids).catch(() => {});
       }
+
+      notifyDocumentSummaryCompleted(generated.title, savedRecordId || undefined);
     } catch (err: unknown) {
       if (generateSeq !== documentSessionSeqRef.current) return;
       setErrorMsg(
